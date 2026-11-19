@@ -43,7 +43,7 @@ class AppPickerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        dev.stagelab.android.core.stage.StageRuntime.attach(this)
+        dev.stagelab.android.stage.StageModeController.attach(this)
         val apps = loadLaunchableApps(this)
         setContent {
             StageLabTheme {
@@ -51,10 +51,10 @@ class AppPickerActivity : ComponentActivity() {
                     apps = apps,
                     onPick = { app ->
                         lifecycleScope.launch {
-                            dev.stagelab.android.core.stage.StageRuntime.openApp(
+                            dev.stagelab.android.stage.StageWorkspace.openApp(
                                 packageName = app.packageName,
-                                title = app.label,
-                                activity = app.activityName
+                                label = app.label,
+                                component = app.activityName
                             )
                             finish()
                         }

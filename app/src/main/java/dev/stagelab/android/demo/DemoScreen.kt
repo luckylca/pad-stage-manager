@@ -42,6 +42,10 @@ import kotlinx.coroutines.delay
 
 @Composable
 fun DemoScreen(mode: DemoMode) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context as? android.app.Activity
+    val taskId = activity?.taskId ?: -1
+    val pid = android.os.Process.myPid()
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = Color(0xFF101722)
@@ -56,7 +60,7 @@ fun DemoScreen(mode: DemoMode) {
                 style = MaterialTheme.typography.headlineMedium
             )
             Text(
-                text = "Dynamic task target • StageLab PoC",
+                text = "task=$taskId  pid=$pid  ·  StageLab live target",
                 color = Color(0xFF9AA8BC),
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -64,8 +68,38 @@ fun DemoScreen(mode: DemoMode) {
                 DemoMode.COUNTER -> CounterDemo()
                 DemoMode.MOTION -> MotionDemo()
                 DemoMode.SCROLL -> ScrollDemo()
+                DemoMode.VIDEO -> VideoDemo()
             }
         }
+    }
+}
+
+@Composable
+private fun VideoDemo() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("LOOPING VIDEO", color = Color(0xFF9ED8C8), fontSize = 12.sp)
+        androidx.compose.ui.viewinterop.AndroidView(
+            modifier = Modifier.fillMaxWidth().height(320.dp),
+            factory = { ctx ->
+                android.widget.VideoView(ctx).apply {
+                    val uri = android.net.Uri.parse(
+                        "android.resource://" + context.packageName + "/" + dev.stagelab.android.R.raw.demo_video
+                    )
+                    setVideoURI(uri)
+                    setOnPreparedListener { player ->
+                        player.isLooping = true
+                        player.setVolume(0f, 0f)
+                        start()
+                    }
+                }
+            }
+        )
+        Text(
+            "The video keeps playing while this task sits in the side rail.",
+            color = Color(0xFF9AA8BC),
+            fontSize = 11.sp
+        )
     }
 }
 

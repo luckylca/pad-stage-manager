@@ -26,9 +26,25 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        create("release") {
+            val store = rootProject.file("keystore/stagelab-release.jks")
+            if (store.exists()) {
+                storeFile = store
+                storePassword = "stagelab"
+                keyAlias = "stagelab"
+                keyPassword = "stagelab"
+            } else {
+                // Fall back to the debug key so a fresh clone can still produce a release APK.
+                initWith(getByName("debug"))
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }
@@ -44,6 +60,7 @@ dependencies {
 
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+    implementation(libs.kotlinx.coroutines.android)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)

@@ -8,7 +8,8 @@ import dev.stagelab.android.ui.StageLabTheme
 enum class DemoMode {
     COUNTER,
     MOTION,
-    SCROLL
+    SCROLL,
+    VIDEO
 }
 
 class DemoActivity : ComponentActivity() {

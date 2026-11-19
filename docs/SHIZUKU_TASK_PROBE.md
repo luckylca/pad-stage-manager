@@ -41,17 +41,24 @@ Android SDK 的公开 `android.jar` 不包含 `android.window.TaskOrganizer`。�
 
 Shizuku 授权仅表示应用获准使用 Shizuku API；Shell/Root 进程是否具有 `MANAGE_ACTIVITY_TASKS` 仍需独立检查。权限检查只是预检，真实 `registerOrganizer()` Binder 调用的结果才是决定性证据。Root UID 可能直接通过 Shizuku 的远端权限检查，但 OEM Binder/SELinux 行为仍须在设备上验证。
 
-## 当前验证状态
+## 当前验证状态（2026-11-19，OPPO Pad mini 实测）
 
-- [x] Windows Debug APK 编译成功。
+- [x] Windows Debug / Release APK 编译成功。
 - [x] AIDL、Shizuku Provider、UserService、TaskOrganizer observer 已纳入 APK 构建。
 - [x] 注册失败异常会返回到 UI；任务回调可以查询。
-- [ ] OPPO Pad mini 真机安装与 Shizuku 授权。
-- [ ] 真机 UID / SELinux / `MANAGE_ACTIVITY_TASKS` 实测。
-- [ ] 真机 `registerOrganizer()` 成功/失败原因。
-- [ ] 三个动态任务是否触发可解释的 TaskOrganizer 回调。
+- [x] 真机安装与 Shizuku 授权（Shizuku 13.6.0，服务由官方 starter 以 Shell 启动）。
+- [x] 真机 UID / SELinux / `MANAGE_ACTIVITY_TASKS` 实测：
+      `uid=2000(shell) selinux=u:r:shell:s0`，`MANAGE_ACTIVITY_TASKS: granted=true`。
+- [x] 真机 `registerOrganizer()`：**注册成功**，返回初始任务列表；回调可读。
+- [x] Android 17 的 `TaskOrganizer` 签名已核对，与 Android 16 AOSP 有三处差异：
+      `createRootTask(int,int,IBinder)`（无 boolean 重载）、`createTask(TaskCreationParams)`、
+      `onBackOnTaskRoot(RunningTaskInfo,boolean,boolean,boolean)`（原 `onBackPressedOnTaskRoot`）。
+      本仓库的编译桩与运行时探测均已按此更新。
+- [x] Shizuku UserService 进程 `dev.stagelab.android:stage-engine` 以 UID 2000 运行，
+      通过同一 `StageEngine` 完成真实的窗口创建、resize、focus、close。
 
-当前没有已连接的 Android 设备，因此不能声称 P1 真机验收已通过。
+结论：本机 Shell 权限足以支撑完整 Stage 功能，`TaskOrganizer` 嵌入路线不再是必需路径；
+默认实现改用系统 FREEFORM 任务（见 `DECISIONS.md` ADR-004）。
 
 ## 参考
 

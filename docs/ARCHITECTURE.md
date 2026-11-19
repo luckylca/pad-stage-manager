@@ -1,82 +1,155 @@
-# StageLab 架构说明
+# StageLab architecture
 
-## 1. 目标边界
+## 1. Product model
 
-StageLab 的核心对象是 Android 的真实 Task，而不是应用图标、UsageStats 记录或截图。
+StageLab is a **window compositor for real Android tasks**. The stage host does not draw other
+apps' pixels; it tells the system where each task window must be, and the system keeps compositing
+the live application surfaces on top of the stage host.
 
-理想状态下，多个 Task 保持运行，并将各自的实时 Surface 显示在 StageLab 的工作区布局中。切换主窗口时，只改变任务容器、边界、层级和焦点，不销毁或重新启动 Task。
+```
+┌───────────────────────────────────────────────┐
+│ WindowManager / SurfaceFlinger (system)       │
+│  ┌───────────────┐  ┌────────┐  ┌────────┐    │
+│  │ task 120 (A)  │  │ task121│  │ task122│    │   ← real app windows (FREEFORM)
+│  │ main frame    │  │ rail 1 │  │ rail 2 │    │
+│  └───────────────┘  └────────┘  └────────┘    │
+│  ┌───────────────────────────────────────────┐│
+│  │ StageLab MainActivity (fullscreen, NOT    ││   ← our chrome: desk, halos, dock, top bar
+│  │ FOCUSABLE, never raised above the tasks)  ││
+│  └───────────────────────────────────────────┘│
+└───────────────────────────────────────────────┘
+```
 
-## 2. 分层
+The stage host window is `FLAG_NOT_FOCUSABLE` while tasks are on screen. That single flag is what
+makes the model work: tapping the dock cannot raise the stage above the application windows, and
+the input focus, IME and key events stay with the staged application.
 
-    StageLab UI (Jetpack Compose)
-      ├─ Workspace / Sidebar / Task cards
-      ├─ Layout and transition state
-      └─ Diagnostics
-              |
-              v
-    Task Host
-      ├─ Live Surface host
-      ├─ Input / focus / IME coordination
-      └─ Transition coordinator
-              |
-              v
-    Task Backend contract
-      ├─ Public API backend
-      ├─ Shizuku / Shell backend
-      └─ KernelSU / Root backend (optional)
-              |
-              v
-    Android Window Manager / SurfaceFlinger
+When the stage is empty the flag is cleared so accessibility, Back and the IME behave normally.
 
-UI 不直接调用隐藏系统接口。所有后端必须报告自己真实具备的能力，不能用“Root 已授权”推断“任务窗口管理已可用”。
+## 2. Process and transport layout
 
-## 3. 权限层级
+| Component | Process | UID | Responsibility |
+|---|---|---|---|
+| `MainActivity`, `StageRuntime`, Compose UI | app | 10xxx | state, geometry, UI, persistence |
+| `StageCommandReceiver` | app | 10xxx | automation entry point for the device tests |
+| `StageTaskUserService` | `:stage-engine` (Shizuku UserService) | 2000 | AIDL facade over `StageEngine` |
+| `RootServiceMain` | `stagelab-root` (`app_process`) | 0 / 2000 | loopback JSON service over `StageEngine` |
+| `StageEngine`, `TaskMutations` | privileged process | 2000 / 0 | the actual task/window control |
 
-### Public API
+Transports (`core/ipc`):
 
-用于应用目录、启动 Intent、常规窗口和工作区 UI。UsageStats、悬浮窗、无障碍等特殊访问需要用户明确授权。该层不承诺能获取或托管其他应用的真实 Task Surface。
+* **`ShizukuChannel`** — `Shizuku.bindUserService` against `StageTaskUserService`, AIDL
+  `request(String json)`. Preferred tier because Shell holds `MANAGE_ACTIVITY_TASKS`.
+* **`RootChannel`** — the app opens an ephemeral loopback `ServerSocket`, then starts
+  `su -c 'CLASSPATH=<apk> app_process … RootServiceMain connect <port> <token>'`. The privileged
+  process connects back, authenticates with a one-shot token, and then speaks newline-delimited
+  JSON. No port is exposed to the network.
+* **`AdbChannel`** — the developer starts `RootServiceMain listen 39721` over ADB; the app connects
+  to loopback. Used for bring-up without installing anything.
 
-### ADB / Shizuku
+All transports carry the same JSON protocol, so `StageEngine` has exactly one implementation of
+task control. The app is the source of truth for *which* windows exist; the service only performs
+mutations and reports the system task list. That is why a service restart does not destroy the
+user's stage.
 
-作为首个系统级 PoC 路径。先验证 Shell UID 是否拥有目标权限，并通过最小 Binder 探针确认系统服务实际接受请求。
+## 3. Why FREEFORM tasks and not reparented surfaces
 
-Shizuku 是身份/IPC 桥接，不是权限提升到任意 signature 权限的通行证。不同 Android/OEM 构建的权限分配可能不同。
+The AOSP `TaskOrganizer` / `SurfaceControl` embedding route was evaluated first (see
+`docs/SHIZUKU_TASK_PROBE.md` and `docs/DECISIONS.md`). Registering a `TaskOrganizer` from Shell
+works, and it hands you each task's leash, but:
 
-### KernelSU Root
+* the leash lives in WindowManager's hierarchy; reparenting it into an app `SurfaceView` gives you
+  the picture but **not the input** — touch hit-testing still uses the task's WM bounds;
+* the organizer becomes responsible for visibility and geometry of every task it adopts, which
+  makes a naive registration effectively "steal" the windows from the system shell organizer;
+* IME, focus and Back routing would all have to be re-implemented on top of injected events.
 
-仅在 Shell 路径被系统权限明确阻断后研究。Root 可用于受控的特权桥接或进一步系统集成研究，但 uid=0 不自动满足 signature|recents 权限检查。任何系统分区修改、系统签名或框架 Hook 都必须作为单独的高风险方案评估，不能混入基础应用。
+Instead StageLab uses what WindowManager already does best: real tasks with real windows.
+`IActivityTaskManager` gives us the four operations the product needs:
 
-## 4. 实时画面与动画
+| Operation | Binder call | Permission |
+|---|---|---|
+| enumerate tasks | `getTasks(int,boolean,boolean,int)` | `REAL_GET_TASKS` |
+| start a task in FREEFORM with bounds | `startActivityAsUser(..., ActivityOptions)` | normal launch + `MANAGE_ACTIVITY_TASKS` for bounds/windowing mode |
+| move / resize | `resizeTask(int,Rect,int)` | `MANAGE_ACTIVITY_TASKS` |
+| focus | `setFocusedTask(int)` | `MANAGE_ACTIVITY_TASKS` |
+| close | `removeTask(int)` | `REMOVE_TASKS` |
+| hide / windowing mode | `IWindowOrganizerController.applyTransaction(WindowContainerTransaction)` | `MANAGE_ACTIVITY_TASKS` |
 
-静态截图和 MediaProjection 仅可用于诊断/兼容性回退，不满足“多个后台应用画面持续更新”的核心要求。
+Because the windows are ordinary system windows, **input, IME, Back, accessibility, media and
+WebView keep working** without any translation layer.
 
-目标方向是由系统任务组织接口提供 Task leash / SurfaceControl，再将真实任务 Surface 放入可控的宿主容器。动画应尽量在 Surface 层与 UI 布局层同步，避免先动画截图、再替换真实窗口造成闪烁。
+## 4. Hidden API strategy
 
-待验证事项：
+The Android SDK does not expose `ActivityTaskManager`, `RunningTaskInfo.token`,
+`WindowContainerTransaction`, `TaskOrganizer`, etc. StageLab does **not** link against version
+specific stubs for those:
 
-- 任务组织接口是否可由 Shell 调用。
-- Task leash 的生命周期与重挂载规则。
-- SurfaceControl transaction 的权限与同步时序。
-- 宿主 Surface 销毁/重建时的恢复。
-- 多任务同时可见是否真的保持持续绘制。
-- 触摸命中、输入焦点、IME、无障碍和窗口 Insets。
-- FLAG_SECURE、DRM、PiP、旋转及不支持 resize 的应用行为。
+* `HiddenApi` resolves classes, methods and fields **by name at runtime** and caches them;
+* the only compile-time stub is `android.window.TaskOrganizer` (needed to subclass it for the
+  organizer probe). Its signatures are generated from AOSP and verified on the device — see
+  `docs/DEVICE_NOTES.md` for the exact Android 17 signature set, including the changed
+  `createRootTask(int,int,IBinder)` and `onBackOnTaskRoot(...)`;
+* every failure surfaces as a named `HiddenApiException` in the diagnostics screen, so an OEM
+  change shows up as "Method not found: X" instead of a crash.
 
-## 5. 任务状态模型
+## 5. Stage geometry
 
-建议后续使用显式状态机：
+`StageLayoutEngine` computes pure rectangles in pixels from dp:
 
-- Discovered：发现任务。
-- Organizing：正在请求系统组织。
-- Hosted：真实 Surface 已挂入宿主。
-- Focused：当前输入焦点任务。
-- Backgrounded：不在主焦点，但仍在工作区。
-- Detaching：从宿主移除。
-- Unavailable：系统拒绝或任务不兼容。
-- Destroyed：任务结束。
+* portrait: 14 dp margin, 84 dp dock, 232 dp rail, 66 dp top chrome reserve;
+* landscape: 18 dp margin, 66 dp dock, 244 dp rail;
+* the rail is wider than the system's 220 dp minimum freeform width, so `resizeTask` is not clamped;
+* rail capacity is derived from the available height and the minimum slot height (`226 dp`);
+  windows beyond the capacity are **parked** at the main rectangle (alive, covered, one tap away).
 
-状态必须由系统回调和实际 Surface 生命周期驱动，不能仅凭 UI 点击推断成功。
+`StageRuntime.applyLayout` diffs the target rectangle against the last applied one, so the polling
+loop never spams WindowManager.
 
-## 6. 模块化策略
+## 6. State loop
 
-PoC 阶段保持单 Android app module，包结构按职责拆分。只有在 TaskOrganizer/Surface 路径验证后，再拆成独立 Gradle modules，避免过早建立大量空模块。
+```
+                ┌───────────┐  state (450 ms)   ┌──────────────┐
+ privileged ───▶│  getTasks │──────────────────▶│ StageRuntime │
+   service      └───────────┘                    │  reconcile   │
+                                                 │  promote     │
+   ▲   bounds / focus / close / open             │  park        │
+   └─────────────────────────────────────────────┤  applyLayout │
+                                                 └──────┬───────┘
+                                                        │ StateFlow
+                                                        ▼
+                                                  Compose stage
+```
+
+Reconciliation rules:
+
+* a stored window is matched by task id first;
+* if the id is gone, a FREEFORM task whose top activity matches the stored component is adopted
+  (this survives a service restart, and cannot hijack the stage host);
+* otherwise the window is marked `alive=false` and the dock offers “点击恢复”.
+
+## 7. Failure handling
+
+| Failure | Behaviour |
+|---|---|
+| UserService / root service dies | transport dropped, reconnect with 0.5 s → 5 s backoff, windows and geometry restored from the persisted list |
+| stage host process dies | window list persisted in `SharedPreferences`; tasks die with the process and are shown as closed |
+| app window closed by the user | detected on the next poll, chip shows “已关闭 · 点击恢复” |
+| task hidden by a fullscreen activity (picker) | `ensureVisible()` re-focuses the windows in reverse order, main last |
+| WM clamps a window | logged (`WM adjusted … requested … got …`), layout keeps the requested slot |
+
+## 8. Test hooks
+
+`StageCommandReceiver` accepts `dev.stagelab.android.CMD` broadcasts:
+
+```powershell
+adb shell am broadcast -n dev.stagelab.android/.core.StageCommandReceiver `
+  -a dev.stagelab.android.CMD --es cmd demo
+adb shell am broadcast ... --es cmd closeAll
+adb shell am broadcast ... --es cmd reflow
+adb shell am broadcast ... --es cmd state      # prints the stage JSON into logcat -s StageCmd
+adb shell am broadcast ... --es cmd open --es package com.coloros.note --es title 便签
+```
+
+`scripts/device-smoke-test.ps1` drives the whole acceptance scenario with these commands and
+verifies live surfaces by comparing two screenshots pixel by pixel.

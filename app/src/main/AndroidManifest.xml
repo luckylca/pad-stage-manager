@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Window chrome (title bars / resize grips) floats above the real application tasks. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
         <intent>
@@ -27,47 +29,9 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!-- OFF: the only product entry point, a single switch. -->
         <activity
-            android:name=".shizuku.ShizukuProbeActivity"
-            android:exported="false"
-            android:resizeableActivity="true" />
-
-        <activity
-            android:name=".ui.DiagnosticsActivity"
-            android:exported="true"
-            android:excludeFromRecents="true"
-            android:taskAffinity="dev.stagelab.android.utility"
-            android:resizeableActivity="true" />
-
-        <activity
-            android:name=".ui.AppPickerActivity"
-            android:exported="true"
-            android:excludeFromRecents="true"
-            android:taskAffinity="dev.stagelab.android.utility"
-            android:resizeableActivity="true"
-            android:theme="@style/Theme.StageLab" />
-
-        <!-- Test targets: real tasks with live, continuously changing content. -->
-        <activity
-            android:name=".demo.DemoActivity"
-            android:exported="true"
-            android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode|keyboardHidden"
-            android:taskAffinity="dev.stagelab.android.demo" />
-
-        <!-- Deliberately exported: the on-device test script drives the stage over ADB.
-             It only accepts stage commands (open/close/reflow/state) for this app's own UI. -->
-        <receiver
-            android:name=".core.StageCommandReceiver"
-            android:exported="true"
-            tools:ignore="ExportedReceiver">
-            <intent-filter>
-                <action android:name="dev.stagelab.android.CMD" />
-            </intent-filter>
-        </receiver>
-
-        <activity
-            android:name=".MainActivity"
+            android:name=".control.ControlActivity"
             android:exported="true"
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode|keyboardHidden"
@@ -77,5 +41,52 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- ON: the stage workspace (desk, recent-group rail, dock). -->
+        <activity
+            android:name=".stage.StageHostActivity"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode|keyboardHidden"
+            android:launchMode="singleTask" />
+
+        <activity
+            android:name=".ui.AppPickerActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="dev.stagelab.android.utility"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.StageLab" />
+
+        <!-- Kept for maintenance runs; not reachable from the product UI. -->
+        <activity
+            android:name=".ui.DiagnosticsActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="dev.stagelab.android.utility"
+            android:resizeableActivity="true" />
+
+        <activity
+            android:name=".shizuku.ShizukuProbeActivity"
+            android:exported="false"
+            android:resizeableActivity="true" />
+
+        <!-- Test targets: real tasks with live, continuously changing content. -->
+        <activity
+            android:name=".demo.DemoActivity"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode|keyboardHidden"
+            android:taskAffinity="dev.stagelab.android.demo" />
+
+        <!-- Deliberately exported: the on-device test script drives the stage over ADB. -->
+        <receiver
+            android:name=".core.StageCommandReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="dev.stagelab.android.CMD" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

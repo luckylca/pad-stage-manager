@@ -260,6 +260,29 @@ class TaskMutations {
             .let { "wct.setWindowingMode($taskId,$windowingMode)" }
     }
 
+    /** Parked (rail preview) windows must not take focus when the user taps them. */
+    fun setTaskFocusable(taskId: Int, focusable: Boolean): String {
+        val token = requireToken(taskId)
+        return applyWct { wct: Any -> HiddenApi.invoke(wct, "setFocusable", token, focusable) }
+            .let { "wct.setFocusable($taskId,$focusable)" }
+    }
+
+    /**
+     * Moves a task to the bottom of its display area. The stage host (a full screen, opaque task
+     * launched before the stage windows) then covers it: minimized windows stay alive but invisible.
+     */
+    fun sendToBack(taskId: Int): String {
+        val token = requireToken(taskId)
+        val reordered = runCatching {
+            applyWct { wct: Any -> HiddenApi.invoke(wct, "reorder", token, false) }
+            "wct.reorder($taskId,false)"
+        }
+        if (reordered.isSuccess) return reordered.getOrThrow()
+        // Fallback: hide through WindowContainerTransaction.
+        return applyWct { wct: Any -> HiddenApi.invoke(wct, "setHidden", token, true) }
+            .let { "wct.setHidden($taskId,true)" }
+    }
+
     fun enableFreeformGlobally(): String {
         val results = ArrayList<String>()
         for ((key, value) in listOf(

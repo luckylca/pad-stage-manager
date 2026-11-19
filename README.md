@@ -1,33 +1,45 @@
 # StageLab — an iPad style Stage Manager for Android
 
-StageLab turns an Android tablet into a real multi-window stage: several applications run as
-genuine Android tasks at the same time, each window is a live system surface, and the dock can
-move, resize, promote, park and close them.
+StageLab is a **mode switch**: off, the app is one switch; on, it becomes a full Stage Manager
+workspace with a recent-groups rail on the left, free floating application windows in the middle and
+an iPad style dock at the bottom.
 
 It is **not** a launcher with screenshots. There is no MediaProjection, no WebView fake, no
-periodic bitmap capture. Every window you see is the app's own `Surface` composited by
-SurfaceFlinger, arranged by `WindowManager`.
+periodic bitmap capture. Every window, including the rail previews, is a real Android task surface
+composited by SurfaceFlinger.
 
 Verified on **OPPO Pad mini (OPD2515)**, ColorOS 17.0.0.103, Android 17 / SDK 37, 1680×2520 @ 120 Hz.
 
-| | |
+| OFF | ON |
 |---|---|
-| ![portrait stage](docs/final-stage.png) | ![landscape stage](docs/land5.png) |
+| ![off](docs/m1-control.png) | ![on](docs/m2-windows.png) |
 
-## What works today
+| recent-group rail (live preview) | drag / resize chrome |
+|---|---|
+| ![rail](docs/m2-rail.png) | ![drag](docs/m4-drag.png) |
 
-* **Three or more real tasks on screen at once** (FREEFORM windowing mode, system managed).
-* **Live side previews** — the rail windows are the real tasks, continuously updating
-  (measured: 19.9 %, 7.0 %, 1.9 % of pixels change per 1.5 s).
-* **Focus switching without restarting** — tapping a preview promotes it to the main frame, the
-  previous main window moves to the rail, and Android task ids are unchanged.
-* **Move / resize / close / reopen / park** any staged window.
-* **Portrait and landscape** layouts, recomputed on rotation.
-* **IME works** inside a staged window (the keyboard belongs to the focused task, not to StageLab).
-* **Self healing** — if the privileged service dies, the stage reconnects with backoff and restores
-  the window set and geometry.
-* **Persistence** — the window list survives process death; missing tasks are shown as
-  “已关闭 · 点击恢复”.
+## Product model
+
+* **OFF** — a single switch, a status line, and (only on first use) the Shizuku grant. No task
+  list, no diagnostics, no developer buttons.
+* **ON** — immersive workspace: left recent-group rail with live previews, overlapping real app
+  windows with traffic-light title bars, bottom dock with real app icons.
+* Turning the mode off restores every staged task to full screen and leaves the user on the
+  foreground application; no app is killed, and the global settings StageLab changed are restored
+  (only if the user did not change them meanwhile).
+
+## What works today (device verified)
+
+* **Multiple real tasks on screen at once**, freely positioned and overlapping.
+* **Live rail previews** — the rail tiles are the real parked task windows, not screenshots.
+* **Groups** — create a group, switch groups from the rail, each group keeps its own windows and
+  geometry, persisted across restarts.
+* **Real gestures** — drag a window by its title bar, resize from the corner/edges, minimize
+  (traffic light), restore from the minimized tray, close, tap a dock icon to open.
+* **Native input / IME / Back** stay with the application: the chrome is a thin overlay, everything
+  else is the app's own window.
+* **Self healing** — dropped Shizuku UserService reconnects with backoff; orphan tasks are adopted
+  instead of duplicating windows.
 
 ## Permission tiers
 
@@ -35,9 +47,9 @@ StageLab always tries the lowest privilege that can do the job.
 
 | Tier | Requirement | What it can do |
 |---|---|---|
-| Level 1 | nothing | launch apps, show the stage chrome, list installed apps. Cannot host or arrange other apps' tasks (platform restriction). |
-| Level 2 | **Shizuku** (Shell UID 2000) | full stage: create FREEFORM tasks, resize/move/focus/close them, live previews, IME. |
-| Level 3 | **KernelSU / root** | same engine running as UID 0. Requires KernelSU to allow `su` for StageLab; see the capability matrix. |
+| Level 1 | nothing | launch apps, show the chrome. Cannot host or arrange other apps' tasks (platform restriction). |
+| Level 2 | **Shizuku** (Shell UID 2000) | full stage: create FREEFORM tasks, move/resize/focus/close them, live previews, IME. |
+| Level 3 | **KernelSU / root** | same engine running as UID 0. Requires KernelSU to allow `su` for StageLab. |
 
 The privileged engine is identical for every tier — only the transport differs
 (Shizuku UserService / KernelSU `app_process` service / ADB loopback service).

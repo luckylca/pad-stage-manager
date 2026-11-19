@@ -49,6 +49,9 @@ object StageEngine {
                 "close" -> close(command)
                 "hide" -> setHidden(command, true)
                 "show" -> setHidden(command, false)
+                "focusable" -> setFocusable(command)
+                "windowMode" -> setWindowMode(command)
+                "toBack" -> sendToBack(command)
                 "closeAll" -> closeAll()
                 "freeformOn" -> JSONObject().put("result", tasks.enableFreeformGlobally())
                 "organizerProbe" -> organizerProbe()
@@ -71,7 +74,8 @@ object StageEngine {
     // ------------------------------------------------------------------ commands
 
     private fun hello(): JSONObject {
-        tasks.enableFreeformGlobally()
+        // Note: `hello` deliberately does NOT touch global settings. The Stage Manager mode
+        // controller records the original values and is the only place allowed to change them.
         tasks.refreshTokens()
         return JSONObject()
             .put("identity", RuntimeIdentity.describe())
@@ -189,6 +193,30 @@ object StageEngine {
         val taskId = resolveTaskId(command)
         tasks.setTaskVisible(taskId, !hidden)
         return JSONObject().put("taskId", taskId).put("hidden", hidden)
+    }
+
+    private fun setFocusable(command: JSONObject): JSONObject {
+        val taskId = resolveTaskId(command)
+        val focusable = command.optBoolean("focusable", true)
+        tasks.setTaskFocusable(taskId, focusable)
+        return JSONObject().put("taskId", taskId).put("focusable", focusable)
+    }
+
+    private fun setWindowMode(command: JSONObject): JSONObject {
+        val taskId = resolveTaskId(command)
+        val mode = command.getInt("mode")
+        tasks.setWindowingMode(taskId, mode)
+        return JSONObject().put("taskId", taskId).put("mode", mode)
+    }
+
+    /**
+     * Sends a task behind the stage host, which is how "minimize" is implemented: the task keeps
+     * running and keeps its state, but the opaque host covers it.
+     */
+    private fun sendToBack(command: JSONObject): JSONObject {
+        val taskId = resolveTaskId(command)
+        tasks.sendToBack(taskId)
+        return JSONObject().put("taskId", taskId)
     }
 
     private fun closeAll(): JSONObject {

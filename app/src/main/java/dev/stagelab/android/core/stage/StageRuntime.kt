@@ -1,4 +1,4 @@
-﻿package dev.stagelab.android.core.stage
+package dev.stagelab.android.core.stage
 
 import android.content.Context
 import android.util.Log
@@ -518,6 +518,59 @@ object StageRuntime {
         val reply = call(transport, JSONObject().put("cmd", "shell").put("command", command))
         return if (reply.optBoolean("ok")) reply.optJSONObject("data")?.optString("result").orEmpty()
         else "失败: " + reply.optString("error")
+    }
+
+    /**
+     * Sends an arbitrary engine command and returns its `data` object.
+     *
+     * The workspace layer (groups, free geometry, overlay chrome) uses this directly instead of the
+     * legacy fixed layout in this class, so both features can coexist without fighting.
+     */
+    suspend fun command(command: JSONObject): JSONObject {
+        val transport = channel ?: throw ChannelException("未连接特权后端")
+        val reply = try {
+            call(transport, command)
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            // Transport failure only (process died / binder gone): reconnect once and retry.
+            val previous = if (kind != BackendKind.NONE) kind else lastBackend
+            dropChannel()
+            val reconnected = connectInternal(previous, false)
+            if (reconnected.isFailure) throw t
+            call(channel ?: throw ChannelException("未连接特权后端"), command)
+        }
+        if (!reply.optBoolean("ok")) {
+            throw ChannelException(reply.optString("error").ifBlank { "engine call failed" })
+        }
+        return reply.optJSONObject("data") ?: JSONObject()
+    }
+
+    data class TaskSnapshot(
+        val taskId: Int,
+        val windowingMode: Int,
+        val visible: Boolean,
+        val focused: Boolean,
+        val topActivity: String,
+        val bounds: StageRect?
+    )
+
+    /** Current system task list, already reconciled through the privileged backend. */
+    suspend fun tasks(): List<TaskSnapshot> {
+        val data = command(JSONObject().put("cmd", "state"))
+        val array = data.optJSONArray("tasks") ?: return emptyList()
+        val result = ArrayList<TaskSnapshot>(array.length())
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            result += TaskSnapshot(
+                taskId = item.optInt("taskId"),
+                windowingMode = item.optInt("windowingMode"),
+                visible = item.optBoolean("visible"),
+                focused = item.optBoolean("focused"),
+                topActivity = item.optString("topActivity"),
+                bounds = StageRect.from(item.optJSONObject("bounds"))
+            )
+        }
+        return result
     }
 
     // ------------------------------------------------------------------ state + geometry

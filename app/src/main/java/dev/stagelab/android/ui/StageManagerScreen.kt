@@ -425,6 +425,7 @@ private fun WindowChip(
                 when {
                     !window.alive -> "已关闭 · 点击恢复"
                     focused -> "主窗口 · task ${window.taskId}"
+                    !window.visible -> "已停放 · 点击切到主窗口"
                     else -> "预览 · task ${window.taskId}"
                 },
                 color = Muted,

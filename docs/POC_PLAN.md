@@ -1,5 +1,9 @@
 # 实时 Task Surface PoC 计划
 
+> **状态（2026-11-19）**：P0–P5 的核心目标已在 OPPO Pad mini 真机完成并通过自动化验收
+> （见 `docs/TEST_REPORT.md`）。本文件保留为当时的计划与验收标准记录；实际实现路线与偏差见
+> `docs/DECISIONS.md`（ADR-004：采用系统 FREEFORM 任务而不是 reparent Surface）。
+
 ## 验收目标
 
 在 OPPO Pad mini 上同时展示至少三个独立 Android Task 的真实活动画面。计数器持续变化、运动图形持续运动、滚动列表可交互。点击某个窗口后，该 Task 能成为主窗口；其他 Task 不应因切换而被销毁或重新启动。

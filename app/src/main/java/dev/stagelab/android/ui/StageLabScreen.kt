@@ -40,7 +40,8 @@ import dev.stagelab.android.demo.DemoMode
 fun StageLabScreen(
     deviceProfile: DeviceProfile,
     backendReport: BackendReport,
-    onOpenDemo: (DemoMode) -> Unit
+    onOpenDemo: (DemoMode) -> Unit,
+    onOpenShizukuProbe: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -55,6 +56,7 @@ fun StageLabScreen(
             item { LiveSurfaceStatusCard() }
             item { DeviceProfileCard(deviceProfile) }
             item { BackendSection(backendReport) }
+            item { ShizukuProbeEntry(onClick = onOpenShizukuProbe) }
             item { DemoTargetsSection(onOpenDemo) }
             item { NextStepsCard() }
             item {
@@ -163,6 +165,23 @@ private fun Metric(label: String, value: String) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text(label, color = Color(0xFF758194), style = MaterialTheme.typography.labelSmall)
         Text(value, color = Color(0xFFE8EDF5), style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun ShizukuProbeEntry(onClick: () -> Unit) {
+    SectionCard(
+        title = "SHIZUKU / SHELL TASK PROBE",
+        subtitle = "Verify the actual privileged process and TaskOrganizer registration on this device"
+    ) {
+        Text(
+            text = "This probe does not move tasks or change window bounds. It checks the Shell/Root identity, MANAGE_ACTIVITY_TASKS permission, and TaskOrganizer callbacks.",
+            color = Color(0xFFA8B3C3),
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Button(onClick = onClick) {
+            Text("OPEN SHIZUKU PROBE")
+        }
     }
 }
 

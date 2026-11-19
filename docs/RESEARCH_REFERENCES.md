@@ -13,20 +13,20 @@
 
 - Android 17 SDK setup：https://developer.android.com/about/versions/17/setup-sdk
 - Android Gradle Plugin releases：https://developer.android.com/build/releases/about-agp
-- AGP 9.4.0 release notes：https://developer.android.com/build/releases/agp-9-4-0-release-notes
+- Android Gradle Plugin release notes：https://developer.android.com/build/releases/about-agp
 - Jetpack Compose BOM：https://developer.android.com/develop/ui/compose/bom
 - Android build JDK selection：https://developer.android.com/build/jdks
 
 ## Shizuku
 
 - GitHub：https://github.com/RikkaApps/Shizuku
-- API / developer documentation：https://github.com/RikkaApps/Shizuku-API
+- API / developer documentation：https://github.com/RikkaApps/Shizuku-API- Shizuku API Maven dependency：`dev.rikka.shizuku:api:13.1.5` and `dev.rikka.shizuku:provider:13.1.5`
 
 ## 本仓库采用的基线
 
-- Android Gradle Plugin 9.4.0
-- Gradle Wrapper 9.6.0
-- Kotlin 2.4.10
+- Android Gradle Plugin 9.5.1
+- Gradle Wrapper 9.9.1
+- Kotlin 2.4.21
 - Jetpack Compose BOM 2026.09.00
 - Android compileSdk 37
 - Android targetSdk 36

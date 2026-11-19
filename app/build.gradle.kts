@@ -18,6 +18,7 @@ android {
 
     buildFeatures {
         compose = true
+        aidl = true
     }
 
     compileOptions {
@@ -39,6 +40,10 @@ kotlin {
 }
 
 dependencies {
+    compileOnly(files("libs/android-hidden-api-stubs.jar"))
+
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)

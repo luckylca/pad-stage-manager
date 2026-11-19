@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -128,6 +129,9 @@ private fun MotionDemo() {
 @Composable
 private fun ScrollDemo() {
     val listState = rememberLazyListState()
+    val firstVisibleIndex by remember {
+        derivedStateOf { listState.firstVisibleItemIndex }
+    }
     val rows = remember { (1..120).map { index -> "Live row " + index } }
 
     Column(
@@ -135,7 +139,7 @@ private fun ScrollDemo() {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
-            text = "FIRST VISIBLE ROW: " + listState.firstVisibleItemIndex,
+            text = "FIRST VISIBLE ROW: " + firstVisibleIndex,
             color = Color(0xFF9ED8C8),
             fontSize = 12.sp
         )

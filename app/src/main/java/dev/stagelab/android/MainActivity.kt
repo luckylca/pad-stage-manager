@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import dev.stagelab.android.demo.DemoActivity
 import dev.stagelab.android.demo.DemoMode
+import dev.stagelab.android.shizuku.ShizukuProbeActivity
 import dev.stagelab.android.ui.StageLabScreen
 import dev.stagelab.android.ui.StageLabTheme
 import dev.stagelab.android.core.backend.PublicApiTaskBackend
@@ -23,7 +24,8 @@ class MainActivity : ComponentActivity() {
                 StageLabScreen(
                     deviceProfile = deviceProfile,
                     backendReport = backendReport,
-                    onOpenDemo = ::openDemoTask
+                    onOpenDemo = ::openDemoTask,
+                    onOpenShizukuProbe = ::openShizukuProbe
                 )
             }
         }
@@ -35,5 +37,9 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
         }
         startActivity(intent)
+    }
+
+    private fun openShizukuProbe() {
+        startActivity(Intent(this, ShizukuProbeActivity::class.java))
     }
 }

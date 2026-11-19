@@ -4,7 +4,7 @@ StageLab 是面向 Android 平板的 Stage Manager 风格实时多任务窗口�
 
 目标不是制作一组静态应用截图卡片，而是研究如何把**仍在运行的真实 Android Task / Surface** 放进自定义工作区，让用户看到持续变化的应用画面，并通过点击、拖动和动画切换当前任务。
 
-> 当前仓库处于工程骨架与技术验证准备阶段。真实任务 Surface 嵌入、TaskOrganizer 调用和跨应用窗口控制尚未实现，也没有宣称已经突破 ColorOS 的系统权限限制。
+> 当前仓库已实现 Shizuku UserService 与只读 TaskOrganizer 注册/回调探针，并通过 Windows Debug 编译。真实设备上的权限、注册和回调尚未实测；真实任务 Surface 嵌入与跨应用窗口控制仍未实现。
 
 ## 产品目标
 
@@ -31,26 +31,37 @@ StageLab 是面向 Android 平板的 Stage Manager 风格实时多任务窗口�
 - [x] 三个动态测试 Activity（计数器、运动图形、滚动列表），供后续任务窗口实验使用
 - [x] Task Backend / capability 抽象
 - [x] ADB、Shizuku、KernelSU 的分层技术文档
-- [ ] Shizuku Binder 集成
-- [ ] Shell MANAGE_ACTIVITY_TASKS 权限实测
-- [ ] TaskOrganizer 注册 PoC
+- [x] Shizuku API 13.1.5、Provider 与 UserService Binder 集成
+- [x] Shell/Root UID、PID、SELinux context 与 MANAGE_ACTIVITY_TASKS 权限检查界面
+- [x] 只读 TaskOrganizer 注册、任务回调记录与注销代码
+- [ ] 在 OPPO Pad mini 上实测 Shizuku 授权、MANAGE_ACTIVITY_TASKS、注册结果与真实任务回调
 - [ ] Task leash / SurfaceControl 托管 PoC
 - [ ] 多任务触摸、焦点、IME 和窗口动画
+
+说明：以上 `[x]` 代表对应代码已实现并通过编译，不代表 ColorOS 真机权限或运行结果已经验证。当前 ADB 未发现连接设备。
 
 ## 工程环境
 
 - Windows 工作目录：E:\codex\pad-stage-manager
 - Application ID：dev.stagelab.android
-- Gradle：9.6.0（Wrapper）
-- Android Gradle Plugin：9.4.0
-- Kotlin：2.4.10
+- Gradle：9.9.1（Wrapper）
+- Android Gradle Plugin：9.5.1
+- Kotlin：2.4.21
 - Compose BOM：2026.09.00
 - Compile SDK：37
 - Target SDK：36（暂不主动启用 Android 17 的 target 37 行为变更）
 - Min SDK：29
 - Android SDK：D:\Android\sdk
+- Android SDK Platform：37.0、37.2
+- Android Build-Tools：37.0.0
+- Android Platform Tools：37.0.1
+- SDK Command-line Tools：19.0
+- 推荐 ADB：`D:\Android\sdk\platform-tools\adb.exe`
 
-local.properties 只记录本机 SDK 路径，已加入 .gitignore，不会提交到 Git。
+`local.properties` 只记录本机 SDK 路径，已加入 `.gitignore`，不会提交到 Git。
+
+当前 Windows 默认命中的 `C:\Windows\System32\adb.exe` 是旧版 33.0.0；连接设备和执行后续 PoC 时请优先使用上面的 SDK 内 ADB 绝对路径。
+
 
 ## 构建
 
@@ -58,6 +69,7 @@ local.properties 只记录本机 SDK 路径，已加入 .gitignore，不会提�
 
     cd E:\codex\pad-stage-manager
     .\gradlew.bat --version
+    .\scripts\build-hidden-api-stubs.ps1
     .\gradlew.bat :app:assembleDebug
 
 APK 输出位置：
@@ -67,6 +79,10 @@ APK 输出位置：
 安装到已连接的设备：
 
     .\gradlew.bat :app:installDebug
+
+或者显式使用 SDK 内的新版 ADB：
+
+    D:\Android\sdk\platform-tools\adb.exe install -r .\app\build\outputs\apk\debug\app-debug.apk
 
 如果 Gradle 下载依赖时需要使用本机代理，可在当前 PowerShell 会话中设置：
 
@@ -96,4 +112,4 @@ AOSP 的 TaskView 属于 WindowManager Shell 内部实现，不是普通第三�
 - [PoC 计划](docs/POC_PLAN.md)
 - [技术决策](docs/DECISIONS.md)
 - [设备记录](docs/DEVICE_NOTES.md)
-- [官方研究资料](docs/RESEARCH_REFERENCES.md)
+- [官方研究资料](docs/RESEARCH_REFERENCES.md)- [Shizuku / TaskOrganizer 探针说明](docs/SHIZUKU_TASK_PROBE.md)

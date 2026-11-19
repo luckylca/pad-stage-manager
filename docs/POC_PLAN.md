@@ -32,14 +32,17 @@ pm check-permission 只是初筛；最终以真实 Binder 调用结果为准。�
 
 ## P1：Shizuku / Shell TaskOrganizer 探针
 
-1. 集成 Shizuku 的稳定 API。
-2. 建立最小 Shizuku UserService / Binder 服务。
-3. 记录服务运行 UID、PID 和权限检查结果。
-4. 检查并尝试注册 TaskOrganizer。
-5. 记录系统异常、SecurityException、OEM 拒绝原因。
-6. 不执行 reparent，不修改任务边界，先只验证注册和回调。
+1. [x] 集成 Shizuku API 13.1.5、Provider 和权限申请流程。
+2. [x] 建立 AIDL UserService / Binder 服务，记录服务 UID、PID 和 SELinux context。
+3. [x] 检查远端 `MANAGE_ACTIVITY_TASKS` 权限，并保留真实 `registerOrganizer()` 调用作为最终判据。
+4. [x] 实现只读 TaskOrganizer 观察器，记录 appeared / vanished / infoChanged / backPressed 回调。
+5. [x] 捕获并显示注册失败原因；提供注销入口。
+6. [ ] 在 OPPO Pad mini 上实测 Shizuku 授权、Shell/Root 身份、权限、注册结果和任务回调。
+7. [x] 探针不执行 reparent，不修改任务边界，不创建 RootTask，也不提交 SurfaceControl transaction。
 
 通过标准：真实系统服务接受注册，并能收到可解释的任务回调。
+
+当前进度：探针代码已完成并通过 Windows Debug 编译；由于本轮没有连接 OPPO Pad mini，尚不能把“代码可编译”当成“ColorOS 接受注册”。真机验收仍待完成。
 
 失败标准：权限被拒绝、接口不可用或 ColorOS 实现不兼容。失败后保留日志，转入 Root/系统集成可行性评估，不进行盲目反射调用。
 

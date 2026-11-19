@@ -164,6 +164,7 @@ object StageEngine {
             .put("activity", resolved.className)
             .put("bounds", boundsJson(rect))
             .put("detail", outcome.detail)
+            .put("reused", outcome.detail.startsWith("reused"))
     }
 
     private fun bounds(command: JSONObject): JSONObject {

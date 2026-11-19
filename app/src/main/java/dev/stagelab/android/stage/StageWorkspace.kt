@@ -297,6 +297,24 @@ object StageWorkspace {
                 command.put("extraName", extraName).put("extraValue", extraValue)
             }
             val data = StageRuntime.command(command)
+            val taskId = data.optInt("taskId")
+            val reused = data.optBoolean("reused")
+            if (reused) {
+                // The app refused a new task; show the one it already has (and adopt it into the
+                // session if it was not tracked yet).
+                val existing = session.windows.values.firstOrNull { it.taskId == taskId }
+                if (existing != null) {
+                    existing.alive = true
+                    existing.minimized = false
+                    session.bringToFront(existing.id)
+                    runCatching {
+                        StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", taskId))
+                    }
+                    persist()
+                    publishState()
+                    return Result.success(existing)
+                }
+            }
             val window = session.addWindow(
                 groupId = group.id,
                 packageName = packageName,

@@ -1,4 +1,4 @@
-package dev.stagelab.android.windows
+﻿package dev.stagelab.android.windows
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -13,13 +13,13 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Owns the floating chrome (title bar, resize grips, left edge strip) that lives *above* the real
- * application tasks.
+ * Owns every floating piece of window chrome that lives *above* the real application tasks.
  *
  * Why overlays: the stage host window sits behind the tasks, so it can never receive a touch that
- * lands on an application window. `TYPE_APPLICATION_OVERLAY` windows are composited above the tasks
- * and can be limited to a few dozen dp, which gives us a real drag handle while the application
- * keeps 100% native input everywhere else.
+ * lands on an application window. `TYPE_APPLICATION_OVERLAY` windows are composited above the tasks;
+ * the touchable ones are only a few dozen dp (title bar + eight resize handles), while a single
+ * non touchable overlay paints the four corner masks and the focus ring. The application window
+ * therefore keeps 100% native input, IME, Back and accessibility.
  */
 class WindowChromeController(
     private val activity: Activity,
@@ -31,6 +31,7 @@ class WindowChromeController(
         fun onFocusRequested(id: String)
         fun onCloseRequested(id: String)
         fun onMinimizeRequested(id: String)
+        fun onZoomToggled(id: String, maximized: Boolean)
         fun onLeftEdgeSwipe()
         fun onChromeTapOutside()
     }
@@ -40,17 +41,22 @@ class WindowChromeController(
         val rect: StageRect,
         val title: String,
         val focused: Boolean,
-        val minimized: Boolean
+        val minimized: Boolean,
+        val deskTopColor: Int = 0xFF141922.toInt(),
+        val deskBottomColor: Int = 0xFF0A0D13.toInt(),
+        val workspace: StageRect = rect
     )
 
-    private data class Holder(
+    private class Holder(
         val titleBar: ChromeOverlayView,
-        val corner: ChromeOverlayView,
-        val right: ChromeOverlayView,
-        val bottom: ChromeOverlayView,
+        val decoration: ChromeOverlayView,
+        val handles: List<Pair<ChromeMode, ChromeOverlayView>>,
         var rect: StageRect,
+        var workspace: StageRect
+    ) {
         var gestureBase: StageRect = rect
-    )
+        var restoredRect: StageRect? = null
+    }
 
     private val wm: WindowManager = activity.getSystemService(WindowManager::class.java)
     private val holders = LinkedHashMap<String, Holder>()
@@ -65,11 +71,14 @@ class WindowChromeController(
     private val dp: Float get() = activity.resources.displayMetrics.density
     private fun px(value: Float): Int = (value * dp).roundToInt()
 
-    private val titleHeight = px(32f)
-    private val gripSize = px(26f)
-    private val edgeSize = px(12f)
+    private val titleHeight = px(34f)
+    private val gripSize = px(28f)
+    private val edgeSize = px(14f)
     private val minWidth = px(232f)
     private val minHeight = px(200f)
+    private val cornerRadius = px(22f)
+
+    // ------------------------------------------------------------------ public API
 
     fun update(windows: List<ChromeWindow>, visible: Boolean) {
         if (!visible) {
@@ -78,7 +87,47 @@ class WindowChromeController(
         }
         val ids = windows.map { it.id }.toSet()
         holders.keys.filter { it !in ids }.forEach { remove(it) }
-        windows.forEach { window -> addOrUpdate(window) }
+        // A corner mask must be hidden when a window in front covers that corner; otherwise it
+        // would paint desk colour on top of the window in front.
+        windows.forEachIndexed { index, window ->
+            val above = windows.drop(index + 1)
+            val flags = BooleanArray(4) { corner ->
+                val square = cornerSquare(window.rect, corner)
+                above.none { candidate -> intersects(square, candidate.rect) }
+            }
+            addOrUpdate(window, flags)
+        }
+    }
+
+    private fun cornerSquare(rect: StageRect, corner: Int): StageRect = when (corner) {
+        0 -> StageRect(rect.left, rect.top, rect.left + cornerRadius, rect.top + cornerRadius)
+        1 -> StageRect(rect.right - cornerRadius, rect.top, rect.right, rect.top + cornerRadius)
+        2 -> StageRect(rect.left, rect.bottom - cornerRadius, rect.left + cornerRadius, rect.bottom)
+        else -> StageRect(rect.right - cornerRadius, rect.bottom - cornerRadius, rect.right, rect.bottom)
+    }
+
+    private fun intersects(a: StageRect, b: StageRect): Boolean =
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+
+    /** Called by the host when a window's own "zoom" action is triggered elsewhere. */
+    fun toggleZoom(id: String) {
+        val holder = holders[id] ?: return
+        val saved = holder.restoredRect
+        if (saved == null) {
+            holder.restoredRect = holder.rect
+            val ws = holder.workspace
+            val maximized = StageRect(ws.left + px(4f), ws.top + px(4f), ws.right - px(4f), ws.bottom - px(4f))
+            holder.rect = maximized
+            position(holder)
+            callbacks.onGeometryChanged(id, maximized, true)
+            callbacks.onZoomToggled(id, true)
+        } else {
+            holder.rect = saved
+            holder.restoredRect = null
+            position(holder)
+            callbacks.onGeometryChanged(id, saved, true)
+            callbacks.onZoomToggled(id, false)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -111,7 +160,8 @@ class WindowChromeController(
             width = px(18f),
             height = WindowManager.LayoutParams.MATCH_PARENT,
             x = 0,
-            y = 0
+            y = 0,
+            touchable = true
         )
         runCatching { wm.addView(strip, params) }.onSuccess { edgeStrip = strip }
             .onFailure { Log.w(TAG, "edge strip failed: ${it.message}") }
@@ -147,7 +197,7 @@ class WindowChromeController(
                     }
                 })
             }
-            val params = overlayParams(bounds.width, bounds.height, bounds.left, bounds.top)
+            val params = overlayParams(bounds.width, bounds.height, bounds.left, bounds.top, touchable = true)
             runCatching { wm.addView(view, params) }.onSuccess { railOverlay = view }
                 .onFailure { Log.w(TAG, "rail overlay failed: ${it.message}") }
         } else {
@@ -155,15 +205,24 @@ class WindowChromeController(
         }
     }
 
-    private fun addOrUpdate(window: ChromeWindow) {
+    // ------------------------------------------------------------------ window chrome
+
+    private fun addOrUpdate(window: ChromeWindow, maskFlags: BooleanArray = booleanArrayOf(true, true, true, true)) {
         val existing = holders[window.id]
         if (existing != null) {
             existing.rect = window.rect
+            existing.workspace = window.workspace
             existing.titleBar.focused = window.focused
             existing.titleBar.title = window.title
+            existing.decoration.focused = window.focused
+            existing.decoration.maskColor = window.deskTopColor
+            existing.decoration.maskColorBottom = window.deskBottomColor
+            existing.decoration.maskVisible = maskFlags
+            existing.handles.forEach { (_, view) -> view.focused = window.focused }
             position(existing)
             return
         }
+
         val titleBar = ChromeOverlayView(
             activity,
             ChromeMode.TITLE,
@@ -172,64 +231,113 @@ class WindowChromeController(
                 when (action) {
                     ChromeOverlayView.ACTION_CLOSE -> callbacks.onCloseRequested(window.id)
                     ChromeOverlayView.ACTION_MINIMIZE -> callbacks.onMinimizeRequested(window.id)
+                    ChromeOverlayView.ACTION_ZOOM -> toggleZoom(window.id)
+                    ChromeOverlayView.ACTION_DOUBLE_TAP -> toggleZoom(window.id)
+                    else -> Unit
                 }
             }
         ).apply {
             focused = window.focused
             title = window.title
+            cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
         }
-        val corner = ChromeOverlayView(
+
+        val decoration = ChromeOverlayView(
             activity,
+            ChromeMode.DECORATION,
+            onTouch = { _, _, _ -> }
+        ).apply {
+            focused = window.focused
+            cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
+            maskColor = window.deskTopColor
+            maskColorBottom = window.deskBottomColor
+            maskVisible = maskFlags
+        }
+
+        val handleModes = listOf(
+            ChromeMode.RESIZE_TOP_LEFT,
+            ChromeMode.RESIZE_TOP_RIGHT,
+            ChromeMode.RESIZE_BOTTOM_LEFT,
             ChromeMode.RESIZE_CORNER,
-            onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.RESIZE_CORNER, phase, dx, dy) }
-        )
-        val right = ChromeOverlayView(
-            activity,
+            ChromeMode.RESIZE_LEFT,
             ChromeMode.RESIZE_RIGHT,
-            onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.RESIZE_RIGHT, phase, dx, dy) }
+            ChromeMode.RESIZE_TOP,
+            ChromeMode.RESIZE_BOTTOM
         )
-        val bottom = ChromeOverlayView(
-            activity,
-            ChromeMode.RESIZE_BOTTOM,
-            onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.RESIZE_BOTTOM, phase, dx, dy) }
-        )
-        val holder = Holder(titleBar, corner, right, bottom, window.rect)
+        val handles = handleModes.map { mode ->
+            mode to ChromeOverlayView(
+                activity,
+                mode,
+                onTouch = { phase, dx, dy -> handleTouch(window.id, mode, phase, dx, dy) }
+            ).apply { focused = window.focused; cornerRadius = this@WindowChromeController.cornerRadius.toFloat() }
+        }
+
+        val holder = Holder(titleBar, decoration, handles, window.rect, window.workspace)
         holders[window.id] = holder
-        listOf(titleBar, corner, right, bottom).forEach { view ->
-            runCatching { wm.addView(view, overlayParams(1, 1, 0, 0)) }
-                .onFailure { Log.w(TAG, "overlay add failed: ${it.message}") }
+
+        runCatching { wm.addView(decoration, overlayParams(1, 1, 0, 0, touchable = false)) }
+            .onFailure { Log.w(TAG, "decoration add failed: ${it.message}") }
+        runCatching { wm.addView(titleBar, overlayParams(1, 1, 0, 0, touchable = true)) }
+            .onFailure { Log.w(TAG, "title add failed: ${it.message}") }
+        handles.forEach { (_, view) ->
+            runCatching { wm.addView(view, overlayParams(1, 1, 0, 0, touchable = true)) }
+                .onFailure { Log.w(TAG, "handle add failed: ${it.message}") }
         }
         position(holder)
     }
 
     private fun remove(id: String) {
         val holder = holders.remove(id) ?: return
-        listOf(holder.titleBar, holder.corner, holder.right, holder.bottom).forEach { view ->
-            runCatching { wm.removeView(view) }
-        }
+        val views = ArrayList<View>(2 + holder.handles.size)
+        views += holder.titleBar
+        views += holder.decoration
+        holder.handles.forEach { views += it.second }
+        views.forEach { view -> runCatching { wm.removeView(view) } }
     }
 
     private fun position(holder: Holder) {
         val rect = holder.rect
+        layout(holder.decoration, rect.left, rect.top, rect.width, rect.height)
         layout(holder.titleBar, rect.left, rect.top, rect.width, titleHeight)
-        // The corner grip owns the bottom-right corner exclusively: the edge strips stop short of
-        // it, otherwise they would swallow the diagonal resize gesture.
-        layout(holder.corner, rect.right - gripSize / 2, rect.bottom - gripSize / 2, gripSize, gripSize)
+
+        val half = gripSize / 2
+        layout(holder.handle(ChromeMode.RESIZE_TOP_LEFT), rect.left - half, rect.top - half, gripSize, gripSize)
+        layout(holder.handle(ChromeMode.RESIZE_TOP_RIGHT), rect.right - half, rect.top - half, gripSize, gripSize)
+        layout(holder.handle(ChromeMode.RESIZE_BOTTOM_LEFT), rect.left - half, rect.bottom - half, gripSize, gripSize)
+        layout(holder.handle(ChromeMode.RESIZE_CORNER), rect.right - half, rect.bottom - half, gripSize, gripSize)
+
         layout(
-            holder.right,
-            rect.right - edgeSize / 2,
-            rect.top + gripSize / 2,
+            holder.handle(ChromeMode.RESIZE_LEFT),
+            rect.left - edgeSize / 2,
+            rect.top + half,
             edgeSize,
             (rect.height - gripSize).coerceAtLeast(edgeSize)
         )
         layout(
-            holder.bottom,
-            rect.left + gripSize / 2,
+            holder.handle(ChromeMode.RESIZE_RIGHT),
+            rect.right - edgeSize / 2,
+            rect.top + half,
+            edgeSize,
+            (rect.height - gripSize).coerceAtLeast(edgeSize)
+        )
+        layout(
+            holder.handle(ChromeMode.RESIZE_TOP),
+            rect.left + half,
+            rect.top - edgeSize / 2,
+            (rect.width - gripSize).coerceAtLeast(edgeSize),
+            edgeSize
+        )
+        layout(
+            holder.handle(ChromeMode.RESIZE_BOTTOM),
+            rect.left + half,
             rect.bottom - edgeSize / 2,
             (rect.width - gripSize).coerceAtLeast(edgeSize),
             edgeSize
         )
     }
+
+    private fun Holder.handle(mode: ChromeMode): ChromeOverlayView =
+        handles.first { it.first == mode }.second
 
     private fun layout(view: View, x: Int, y: Int, width: Int, height: Int) {
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
@@ -240,11 +348,10 @@ class WindowChromeController(
         runCatching { wm.updateViewLayout(view, params) }
     }
 
+    // ------------------------------------------------------------------ gestures
+
     private fun handleTouch(id: String, mode: ChromeMode, phase: Int, dx: Float, dy: Float) {
         val holder = holders[id] ?: return
-        if (phase == ChromeOverlayView.PHASE_START) {
-            Log.d(TAG, "touch $mode on $id rect=${holder.rect}")
-        }
         when (phase) {
             ChromeOverlayView.PHASE_START -> {
                 holder.gestureBase = holder.rect
@@ -252,34 +359,54 @@ class WindowChromeController(
             }
             ChromeOverlayView.PHASE_MOVE -> {
                 val base = holder.gestureBase
-                val newRect = when (mode) {
-                    ChromeMode.TITLE -> StageRect(
-                        base.left + dx.roundToInt(),
-                        base.top + dy.roundToInt(),
-                        base.right + dx.roundToInt(),
-                        base.bottom + dy.roundToInt()
-                    )
-                    ChromeMode.RESIZE_CORNER -> StageRect(
-                        base.left,
-                        base.top,
-                        max(base.left + minWidth, base.right + dx.roundToInt()),
-                        max(base.top + minHeight, base.bottom + dy.roundToInt())
-                    )
-                    ChromeMode.RESIZE_RIGHT -> StageRect(
-                        base.left,
-                        base.top,
-                        max(base.left + minWidth, base.right + dx.roundToInt()),
-                        base.bottom
-                    )
-                    ChromeMode.RESIZE_BOTTOM -> StageRect(
-                        base.left,
-                        base.top,
-                        base.right,
-                        max(base.top + minHeight, base.bottom + dy.roundToInt())
-                    )
+                val left: Int
+                val top: Int
+                val right: Int
+                val bottom: Int
+                when (mode) {
+                    ChromeMode.TITLE -> {
+                        left = base.left + dx.roundToInt()
+                        top = base.top + dy.roundToInt()
+                        right = base.right + dx.roundToInt()
+                        bottom = base.bottom + dy.roundToInt()
+                    }
+                    ChromeMode.RESIZE_LEFT, ChromeMode.RESIZE_TOP_LEFT, ChromeMode.RESIZE_BOTTOM_LEFT -> {
+                        left = min(base.right - minWidth, base.left + dx.roundToInt())
+                        right = base.right
+                        top = if (mode == ChromeMode.RESIZE_TOP_LEFT) {
+                            min(base.bottom - minHeight, base.top + dy.roundToInt())
+                        } else base.top
+                        bottom = if (mode == ChromeMode.RESIZE_BOTTOM_LEFT) {
+                            max(base.top + minHeight, base.bottom + dy.roundToInt())
+                        } else base.bottom
+                    }
+                    ChromeMode.RESIZE_RIGHT, ChromeMode.RESIZE_TOP_RIGHT, ChromeMode.RESIZE_CORNER -> {
+                        right = max(base.left + minWidth, base.right + dx.roundToInt())
+                        left = base.left
+                        top = if (mode == ChromeMode.RESIZE_TOP_RIGHT) {
+                            min(base.bottom - minHeight, base.top + dy.roundToInt())
+                        } else base.top
+                        bottom = if (mode == ChromeMode.RESIZE_CORNER) {
+                            max(base.top + minHeight, base.bottom + dy.roundToInt())
+                        } else base.bottom
+                    }
+                    ChromeMode.RESIZE_TOP -> {
+                        left = base.left
+                        right = base.right
+                        top = min(base.bottom - minHeight, base.top + dy.roundToInt())
+                        bottom = base.bottom
+                    }
+                    ChromeMode.RESIZE_BOTTOM -> {
+                        left = base.left
+                        right = base.right
+                        top = base.top
+                        bottom = max(base.top + minHeight, base.bottom + dy.roundToInt())
+                    }
+                    else -> return
                 }
-                val clamped = clampToScreen(newRect)
+                val clamped = clampToScreen(StageRect(left, top, right, bottom))
                 holder.rect = clamped
+                holder.restoredRect = null
                 position(holder)
                 callbacks.onGeometryChanged(id, clamped, false)
             }
@@ -300,16 +427,26 @@ class WindowChromeController(
         return StageRect(left, top, left + w, top + h)
     }
 
-    private fun overlayParams(width: Int, height: Int, x: Int, y: Int): WindowManager.LayoutParams {
+    private fun overlayParams(
+        width: Int,
+        height: Int,
+        x: Int,
+        y: Int,
+        touchable: Boolean
+    ): WindowManager.LayoutParams {
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        if (!touchable) {
+            flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
         return WindowManager.LayoutParams(
             width,
             height,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            flags,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START

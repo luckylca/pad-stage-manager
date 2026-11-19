@@ -1,4 +1,4 @@
-package dev.stagelab.android.stage
+﻿package dev.stagelab.android.stage
 
 import android.content.Context
 import android.content.Intent
@@ -94,7 +94,7 @@ class StageHostActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(state.windows, state.railVisible) {
+                LaunchedEffect(state.windows, state.railVisible, state.workspace) {
                     chrome.update(
                         windows = state.windows.map { window ->
                             WindowChromeController.ChromeWindow(
@@ -102,7 +102,10 @@ class StageHostActivity : ComponentActivity() {
                                 rect = window.rect,
                                 title = window.title,
                                 focused = window.focused,
-                                minimized = window.minimized
+                                minimized = window.minimized,
+                                deskTopColor = deskColorAt(window.rect.top, state),
+                                deskBottomColor = deskColorAt(window.rect.bottom, state),
+                                workspace = state.workspace
                             )
                         },
                         visible = state.ready
@@ -190,11 +193,30 @@ class StageHostActivity : ComponentActivity() {
             lifecycleScope.launch { StageWorkspace.minimize(id) }
         }
 
+        override fun onZoomToggled(id: String, maximized: Boolean) {
+            // Geometry is committed through onGeometryChanged; nothing else to do for now.
+        }
+
         override fun onLeftEdgeSwipe() {
             StageWorkspace.setRailVisible(true)
         }
 
         override fun onChromeTapOutside() = Unit
+    }
+
+    /** Desk colour at a given y so the corner masks match the background exactly. */
+    private fun deskColorAt(y: Int, state: dev.stagelab.android.stage.WorkspaceState): Int {
+        val height = resources.displayMetrics.heightPixels.coerceAtLeast(1)
+        val t = (y.toFloat() / height).coerceIn(0f, 1f)
+        return lerpColor(0xFF141922.toInt(), 0xFF0A0D13.toInt(), t)
+    }
+
+    private fun lerpColor(from: Int, to: Int, t: Float): Int {
+        val a = ((from ushr 24 and 0xFF) + ((to ushr 24 and 0xFF) - (from ushr 24 and 0xFF)) * t).toInt()
+        val r = ((from ushr 16 and 0xFF) + ((to ushr 16 and 0xFF) - (from ushr 16 and 0xFF)) * t).toInt()
+        val g = ((from ushr 8 and 0xFF) + ((to ushr 8 and 0xFF) - (from ushr 8 and 0xFF)) * t).toInt()
+        val b = ((from and 0xFF) + ((to and 0xFF) - (from and 0xFF)) * t).toInt()
+        return (a shl 24) or (r shl 16) or (g shl 8) or b
     }
 
     private fun openAppPicker() {

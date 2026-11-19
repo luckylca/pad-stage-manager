@@ -87,17 +87,12 @@ fun StageWorkspaceScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(SurfaceTop, SurfaceBottom)))
-            .clickable(indication = null, interactionSource = androidx.compose.foundation.interaction.MutableInteractionSource()) {
-                onEmptyTap()
-            }
     ) {
-        DeskGlow()
+        // Soft shadows behind the real windows. Drawn by the host, so they are visible around the
+        // task instead of being covered by it.
+        WindowShadows(state)
 
-        AnimatedVisibility(
-            visible = state.railVisible,
-            enter = slideInHorizontally(tween(260)) { -it } + fadeIn(tween(200)),
-            exit = slideOutHorizontally(tween(220)) { -it } + fadeOut(tween(160))
-        ) {
+        if (state.railVisible) {
             RecentGroupsRail(
                 state = state,
                 onGroupClick = onGroupClick,
@@ -156,6 +151,31 @@ fun StageWorkspaceScreen(
                 contentAlignment = Alignment.Center
             ) {
                 app.icon?.let { Image(bitmap = it, contentDescription = null, modifier = Modifier.size(56.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WindowShadows(state: WorkspaceState) {
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        val radius = 22.dp.toPx()
+        state.windows.forEach { window ->
+            val rect = window.rect
+            if (rect.width <= 0 || rect.height <= 0) return@forEach
+            // Concentric rounded rectangles approximate a soft drop shadow without a blur filter.
+            for (step in 9 downTo 1) {
+                val spread = step * 1.4.dp.toPx()
+                val alpha = 0.018f * (10 - step)
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = alpha),
+                    topLeft = Offset(rect.left - spread, rect.top - spread + 2.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(
+                        rect.width + spread * 2,
+                        rect.height + spread * 2
+                    ),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius + spread)
+                )
             }
         }
     }

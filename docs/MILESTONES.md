@@ -76,3 +76,16 @@
 2. `handle` 拖动使用逐帧 `setBounds`；第三方应用若无 `configChanges`，拖动/缩放过程中可能看到自身重排。
 3. 左栏预览高度受系统最小窗口高度限制（约 220dp），因此栏位比 iPad 略高；比 iPad 的“纯缩略图”更占空间，但**保持真实动态画面**。
 4. 打开应用时若应用不在当前活动组，窗口会加入当前组；跨组拖动尚未提供手势（模型层 `moveWindowToGroup` 已实现）。
+
+## 第二阶段（P1–P9 逐项）
+
+> 依据 `docs/IPAD_STAGE_MANAGER_BEHAVIOR_SPEC.md`；差距清单见 `docs/IPAD_STAGE_MANAGER_GAP_MATRIX.md`。
+
+### P1 窗口真实圆角与 chrome —— 已实现，真机通过（第三方应用）
+
+- 方案：**非触摸角落遮罩 Overlay**。每个窗口一块 `FLAG_NOT_TOUCHABLE` 的 decoration 浮层，用“正方形 − 四分之一圆”的 Path 把四个角涂成桌面背景色，从而在不接触 Task Surface、不注入输入的前提下得到真实圆角。
+- 与 iPad 一致：标题栏和内容区是同一个圆角窗口；焦点窗口有 2px 蓝色描边（非焦点无描边）；宿主绘制柔和阴影；圆角半径 22dp。
+- 遮挡处理：当另一个窗口盖住某个角时，该角的遮罩自动关闭，避免把桌面色画到前台窗口上（实测修复了“下层窗口的角涂到上层窗口”的缺陷）。
+- 缩放：8 个不可见手柄（四角 + 四边），只在右下角绘制极淡提示；内容区不受任何触摸影响。
+- 决定：SurfaceControl/TaskOrganizer 的圆角需要 leash，会牺牲原生输入；按 ADR-004 保留 FREEFORM + Overlay 路线（见 `DECISIONS.md` ADR-013）。
+- 证据：`docs/p1-rounded.png`（浏览器 + 便签 + B站 三应用同屏，四角圆润），`docs/p1-corner-zoom.png`（3× 放大，圆角与描边连续）。

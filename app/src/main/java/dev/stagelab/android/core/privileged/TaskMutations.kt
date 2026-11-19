@@ -150,16 +150,33 @@ class TaskMutations {
 
         val execResult = runCatching { startActivityShell(intent, bounds) }
         val taskId = awaitNewTask(before, intent)
-        return if (taskId > 0) {
-            LaunchOutcome(true, taskId, execResult.getOrNull() ?: "started via am")
-        } else {
-            LaunchOutcome(
-                false,
-                -1,
-                "binder=" + binderResult.exceptionOrNull()?.message +
-                    " am=" + execResult.exceptionOrNull()?.message
-            )
+        if (taskId > 0) {
+            return LaunchOutcome(true, taskId, execResult.getOrNull() ?: "started via am")
         }
+
+        // The app refused a new task (singleTask launcher / singleInstance). Reuse its live task
+        // instead of reporting a failure: the Dock's "open" semantics are "show it", not "spawn".
+        val existing = findTaskFor(intent)
+        if (existing > 0) {
+            return LaunchOutcome(true, existing, "reused existing task")
+        }
+
+        return LaunchOutcome(
+            false,
+            -1,
+            "binder=" + binderResult.exceptionOrNull()?.message +
+                " am=" + execResult.exceptionOrNull()?.message
+        )
+    }
+
+    /** Existing task whose top activity matches [intent]'s component. */
+    fun findTaskFor(intent: Intent): Int {
+        val component = intent.component?.flattenToShortString() ?: return -1
+        return listTasks()
+            .sortedByDescending { if (it.isFocused) 2 else if (it.isVisible) 1 else 0 }
+            .firstOrNull { task ->
+                task.topActivity == component || task.baseActivity == component
+            }?.taskId ?: -1
     }
 
     private fun awaitNewTask(before: Set<Int>, intent: Intent, timeoutMs: Long = 2500): Int {

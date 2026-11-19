@@ -1,4 +1,4 @@
-package dev.stagelab.android.core.stage
+﻿package dev.stagelab.android.core.stage
 
 import android.content.Context
 import android.util.Log
@@ -160,7 +160,8 @@ object StageRuntime {
     /** Slot count depends on how many windows are open, so re-run the geometry on every change. */
     private fun recomputeLayout() {
         if (viewportWidth <= 0 || viewportHeight <= 0) return
-        val previewCount = (synchronized(windows) { windows.size } - 1).coerceAtLeast(0)
+        val aliveWindows = synchronized(windows) { windows.count { it.alive } }
+        val previewCount = (aliveWindows - 1).coerceAtLeast(0)
         viewport = StageLayoutEngine.compute(
             widthPx = viewportWidth,
             heightPx = viewportHeight,
@@ -663,13 +664,15 @@ object StageRuntime {
         applying = true
         try {
             val snapshot = synchronized(windows) { windows.toList() }
-            snapshot.forEachIndexed { index, window ->
-                if (!window.alive) return@forEachIndexed
-                val target = if (index == 0) {
+            var slot = 0
+            snapshot.forEach { window ->
+                if (!window.alive) return@forEach
+                val target = if (slot == 0) {
                     layout.main
                 } else {
-                    layout.previews.getOrNull(index - 1)
+                    layout.previews.getOrNull(slot - 1)
                 }
+                slot++
                 if (target == null) {
                     // No rail slot left (landscape fits fewer previews). Park the task behind the
                     // main window: it stays alive and keeps its state, but is fully covered.
@@ -684,9 +687,9 @@ object StageRuntime {
                         if (reply.optBoolean("ok")) window.lastBounds = layout.main
                         Log.i(TAG, "parked ${window.title} behind main")
                     }
-                    return@forEachIndexed
+                    return@forEach
                 }
-                if (window.lastBounds == target) return@forEachIndexed
+                if (window.lastBounds == target) return@forEach
                 val reply = call(
                     transport,
                     JSONObject().put("cmd", "bounds")

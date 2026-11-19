@@ -1,4 +1,4 @@
-package dev.stagelab.android.ui
+﻿package dev.stagelab.android.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -281,6 +282,10 @@ private fun Dock(
     onDemo: () -> Unit
 ) {
     val density = LocalDensity.current
+    val chipListState = rememberLazyListState()
+    androidx.compose.runtime.LaunchedEffect(state.windows.firstOrNull()?.id, state.windows.size) {
+        runCatching { chipListState.scrollToItem(0) }
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -305,6 +310,7 @@ private fun Dock(
         ) {
             LazyRow(
                 modifier = Modifier.weight(1f),
+                state = chipListState,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {

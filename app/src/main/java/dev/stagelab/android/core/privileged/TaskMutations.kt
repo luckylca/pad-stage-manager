@@ -1,4 +1,4 @@
-package dev.stagelab.android.core.privileged
+﻿package dev.stagelab.android.core.privileged
 
 import android.app.ActivityOptions
 import android.content.ComponentName
@@ -33,7 +33,7 @@ class TaskMutations {
     fun taskToken(taskId: Int): Any? = taskTokens[taskId]
 
     /** Returns a token, refreshing the task list once if a task was not seen yet. */
-    private fun requireToken(taskId: Int): Any {
+    internal fun requireToken(taskId: Int): Any {
         taskTokens[taskId]?.let { return it }
         refreshTokens()
         return taskTokens[taskId] ?: throw IllegalStateException("No token for task $taskId")

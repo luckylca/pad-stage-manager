@@ -112,7 +112,7 @@ class StageHostActivity : ComponentActivity() {
                     )
                 }
 
-                LaunchedEffect(state.railVisible, state.groups, state.addGroupRect, state.rail) {
+                LaunchedEffect(state.railVisible, state.groups, state.addGroupRect, state.rail, state.railUpRect, state.railDownRect) {
                     val targets = ArrayList<WindowChromeController.TapTarget>()
                     state.groups.forEach { group ->
                         targets += WindowChromeController.TapTarget(group.rect) {
@@ -125,6 +125,16 @@ class StageHostActivity : ComponentActivity() {
                             lifecycleScope.launch { StageWorkspace.syncGeometry("new-group") }
                         }
                     }
+                    if (state.railUpRect.width > 0) {
+                        targets += WindowChromeController.TapTarget(state.railUpRect) {
+                            StageWorkspace.scrollRail(360f)
+                        }
+                    }
+                    if (state.railDownRect.width > 0) {
+                        targets += WindowChromeController.TapTarget(state.railDownRect) {
+                            StageWorkspace.scrollRail(-360f)
+                        }
+                    }
                     val bounds = if (state.railVisible && targets.isNotEmpty()) {
                         StageRect(
                             state.rail.left - 20,
@@ -135,7 +145,9 @@ class StageHostActivity : ComponentActivity() {
                     } else {
                         null
                     }
-                    chrome.updateRailTargets(targets, bounds, state.railVisible && targets.isNotEmpty())
+                    chrome.updateRailTargets(targets, bounds, state.railVisible && targets.isNotEmpty()) { dy ->
+                        StageWorkspace.scrollRail(dy)
+                    }
                 }
 
                 Box(
@@ -159,6 +171,9 @@ class StageHostActivity : ComponentActivity() {
                             StageWorkspace.createGroup()
                             lifecycleScope.launch { StageWorkspace.syncGeometry("new-group") }
                             StageWorkspace.setRailVisible(true)
+                        },
+                        onRailScroll = { dir ->
+                            StageWorkspace.scrollRail(-dir * resources.displayMetrics.density * 140f)
                         },
                         onToggleRail = { StageWorkspace.toggleRail() },
                         onDockApp = { app -> lifecycleScope.launch { StageWorkspace.openApp(app.packageName, app.label, app.activityName) } },

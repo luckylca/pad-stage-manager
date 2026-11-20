@@ -89,3 +89,13 @@
 - 缩放：8 个不可见手柄（四角 + 四边），只在右下角绘制极淡提示；内容区不受任何触摸影响。
 - 决定：SurfaceControl/TaskOrganizer 的圆角需要 leash，会牺牲原生输入；按 ADR-004 保留 FREEFORM + Overlay 路线（见 `DECISIONS.md` ADR-013）。
 - 证据：`docs/p1-rounded.png`（浏览器 + 便签 + B站 三应用同屏，四角圆润），`docs/p1-corner-zoom.png`（3× 放大，圆角与描边连续）。
+
+### P2 横屏工作台与点击切换 —— 已实现，真机通过
+
+- **横屏左栏常驻**：`computeLayout()` 按方向划分布局——横屏时 rail 为固定左栏（238dp），工作区自动让位（`rail.right + 14dp`）；竖屏 rail 变为抽屉，左边缘唤出（`edgeStrip`），切组后自动收起。
+- **磁贴分级**：系统 freeform 最小窗口 ~220dp 限制了实时预览数量。最近一组用**真实任务实时预览**磁贴（256dp 高，`focusable=true` 保证能被合成到宿主之上），更早的组用紧凑磁贴（图标计数 + 名称）。实测修复了 `focusable(false)` 导致预览黑洞的问题。
+- **点击切换**：左栏点击由透明 overlay 层接管（真实预览窗口在宿主之上，Compose 点不到）。磁贴点击 → `activateGroup()` → 目标组 `ensureGroupAlive` + 几何恢复 + 聚焦前台窗口。
+- **滚动**：组数超出栏高时出现 ▲▼ 箭头（overlay 点击层内实现 `scrollRail`），滚出视野的组任务自动 `toBack` 停放。
+- **空状态**：无其他组时左栏显示"最近工作台/切换后会出现在这里"引导文案，功能入口不消失。
+- **验收（真机，三组四轮轮切）**：任务 ID 完全稳定（502/523/386 → 532/524 → 526 → 532/524），无重启；窗口位置与层级恢复；顺序正确。
+- 证据：`docs/p2-rail.png`（横屏常驻栏 + 实时预览 + 紧凑磁贴 + 滚动箭头）、`docs/p2-landscape.png`、`docs/p2-switch.png`。

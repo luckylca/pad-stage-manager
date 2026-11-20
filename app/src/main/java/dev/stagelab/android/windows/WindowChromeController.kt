@@ -172,7 +172,12 @@ class WindowChromeController(
      * targets only work through an overlay that sits on top of them.
      */
     @SuppressLint("ClickableViewAccessibility")
-    fun updateRailTargets(targets: List<TapTarget>, bounds: StageRect?, visible: Boolean) {
+    fun updateRailTargets(
+        targets: List<TapTarget>,
+        bounds: StageRect?,
+        visible: Boolean,
+        onScroll: (Float) -> Unit = {}
+    ) {
         railTargets = targets
         if (!visible || bounds == null || bounds.width <= 0) {
             railOverlay?.let { runCatching { wm.removeView(it) } }
@@ -184,14 +189,33 @@ class WindowChromeController(
                 setBackgroundColor(0x01000000)
                 isClickable = true
                 setOnTouchListener(object : android.view.View.OnTouchListener {
+                    private var lastY = 0f
+                    private var totalDy = 0f
+                    private var scrolling = false
                     override fun onTouch(v: View, event: android.view.MotionEvent): Boolean {
-                        if (event.actionMasked == android.view.MotionEvent.ACTION_UP) {
-                            val x = event.rawX.toInt()
-                            val y = event.rawY.toInt()
-                            railTargets.firstOrNull { target ->
-                                x >= target.rect.left && x <= target.rect.right &&
-                                    y >= target.rect.top && y <= target.rect.bottom
-                            }?.action?.invoke()
+                        when (event.actionMasked) {
+                            android.view.MotionEvent.ACTION_DOWN -> {
+                                lastY = event.rawY
+                                totalDy = 0f
+                                scrolling = false
+                            }
+                            android.view.MotionEvent.ACTION_MOVE -> {
+                                val dy = event.rawY - lastY
+                                lastY = event.rawY
+                                totalDy += dy
+                                if (!scrolling && kotlin.math.abs(totalDy) > px(18f)) scrolling = true
+                                if (scrolling) onScroll(dy)
+                            }
+                            android.view.MotionEvent.ACTION_UP -> {
+                                if (!scrolling) {
+                                    val x = event.rawX.toInt()
+                                    val y = event.rawY.toInt()
+                                    railTargets.firstOrNull { target ->
+                                        x >= target.rect.left && x <= target.rect.right &&
+                                            y >= target.rect.top && y <= target.rect.bottom
+                                    }?.action?.invoke()
+                                }
+                            }
                         }
                         return true
                     }

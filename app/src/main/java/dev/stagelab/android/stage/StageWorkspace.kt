@@ -25,7 +25,8 @@ data class GroupTile(
     val title: String,
     val windowCount: Int,
     val active: Boolean,
-    val rect: StageRect
+    val rect: StageRect,
+    val live: Boolean
 )
 
 data class WindowTile(
@@ -51,6 +52,10 @@ data class WorkspaceState(
     val dock: StageRect = StageRect(0, 0, 0, 0),
     val addGroupRect: StageRect = StageRect(0, 0, 0, 0),
     val rail: StageRect = StageRect(0, 0, 0, 0),
+    val landscape: Boolean = false,
+    /** Chevron targets shown when the rail has more groups than fit. */
+    val railUpRect: StageRect = StageRect(0, 0, 0, 0),
+    val railDownRect: StageRect = StageRect(0, 0, 0, 0),
     val backend: String = "",
     val error: String? = null
 ) {
@@ -87,7 +92,19 @@ object StageWorkspace {
     private var statusInset = 0
     private var navInset = 0
 
-    private var railVisible = false
+    /**
+     * Rail visibility is orientation dependent:
+     *  * landscape (the primary mode) – the recent-group rail is a persistent left column;
+     *  * portrait – it is a drawer that opens from the left edge.
+     */
+    private var landscape = false
+    private var railHiddenByUser = false
+    private var railPinnedPortrait = false
+    private var railScroll = 0f
+
+    fun isLandscape(): Boolean = landscape
+
+    private fun railShouldShow(): Boolean = if (landscape) !railHiddenByUser else railPinnedPortrait
 
     // ------------------------------------------------------------------ layout
 
@@ -95,6 +112,7 @@ object StageWorkspace {
 
     private fun computeLayout() {
         if (screenW <= 0 || screenH <= 0) return
+        landscape = screenW > screenH
         val dockW = min(screenW - dp(48f), dp(760f))
         val dockH = dp(84f)
         val dock = StageRect(
@@ -103,21 +121,35 @@ object StageWorkspace {
             right = (screenW + dockW) / 2,
             bottom = screenH - navInset - dp(14f)
         )
+        val railLeft = dp(12f)
+        val rail = StageRect(
+            left = railLeft,
+            top = statusInset + dp(10f),
+            right = railLeft + railWidthPx(),
+            bottom = dock.top - dp(12f)
+        )
+        val workspaceLeft = if (railShouldShow()) rail.right + dp(14f) else dp(18f)
         val workspace = StageRect(
-            left = dp(18f),
+            left = workspaceLeft,
             top = statusInset + dp(10f),
             right = screenW - dp(18f),
             bottom = dock.top - dp(12f)
         )
-        _layout = Layout(dock = dock, workspace = workspace, dockHeight = dockH)
+        _layout = Layout(dock = dock, workspace = workspace, dockHeight = dockH, rail = rail)
     }
 
-    private data class Layout(val dock: StageRect, val workspace: StageRect, val dockHeight: Int)
+    private data class Layout(
+        val dock: StageRect,
+        val workspace: StageRect,
+        val dockHeight: Int,
+        val rail: StageRect
+    )
 
     private var _layout: Layout? = null
     private val layout: Layout? get() = _layout
 
     fun setViewport(width: Int, height: Int, densityValue: Float, status: Int, navigation: Int) {
+        val wasLandscape = landscape
         val changed = width != screenW || height != screenH || densityValue != density
         screenW = width
         screenH = height
@@ -125,6 +157,11 @@ object StageWorkspace {
         statusInset = status
         navInset = navigation
         computeLayout()
+        if (wasLandscape != landscape) {
+            // Orientation change: the rail mode follows the new posture.
+            railPinnedPortrait = false
+            railScroll = 0f
+        }
         publishState()
         if (changed) {
             scope.launch { runCatching { syncGeometry("viewport") } }
@@ -133,30 +170,53 @@ object StageWorkspace {
 
     fun railWidthPx(): Int = dp(238f)
 
-    fun railRect(): StageRect? {
-        val l = layout ?: return null
-        return StageRect(
-            left = dp(10f),
-            top = l.workspace.top,
-            right = dp(10f) + railWidthPx(),
-            bottom = l.workspace.bottom
-        )
-    }
+    fun railRect(): StageRect? = layout?.rail
 
     fun workspaceRect(): StageRect = layout?.workspace ?: StageRect(0, 0, 0, 0)
 
     fun dockRect(): StageRect = layout?.dock ?: StageRect(0, 0, 0, 0)
 
+    /** Vertical scroll of the rail, in pixels. */
+    fun scrollRail(delta: Float) {
+        val rail = railRect() ?: return
+        val items = session.sortedGroups().size - 1
+        if (items <= 0) return
+        val perItem = dp(256f) + dp(12f)
+        val maxScroll = (items * perItem - rail.height).coerceAtLeast(0).toFloat()
+        val next = (railScroll - delta).coerceIn(0f, maxScroll)
+        if (next == railScroll) return
+        railScroll = next
+        publishState()
+        scope.launch { runCatching { syncGeometry("rail-scroll") } }
+    }
+
+    /**
+     * Rail slots: the most recent group gets a full live-preview tile (a real task window fits the
+     * system minimum), the older groups get compact tiles (icon + name). A live preview is not
+     * possible for every tile because Android enforces a ~220dp minimum freeform window size.
+     */
     fun tileRect(index: Int, count: Int): StageRect? {
         val rail = railRect() ?: return null
         if (count <= 0) return null
-        val gap = dp(10f)
-        val available = rail.height - gap * (count - 1)
-        // The tile must stay above the system's minimum freeform height (~220dp) plus the caption
-        // strip, otherwise WindowManager expands the preview and hides the caption.
-        val height = max(dp(256f), min(dp(272f), available / count))
-        val top = rail.top + index * (height + gap)
-        return StageRect(rail.left, top, rail.right, min(top + height, rail.bottom))
+        val gap = dp(12f)
+        val liveHeight = dp(256f)
+        val compactHeight = dp(64f)
+        val rect = if (index == 0) {
+            StageRect(rail.left, rail.top - railScroll.roundToInt(), rail.right, rail.top - railScroll.roundToInt() + liveHeight)
+        } else {
+            val top = rail.top + liveHeight + gap + (index - 1) * (compactHeight + dp(8f)) - railScroll.roundToInt()
+            StageRect(rail.left, top, rail.right, top + compactHeight)
+        }
+        if (rect.bottom > rail.bottom + 1 || rect.top < rail.top - 1) return null
+        return rect
+    }
+
+    fun isLiveRailSlot(index: Int): Boolean = index == 0
+
+    fun railCanScroll(): Boolean {
+        val rail = railRect() ?: return false
+        val items = (session.sortedGroups().size - 1).coerceAtLeast(0)
+        return items * (dp(256f) + dp(12f)) > rail.height + dp(4f)
     }
 
     /** The live preview is inset so the tile ring and its caption strip stay visible. */
@@ -434,6 +494,11 @@ object StageWorkspace {
 
     suspend fun activateGroup(groupId: String) {
         if (groupId == session.activeGroupId) return
+        // Portrait: the rail is a drawer, so selecting a group closes it and the workspace expands.
+        if (!landscape && railPinnedPortrait) {
+            railPinnedPortrait = false
+            computeLayout()
+        }
         session.makeActive(groupId)
         persist()
         publishState()
@@ -511,15 +576,21 @@ object StageWorkspace {
     }
 
     fun setRailVisible(visible: Boolean) {
-        if (railVisible == visible) return
-        railVisible = visible
+        if (landscape) {
+            if (railHiddenByUser == !visible) return
+            railHiddenByUser = !visible
+        } else {
+            if (railPinnedPortrait == visible) return
+            railPinnedPortrait = visible
+        }
+        computeLayout()
         publishState()
         scope.launch { runCatching { syncGeometry(if (visible) "rail-show" else "rail-hide") } }
     }
 
-    fun toggleRail() = setRailVisible(!railVisible)
+    fun toggleRail() = setRailVisible(!isRailVisible())
 
-    fun isRailVisible(): Boolean = railVisible
+    fun isRailVisible(): Boolean = railShouldShow()
 
     // ------------------------------------------------------------------ sync
 
@@ -545,16 +616,28 @@ object StageWorkspace {
                         runCatching { setFocusable(window.taskId, true) }
                         runCatching { applyBounds(window.taskId, rect) }
                     }
-                } else if (railVisible) {
+                } else if (railShouldShow()) {
                     val otherGroups = session.sortedGroups().filter { it.id != activeId }
                     val slot = otherGroups.indexOfFirst { it.id == group.id }
-                    val rect = tileRect(slot.coerceAtLeast(0), otherGroups.size) ?: return@forEachIndexed
+                    val rect = tileRect(slot.coerceAtLeast(0), otherGroups.size)
+                    if (rect == null || slot > 0) {
+                        // Compact slot (or scrolled out of view): keep the task alive but behind the
+                        // stage host. Only the most recent group gets a live preview tile.
+                        windows.forEach { window ->
+                            if (!window.alive) return@forEach
+                            runCatching { setFocusable(window.taskId, false) }
+                            runCatching {
+                                StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId))
+                            }
+                        }
+                        return@forEachIndexed
+                    }
                     val inner = tileInner(rect)
                     windows.forEach { window ->
                         if (!window.alive) return@forEach
-                        runCatching { setFocusable(window.taskId, false) }
-                        // Raise it above the stage host so the live preview is actually composited,
-                        // then place it in the rail tile. The active window is focused afterwards.
+                        // A non focusable task cannot be raised above the stage host, which would
+                        // leave a black hole where the live preview should be.
+                        runCatching { setFocusable(window.taskId, true) }
                         runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId)) }
                         runCatching { applyBounds(window.taskId, inner) }
                     }
@@ -570,7 +653,7 @@ object StageWorkspace {
             session.visibleWindowsOf(activeId).lastOrNull()?.let { front ->
                 runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", front.taskId)) }
             }
-            Log.d(TAG, "syncGeometry($reason) groups=${groups.size} rail=$railVisible")
+            Log.d(TAG, "syncGeometry($reason) groups=${groups.size} rail=${railShouldShow()} landscape=$landscape")
         } finally {
             applying = false
             publishState()
@@ -664,7 +747,8 @@ object StageWorkspace {
                 title = group.title,
                 windowCount = session.visibleWindowsOf(group.id).size,
                 active = false,
-                rect = rect
+                rect = rect,
+                live = isLiveRailSlot(otherIndex)
             )
         }
         val windows = session.windowsOf(activeId)
@@ -683,27 +767,42 @@ object StageWorkspace {
                 )
             }
         val minimized = windows.filter { it.minimized }
+        val railShown = railShouldShow()
         // "+" button rectangle, shared with the rail touch overlay.
+        val railLeft = railRect()?.left ?: dp(12f)
         val railBottom = tiles.maxOfOrNull { it.rect.bottom } ?: (workspace.top + dp(8f))
         val addSize = dp(44f)
         val addRect = StageRect(
-            left = railRect()?.left ?: dp(10f),
-            top = railBottom + dp(10f),
-            right = (railRect()?.left ?: dp(10f)) + addSize,
-            bottom = railBottom + dp(10f) + addSize
+            left = railLeft,
+            top = railBottom + dp(12f),
+            right = railLeft + addSize,
+            bottom = railBottom + dp(12f) + addSize
         )
+        val scrollable = railShown && railCanScroll()
+        val chevron = dp(38f)
+        val railBottomEdge = railRect()?.bottom ?: 0
+        val railRightEdge = railRect()?.right ?: 0
+        val upRect = if (scrollable) {
+            StageRect(railRightEdge - chevron - dp(8f), railBottomEdge - chevron * 2 - dp(16f), railRightEdge - dp(8f), railBottomEdge - chevron - dp(16f))
+        } else StageRect(0, 0, 0, 0)
+        val downRect = if (scrollable) {
+            StageRect(railRightEdge - chevron - dp(8f), railBottomEdge - chevron - dp(8f), railRightEdge - dp(8f), railBottomEdge - dp(8f))
+        } else StageRect(0, 0, 0, 0)
         _state.value = WorkspaceState(
             ready = screenW > 0,
             activeGroupId = activeId,
             activeGroupTitle = session.activeGroup().title,
-            groups = tiles,
+            groups = if (railShown) tiles else emptyList(),
             windows = windows.filterNot { it.minimized },
             minimized = minimized,
-            railVisible = railVisible,
+            railVisible = railShown,
+            landscape = landscape,
             workspace = workspace,
             dock = dock,
-            addGroupRect = addRect,
+            addGroupRect = if (railShown) addRect else StageRect(0, 0, 0, 0),
             rail = railRect() ?: StageRect(0, 0, 0, 0),
+            railUpRect = upRect,
+            railDownRect = downRect,
             backend = StageRuntime.state.value.backend,
             error = null
         )

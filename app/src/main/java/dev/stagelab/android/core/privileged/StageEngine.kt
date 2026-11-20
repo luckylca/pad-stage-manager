@@ -1,4 +1,4 @@
-package dev.stagelab.android.core.privileged
+﻿package dev.stagelab.android.core.privileged
 
 import android.app.ActivityManager
 import android.content.ComponentName

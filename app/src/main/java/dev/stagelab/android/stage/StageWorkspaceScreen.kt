@@ -69,6 +69,7 @@ fun StageWorkspaceScreen(
     dockApps: List<DockApp>,
     onGroupClick: (String) -> Unit,
     onNewGroup: () -> Unit,
+    onRailScroll: (Int) -> Unit,
     onToggleRail: () -> Unit,
     onDockApp: (DockApp) -> Unit,
     onDockDrop: (DockApp, android.graphics.PointF) -> Unit,
@@ -96,7 +97,8 @@ fun StageWorkspaceScreen(
             RecentGroupsRail(
                 state = state,
                 onGroupClick = onGroupClick,
-                onNewGroup = onNewGroup
+                onNewGroup = onNewGroup,
+                onRailScroll = onRailScroll
             )
         }
 
@@ -200,26 +202,96 @@ private fun DeskGlow() {
 private fun RecentGroupsRail(
     state: WorkspaceState,
     onGroupClick: (String) -> Unit,
-    onNewGroup: () -> Unit
+    onNewGroup: () -> Unit,
+    onRailScroll: (Int) -> Unit
 ) {
     val density = LocalDensity.current
     Box(Modifier.fillMaxSize()) {
-        // Rail backdrop so the slide-in reads as a panel even when there is only one group.
-        val railHeightDp = with(density) { (state.workspace.height + 4).toDp() }
+        // Rail panel: a persistent column in landscape, a drawer in portrait.
         Box(
             modifier = Modifier
-                .offset(x = with(density) { (state.workspace.left - 14).toDp() }, y = with(density) { (state.workspace.top - 4).toDp() })
-                .width(250.dp)
-                .height(railHeightDp)
+                .offset(
+                    x = with(density) { (state.rail.left - 4).toDp() },
+                    y = with(density) { state.rail.top.toDp() }
+                )
+                .width(with(density) { (state.rail.width + 8).toDp() })
+                .height(with(density) { state.rail.height.toDp() })
                 .clip(RoundedCornerShape(26.dp))
                 .background(Color(0xB30E131B))
                 .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(26.dp))
         )
+        if (state.groups.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .offset(
+                        x = with(density) { (state.rail.left + 12).toDp() },
+                        y = with(density) { (state.rail.top + 18).toDp() }
+                    )
+                    .width(with(density) { (state.rail.width - 24).toDp() })
+            ) {
+                Text("最近工作台", color = InkMuted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Text("切换后会出现在这里", color = InkMuted.copy(alpha = 0.7f), fontSize = 9.sp)
+            }
+        }
         state.groups.forEach { group ->
             val widthDp = with(density) { group.rect.width.toDp() }
             val heightDp = with(density) { group.rect.height.toDp() }
             val xDp = with(density) { group.rect.left.toDp() }
             val yDp = with(density) { group.rect.top.toDp() }
+            if (!group.live) {
+                // Compact tile: Android's minimum window size does not fit a second live preview,
+                // so older groups are represented by identity + window count.
+                Box(
+                    modifier = Modifier
+                        .offset(x = xDp, y = yDp)
+                        .width(widthDp)
+                        .height(heightDp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0x14FFFFFF))
+                        .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(16.dp))
+                        .clickable { onGroupClick(group.id) }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(Color(0x2AFFFFFF)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "${group.windowCount}",
+                                color = Ink,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                group.title,
+                                color = Ink,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                if (group.windowCount > 0) "轻点切换" else "空工作区",
+                                color = InkMuted,
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                }
+                return@forEach
+            }
             Box(
                 modifier = Modifier
                     .offset(x = xDp, y = yDp)
@@ -266,25 +338,50 @@ private fun RecentGroupsRail(
             }
         }
 
-        // New-group button sits just under the last tile (or at the rail top when it is empty).
-        val railLeft = state.groups.firstOrNull()?.rect?.left
-            ?: with(density) { 10.dp.roundToPx() }
-        val railBottom = state.groups.maxOfOrNull { it.rect.bottom }
-            ?: (state.workspace.top + with(density) { 8.dp.roundToPx() })
-        Box(
-            modifier = Modifier
-                .offset(
-                    x = with(density) { railLeft.toDp() },
-                    y = with(density) { (railBottom + 10).toDp() }
-                )
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(Color(0x22FFFFFF))
-                .border(1.dp, Color(0x22FFFFFF), CircleShape)
-                .clickable { onNewGroup() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("＋", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Light)
+        // Scroll chevrons when the rail has more groups than fit.
+        listOf(
+            state.railUpRect to "▲",
+            state.railDownRect to "▼"
+        ).forEach { (rect, glyph) ->
+            if (rect.width > 0) {
+                Box(
+                    modifier = Modifier
+                        .offset(
+                            x = with(density) { rect.left.toDp() },
+                            y = with(density) { rect.top.toDp() }
+                        )
+                        .width(with(density) { rect.width.toDp() })
+                        .height(with(density) { rect.height.toDp() })
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0x33FFFFFF))
+                        .clickable {
+                            if (glyph == "▲") onRailScroll(-1) else onRailScroll(1)
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(glyph, color = Ink, fontSize = 12.sp)
+                }
+            }
+        }
+
+        // New-group button, positioned by the workspace (shared with the rail touch overlay).
+        val addRect = state.addGroupRect
+        if (addRect.width > 0) {
+            Box(
+                modifier = Modifier
+                    .offset(
+                        x = with(density) { addRect.left.toDp() },
+                        y = with(density) { addRect.top.toDp() }
+                    )
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x22FFFFFF))
+                    .border(1.dp, Color(0x22FFFFFF), CircleShape)
+                    .clickable { onNewGroup() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("＋", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Light)
+            }
         }
     }
 }

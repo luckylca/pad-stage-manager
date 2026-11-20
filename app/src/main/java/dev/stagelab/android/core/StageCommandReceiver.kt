@@ -63,6 +63,11 @@ class StageCommandReceiver : BroadcastReceiver() {
             "rail" -> StageWorkspace.setRailVisible(intent.getBooleanExtra("visible", true))
             "dockAutoHide" -> StageWorkspace.setDockAutoHide(intent.getBooleanExtra("enabled", false))
             "dockReveal" -> StageWorkspace.setDockRevealed(intent.getBooleanExtra("visible", true))
+            "expose" -> {
+                val pkg = intent.getStringExtra("package") ?: return
+                dev.stagelab.android.stage.StageHostActivity.openAppExpose(pkg)
+            }
+            "overview" -> dev.stagelab.android.stage.StageHostActivity.openOverview()
             "closeGroup" -> StageModeController.post { closeActiveGroup() }
             "reset" -> StageModeController.post { StageWorkspace.resetSession() }
             else -> Log.w(TAG, "unknown command: $command")

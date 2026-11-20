@@ -580,6 +580,49 @@ object StageWorkspace {
         return DropHighlight()
     }
 
+    /**
+     * Explicitly creates a new independent window for an app ONLY when Android actually supports
+     * multiple instances for its launch Activity (P6). Never fakes multiple windows for singleTask
+     * or singleInstance apps.
+     */
+    suspend fun openNewWindow(
+        packageName: String,
+        label: String,
+        component: String
+    ): Result<StageWindow> {
+        val ctx = appContext ?: return Result.failure(IllegalStateException("Workspace not attached"))
+        if (!dev.stagelab.android.ui.supportsMultiInstance(ctx, packageName, component)) {
+            return Result.failure(UnsupportedOperationException("$label 不支持多窗口实例"))
+        }
+        return openApp(packageName, label, component, at = null)
+    }
+
+    /** Returns all alive windows belonging to [packageName] across every group (P6). */
+    fun windowsForPackage(packageName: String): List<StageWindow> =
+        session.windows.values.filter { it.packageName == packageName && it.alive }
+
+    /** Moves a window from any group into the active group and focuses it (P6 App Exposé). */
+    suspend fun bringWindowToActiveGroup(windowId: String) {
+        val activeId = session.activeGroupId
+        val window = session.windows[windowId] ?: return
+        val owner = session.groupOf(windowId)
+        if (owner != null && owner.id != activeId) {
+            session.moveWindow(windowId, activeId)
+            if (owner.windowIds.isEmpty() && session.groups.size > 1) {
+                session.groups.remove(owner)
+            }
+        }
+        window.minimized = false
+        session.bringToFront(windowId)
+        persist()
+        publishState()
+        syncGeometry("expose-bring")
+        runCatching {
+            setFocusable(window.taskId, true)
+            StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+        }
+    }
+
     suspend fun openApp(
         packageName: String,
         label: String,

@@ -128,7 +128,14 @@
 - **自动隐藏与底边唤出**：支持持久化 `dockAutoHide`；隐藏时工作区和左栏向下延展，通过居中窄底边条上滑唤出（不冲突系统 Home/Back 手势）。
 - 验收证据：`docs/p5-dock.png`（重构后 Dock、活动状态圆点、左栏计算器实时预览）、`docs/p5-dock-menu.png`（真机长按 Via 图标弹出菜单，正确隐藏不支持多实例应用的 New Window 项）。
 
-## 第二阶段进度状态（P1–P5 已提交）
+### P6 应用窗口管理 —— 已完成，真机通过
+
+- **真实多实例能力探测**：`supportsMultiInstance()` 检查目标 Activity 的 `launchMode` / `documentLaunchMode`；`StageWorkspace.openNewWindow()` 仅对真正支持多实例的应用创建独立新任务，绝不为 `singleTask` / `singleInstance` 应用伪造重复窗口（实测便签支持多实例显示"+ 新建窗口"并同屏运行 `Task #546` 与 `Task #547`，Via 为 `singleTask` 自动隐藏 New Window）。
+- **App Exposé / Show All Windows**：新增 `StageExposeOverlay`（位于真实任务之上的全屏半透明浮层），支持从 Dock 上下文菜单或窗口控制菜单打开，展示同一应用在所有工作台中的全部窗口，支持一键切换聚焦、将后台组窗口拉入当前工作台、关闭单个窗口及新建窗口。
+- **所有工作台概览（Stage Overview）**：`StageExposeOverlay.showStageOverview()` 展示全部工作台及其窗口列表，支持快速切换与新建工作台。
+- 验收证据：`docs/p6-expose.png`（便签双独立真实窗口 `Task #546` / `Task #547` 的 App Exposé 视图与"+ 新建窗口"按钮）。
+
+## 第二阶段进度状态（P1–P6 已提交）
 
 | 阶段 | 状态 | 关键提交 |
 |---|---|---|
@@ -136,7 +143,8 @@
 | P2 横屏工作台 + 点击切换 | 真机通过（三组轮切，taskId 稳定） | 73d84e7 |
 | P3 拖放闭环 | 真机通过（Dock点击/拖入、左栏拖入、拖出、目标高亮） | f370050 |
 | P4 窗口完整控制 | 真机通过（八向缩放、最小化语义、长按控制菜单与排列） | f5aafea |
-| P5 Dock 完整重构 | 真机通过（固定/最近分区、状态点、长按菜单、自动隐藏） | 本次提交 |
+| P5 Dock 完整重构 | 真机通过（固定/最近分区、状态点、长按菜单、自动隐藏） | a4bc2e9 |
+| P6 应用窗口管理 | 真机通过（多实例探测、App Exposé、Show All Windows） | 本次提交 |
 
 ### 遗留清单（按优先级）
 

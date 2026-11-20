@@ -45,6 +45,7 @@ import kotlin.math.roundToInt
 class StageHostActivity : ComponentActivity() {
 
     private lateinit var chrome: WindowChromeController
+    private lateinit var exposeOverlay: dev.stagelab.android.windows.StageExposeOverlay
 
     @OptIn(FlowPreview::class)
     private val pendingGeometry = MutableStateFlow<Triple<String, StageRect, Boolean>?>(null)
@@ -57,6 +58,7 @@ class StageHostActivity : ComponentActivity() {
         StageWorkspace.attach(this)
 
         chrome = WindowChromeController(this, chromeCallbacks)
+        exposeOverlay = dev.stagelab.android.windows.StageExposeOverlay(this)
         chrome.ensureEdgeStrip()
         current = this
 
@@ -308,6 +310,12 @@ class StageHostActivity : ComponentActivity() {
                         lifecycleScope.launch { StageWorkspace.moveWindowToGroup(id, group.id) }
                     }
                 }
+            val sameAppWindows = StageWorkspace.windowsForPackage(window.packageName)
+            if (sameAppWindows.size > 1) {
+                items += WindowChromeController.MenuItem("显示所有窗口 (${sameAppWindows.size})") {
+                    showAppExpose(window.packageName, window.label, window.component)
+                }
+            }
             items += WindowChromeController.MenuItem("关闭窗口", danger = true) {
                 lifecycleScope.launch { StageWorkspace.closeWindow(id) }
             }
@@ -352,27 +360,14 @@ class StageHostActivity : ComponentActivity() {
         if (app.supportsMultiWindow) {
             items += WindowChromeController.MenuItem("新建窗口 (New Window)") {
                 lifecycleScope.launch {
-                    StageWorkspace.openApp(app.packageName, app.label, app.activityName, null)
+                    StageWorkspace.openNewWindow(app.packageName, app.label, app.activityName)
                 }
             }
         }
-        val appWindows = StageWorkspace.session.windows.values
-            .filter { it.packageName == app.packageName && it.alive }
+        val appWindows = StageWorkspace.windowsForPackage(app.packageName)
         if (appWindows.isNotEmpty()) {
             items += WindowChromeController.MenuItem("显示所有窗口 (${appWindows.size})") {
-                val windowItems = appWindows.map { w ->
-                    val grpTitle = StageWorkspace.session.groupOf(w.id)?.title ?: "工作区"
-                    WindowChromeController.MenuItem("${w.label} · $grpTitle (#${w.taskId})") {
-                        lifecycleScope.launch {
-                            val owner = StageWorkspace.session.groupOf(w.id)
-                            if (owner != null && owner.id != StageWorkspace.session.activeGroupId) {
-                                StageWorkspace.activateGroup(owner.id)
-                            }
-                            StageWorkspace.focusWindow(w.id)
-                        }
-                    }
-                }
-                chrome.showWindowMenu("${app.label} 的所有窗口", anchorX, anchorY - 220, windowItems)
+                showAppExpose(app.packageName, app.label, app.activityName)
             }
         }
         val currentPinned = dockModel.pinned.map { it.packageName }
@@ -393,6 +388,74 @@ class StageHostActivity : ComponentActivity() {
         }
         val menuY = (anchorY - (items.size * 115 + 120)).coerceAtLeast(80)
         chrome.showWindowMenu(app.label, anchorX - 180, menuY, items)
+    }
+
+    /** Shows iPad-style App Exposé for [packageName] above all real tasks (P6). */
+    private fun showAppExpose(packageName: String, appLabel: String, activityName: String) {
+        val activeId = StageWorkspace.session.activeGroupId
+        val focusedId = StageWorkspace.state.value.focusedWindow?.id
+        val appWindows = StageWorkspace.windowsForPackage(packageName)
+        val canNew = dev.stagelab.android.ui.supportsMultiInstance(this, packageName, activityName)
+        val cards = appWindows.map { w ->
+            val owner = StageWorkspace.session.groupOf(w.id)
+            val inActive = owner?.id == activeId
+            dev.stagelab.android.windows.StageExposeOverlay.WindowCard(
+                windowId = w.id,
+                taskId = w.taskId,
+                title = w.label,
+                groupTitle = owner?.title ?: "工作区",
+                inActiveGroup = inActive,
+                focused = w.id == focusedId,
+                onSelect = {
+                    lifecycleScope.launch {
+                        if (owner != null && owner.id != StageWorkspace.session.activeGroupId) {
+                            StageWorkspace.activateGroup(owner.id)
+                        }
+                        StageWorkspace.focusWindow(w.id)
+                    }
+                },
+                onBringToCurrentGroup = if (!inActive) {
+                    { lifecycleScope.launch { StageWorkspace.bringWindowToActiveGroup(w.id) } }
+                } else null,
+                onClose = {
+                    lifecycleScope.launch { StageWorkspace.closeWindow(w.id) }
+                }
+            )
+        }
+        exposeOverlay.showAppExpose(
+            appLabel = appLabel,
+            windows = cards,
+            canCreateNewWindow = canNew,
+            onNewWindow = {
+                lifecycleScope.launch {
+                    StageWorkspace.openNewWindow(packageName, appLabel, activityName)
+                }
+            }
+        )
+    }
+
+    /** Shows Stage Overview with all workspaces (P6/P7). */
+    private fun showStageOverview() {
+        val activeId = StageWorkspace.session.activeGroupId
+        val cards = StageWorkspace.session.sortedGroups().map { g ->
+            val names = StageWorkspace.session.visibleWindowsOf(g.id).map { "${it.label} (#${it.taskId})" }
+            dev.stagelab.android.windows.StageExposeOverlay.GroupCard(
+                groupId = g.id,
+                title = g.title,
+                active = g.id == activeId,
+                windowSummary = names,
+                onSelect = {
+                    lifecycleScope.launch { StageWorkspace.activateGroup(g.id) }
+                }
+            )
+        }
+        exposeOverlay.showStageOverview(
+            groups = cards,
+            onNewGroup = {
+                StageWorkspace.createGroup()
+                lifecycleScope.launch { StageWorkspace.syncGeometry("overview-new-group") }
+            }
+        )
     }
 
     /** Desk colour at a given y so the corner masks match the background exactly. */
@@ -446,6 +509,7 @@ class StageHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { exposeOverlay.dismiss() }
         runCatching { chrome.destroy() }
         if (current === this) current = null
         super.onDestroy()
@@ -458,6 +522,23 @@ class StageHostActivity : ComponentActivity() {
         fun requestFinish() {
             val activity = current ?: return
             runCatching { activity.finishAndRemoveTask() }
+        }
+
+        fun openAppExpose(packageName: String) {
+            val activity = current ?: return
+            activity.runOnUiThread {
+                val first = StageWorkspace.windowsForPackage(packageName).firstOrNull()
+                activity.showAppExpose(
+                    packageName = packageName,
+                    appLabel = first?.label ?: packageName,
+                    activityName = first?.component.orEmpty()
+                )
+            }
+        }
+
+        fun openOverview() {
+            val activity = current ?: return
+            activity.runOnUiThread { activity.showStageOverview() }
         }
 
         fun start(context: Context) {

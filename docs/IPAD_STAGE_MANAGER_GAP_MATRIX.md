@@ -39,8 +39,8 @@
 | 20 | Dock 固定应用 / 最近 / 建议 / 应用库 | ✅ | `DockApps.kt` + `StageWorkspaceScreen.StageDock`；已删开发者按钮，加状态点与 2×2 应用库；`docs/p5-dock.png` | — | — | 已通过 | **P5** |
 | 21 | Dock 长按上下文菜单 / New Window / Show All Windows | ✅ | `StageHostActivity.showDockContextMenu()` + `supportsMultiInstance()`；`docs/p5-dock-menu.png` | — | — | 已通过 | **P5** |
 | 22 | Dock 自动隐藏 / 底边唤出 | ✅ | `StageWorkspace.setDockAutoHide()` + `WindowChromeController.updateBottomEdgeStrip()` | — | — | 已通过 | **P5/P7** |
-| 23 | 同应用多窗口（多实例能力探测） | ⛔ | `openApp` 仅靠系统返回 `reused` | 实际探测 `ActivityInfo.launchMode` / `documentLaunchMode` / 多任务支持，支持时允许 New Window，不支持时禁用不伪造 | `ui/DockApps.kt`、`StageWorkspace.kt`、`core/privileged/TaskMutations.kt` | 支持/不支持应用对照真机测试 | **P6** |
-| 24 | App Exposé / Show All Windows | ⛔ | 无 | 按应用展示全部打开窗口（含其他工作台），点击跳转或恢复 | 新文件 `stage/WindowExposeOverlay.kt`、`StageWorkspace.kt` | 真机触发 Show All Windows | **P6** |
+| 23 | 同应用多窗口（多实例能力探测） | ✅ | `supportsMultiInstance()` + `StageWorkspace.openNewWindow()`；便签双独立 Task (#546/#547) 实测通过，Via singleTask 拒绝伪造 | — | — | 已通过 | **P6** |
+| 24 | App Exposé / Show All Windows | ✅ | `windows/StageExposeOverlay.kt` + Dock/窗口菜单入口；`docs/p6-expose.png` | — | — | 已通过 | **P6** |
 | 25 | 左边缘滑入最近组 & 自动隐藏 | 🟠 | `edgeStrip` 可唤出；无横屏自动隐藏设置 | 支持最近列表自动隐藏开关与左边缘滑入临时显示 | `StageWorkspace.kt`、`WindowChromeController.kt` | 真机边缘滑入 | **P7** |
 | 26 | 底边上滑停顿 → 工作台/任务概览 | ⛔ | 无 | 底部边缘手势层（不抢系统 Home）+ 上滑停顿弹出全部工作台/窗口概览 | `WindowChromeController.kt`、`StageWorkspaceScreen.kt` | 真机手势触发概览 | **P7** |
 | 27 | 底部左右滑动切组 / 多指替代手势 | ⛔ | 无 | 底部手势条左右滑动切换前后工作台 | `WindowChromeController.kt`、`StageWorkspace.kt` | 真机左右滑切组 | **P7** |

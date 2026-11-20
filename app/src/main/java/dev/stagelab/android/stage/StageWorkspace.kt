@@ -656,14 +656,21 @@ object StageWorkspace {
         val existing = session.visibleWindowsOf(group.id).size
         val geometry = defaultGeometryFor(existing, at)
         val rect = pxRectFor(geometry)
+        // Glide the newly launched real task upward from the Dock edge into its final slot (P8).
+        val launchRect = StageRect(
+            rect.left,
+            (rect.top + dp(44f)).coerceAtMost(workspaceRect().bottom - dp(200f)),
+            rect.right,
+            (rect.bottom + dp(44f)).coerceAtMost(workspaceRect().bottom)
+        )
         return try {
             val command = JSONObject().put("cmd", "open")
                 .put("id", newId("w"))
                 .put("package", packageName)
                 .put("activity", component)
                 .put("title", label)
-                .put("l", rect.left).put("t", rect.top)
-                .put("r", rect.right).put("b", rect.bottom)
+                .put("l", launchRect.left).put("t", launchRect.top)
+                .put("r", launchRect.right).put("b", launchRect.bottom)
             if (extraName.isNotEmpty()) {
                 command.put("extraName", extraName).put("extraValue", extraValue)
             }
@@ -703,6 +710,10 @@ object StageWorkspace {
                 computeLayout()
             }
             persist()
+            // Animate the real task window from its launch offset into its final workspace rect.
+            StageWindowAnimator.animate(launchRect, rect, steps = 5, durationMs = 130L) { step ->
+                runCatching { applyBounds(window.taskId, step) }
+            }
             syncGeometry("open")
             publishState()
             Result.success(window)
@@ -749,32 +760,49 @@ object StageWorkspace {
         persist()
     }
 
-    /** Snaps a window to a standard iPad-style arrangement inside the current workspace. */
+    /** Snaps a window to a standard iPad-style arrangement with eased real-task motion (P4/P8). */
     suspend fun arrangeWindow(windowId: String, preset: WindowArrangePreset) {
         val window = session.windows[windowId] ?: return
-        window.geometry = when (preset) {
+        val fromRect = pxRectFor(window.geometry)
+        val targetGeometry = when (preset) {
             WindowArrangePreset.LEFT_HALF -> WindowGeometry(0.01f, 0.01f, 0.485f, 0.98f)
             WindowArrangePreset.RIGHT_HALF -> WindowGeometry(0.505f, 0.01f, 0.485f, 0.98f)
             WindowArrangePreset.CENTER -> WindowGeometry(0.18f, 0.08f, 0.64f, 0.84f)
             WindowArrangePreset.FULL -> WindowGeometry(0.01f, 0.01f, 0.98f, 0.98f)
         }
+        val toRect = pxRectFor(targetGeometry)
         session.bringToFront(windowId)
+        StageWindowAnimator.animate(fromRect, toRect) { step ->
+            window.geometry = geometryFor(step)
+            publishState()
+            if (window.alive) runCatching { applyBounds(window.taskId, step) }
+        }
+        window.geometry = targetGeometry
         persist()
         publishState()
-        commitGeometry(windowId)
-        runCatching {
-            StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+        if (window.alive) {
+            runCatching { applyBounds(window.taskId, toRect) }
+            runCatching {
+                StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+            }
         }
     }
 
     /**
      * iPad semantics: minimizing removes the window from the current group and returns it to the
-     * recent list as a single-window group of its own. The task stays alive; it can be dragged
-     * back into any group later.
+     * recent list as a single-window group of its own. The task stays alive and glides smoothly
+     * into the left rail slot before settling (P4/P8).
      */
     suspend fun minimize(windowId: String) {
         val window = session.windows[windowId] ?: return
         val sourceGroupId = session.groupOf(windowId)?.id ?: return
+        val fromRect = pxRectFor(window.geometry)
+        val railSlot = tileRect(0, max(session.groups.size, 1))?.let { tileInner(it) }
+        if (window.alive && railShouldShow() && railSlot != null) {
+            StageWindowAnimator.animate(fromRect, railSlot, steps = 5, durationMs = 140L) { step ->
+                runCatching { applyBounds(window.taskId, step) }
+            }
+        }
         window.minimized = false
 
         // Detach from the current group.
@@ -907,6 +935,18 @@ object StageWorkspace {
 
     suspend fun activateGroup(groupId: String) {
         if (groupId == session.activeGroupId) return
+        val previousGroupId = session.activeGroupId
+        val outgoingFront = session.visibleWindowsOf(previousGroupId).lastOrNull { it.alive }
+        val railPreviewRect = tileRect(0, max(session.groups.size - 1, 1))?.let { tileInner(it) }
+
+        // Outgoing front window glides smoothly toward the left rail slot (P8).
+        if (outgoingFront != null && railShouldShow() && railPreviewRect != null) {
+            val fromRect = pxRectFor(outgoingFront.geometry)
+            StageWindowAnimator.animate(fromRect, railPreviewRect, steps = 5, durationMs = 130L) { step ->
+                runCatching { applyBounds(outgoingFront.taskId, step) }
+            }
+        }
+
         // Portrait (or landscape auto-hide): selecting a group tucks the rail back.
         if (!landscape && railPinnedPortrait) {
             railPinnedPortrait = false
@@ -919,6 +959,18 @@ object StageWorkspace {
         persist()
         publishState()
         ensureGroupAlive(groupId)
+
+        // Incoming front window glides smoothly from the left rail slot into its workspace rect (P8).
+        val incomingFront = session.visibleWindowsOf(groupId).lastOrNull { it.alive }
+        if (incomingFront != null && railPreviewRect != null) {
+            val targetRect = pxRectFor(incomingFront.geometry)
+            runCatching { setFocusable(incomingFront.taskId, true) }
+            runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", incomingFront.taskId)) }
+            StageWindowAnimator.animate(railPreviewRect, targetRect, steps = 5, durationMs = 140L) { step ->
+                runCatching { applyBounds(incomingFront.taskId, step) }
+            }
+        }
+
         syncGeometry("activate-group")
         // Focus the front window of the newly active group.
         session.visibleWindowsOf(groupId).lastOrNull()?.let { front ->

@@ -44,7 +44,7 @@
 | 25 | 左边缘滑入最近组 & 自动隐藏 | ✅ | `edgeStrip` + `StageWorkspace.setRailAutoHide()` + 切组自动收起 | — | — | 已通过 | **P7** |
 | 26 | 底边上滑停顿 → 工作台/任务概览 | ✅ | `WindowChromeController.updateBottomEdgeStrip()` 安全 inset 之上 + `StageExposeOverlay.showStageOverview()`；`docs/p7-overview.png` | — | — | 已通过 | **P7** |
 | 27 | 底部左右滑动切组 / 多指替代手势 | ✅ | `onBottomHorizontalSwipe()` → `StageWorkspace.switchAdjacentGroup()`；真机实测切组不冲突 ColorOS 导航 | — | — | 已通过 | **P7** |
-| 28 | 真实窗口动画（非 Compose 边框） | ⛔ | 逐帧 bounds 跟手；无切组/最小化/恢复过渡动画 | 实测插值 bounds / SurfaceControl / Shell Transition，保护原生触摸与 IME | `StageWorkspace.kt`、`WindowChromeController.kt`、`core/privileged/` | 真机录屏/日志验证 | **P8** |
+| 28 | 真实窗口动画（非 Compose 边框） | ✅ | `StageWindowAnimator` 缓动真实 Task bounds（切组/最小化/排列/Dock 启动）+ ADR-004 保护原生输入；`docs/p8-animated-switch.png` | — | — | 已通过 | **P8** |
 | 29 | 菜单栏 / 快捷键 / 鼠标触控板 / 排列预设 / 外接显示器 | ⛔ | 无 | 全局窗口菜单、外接键盘快捷键、鼠标悬停/右键、左右分屏/网格排列预设、外接显示器探测 | `stage/`、`windows/` | 真机/外设检查 | **P9** |
 | 30 | 输入/IME/Back/无障碍不回归 | ✅ | FREEFORM + Overlay 方案 | 每次改动后回归 | — | 每次验收 | 持续 |
 

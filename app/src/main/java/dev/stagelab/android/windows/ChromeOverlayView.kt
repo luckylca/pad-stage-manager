@@ -330,6 +330,12 @@ class ChromeOverlayView(
                 dragging = false
                 pressedDot = DOT_NONE
                 if (mode == ChromeMode.TITLE) {
+                    // Mouse/trackpad right-click opens the window control menu immediately (P9).
+                    if ((event.buttonState and MotionEvent.BUTTON_SECONDARY) != 0) {
+                        longPressed = true
+                        onAction?.invoke(ACTION_LONG_PRESS)
+                        return true
+                    }
                     pressedDot = when {
                         closeRect.contains(event.x, event.y) -> DOT_CLOSE
                         minimizeRect.contains(event.x, event.y) -> DOT_MINIMIZE

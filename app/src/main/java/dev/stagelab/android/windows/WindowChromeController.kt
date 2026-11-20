@@ -39,6 +39,7 @@ class WindowChromeController(
         fun onBottomEdgeSwipeUp()
         fun onBottomSwipeUpHold()
         fun onBottomHorizontalSwipe(direction: Int)
+        fun onGlobalMenuBarClick(anchorX: Int, anchorY: Int)
         fun onChromeTapOutside()
     }
 
@@ -79,6 +80,7 @@ class WindowChromeController(
     private val holders = LinkedHashMap<String, Holder>()
     private var edgeStrip: View? = null
     private var bottomEdgeStrip: View? = null
+    private var menuBarPill: View? = null
     private var railOverlay: View? = null
     private var dropHighlightView: DropHighlightOverlayView? = null
     private var menuScrimView: View? = null
@@ -299,6 +301,45 @@ class WindowChromeController(
         val params = overlayParams(stripW, stripH, x, y, touchable = true)
         runCatching { wm.addView(strip, params) }.onSuccess { bottomEdgeStrip = strip }
             .onFailure { Log.w(TAG, "bottom edge strip failed: ${it.message}") }
+    }
+
+    /**
+     * Subtle iPad-style top-center Window menu trigger pill (P9).
+     * Tapping opens StageLab's global Window menu (arrangement presets, overview, external display info).
+     */
+    fun updateMenuBarPill(enabled: Boolean, statusInsetPx: Int = 0) {
+        if (!enabled) {
+            menuBarPill?.let { runCatching { wm.removeView(it) } }
+            menuBarPill = null
+            return
+        }
+        val metrics = activity.resources.displayMetrics
+        val pillW = px(76f)
+        val pillH = px(22f)
+        val x = (metrics.widthPixels - pillW) / 2
+        val y = max(statusInsetPx, px(8f))
+        val existing = menuBarPill
+        if (existing != null) {
+            layout(existing, x, y, pillW, pillH)
+            return
+        }
+        val pill = android.widget.TextView(activity).apply {
+            text = "•••"
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(android.graphics.Color.argb(185, 234, 240, 250))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.argb(120, 24, 30, 42))
+                cornerRadius = px(11f).toFloat()
+                setStroke(max(1, px(0.8f)), android.graphics.Color.argb(38, 255, 255, 255))
+            }
+            setOnClickListener {
+                callbacks.onGlobalMenuBarClick(x + pillW / 2 - px(114f), y + pillH + px(8f))
+            }
+        }
+        val params = overlayParams(pillW, pillH, x, y, touchable = true)
+        runCatching { wm.addView(pill, params) }.onSuccess { menuBarPill = pill }
+            .onFailure { Log.w(TAG, "menu bar pill failed: ${it.message}") }
     }
 
     /**
@@ -826,6 +867,8 @@ class WindowChromeController(
         edgeStrip = null
         bottomEdgeStrip?.let { runCatching { wm.removeView(it) } }
         bottomEdgeStrip = null
+        menuBarPill?.let { runCatching { wm.removeView(it) } }
+        menuBarPill = null
         railOverlay?.let { runCatching { wm.removeView(it) } }
         railOverlay = null
         dropHighlightView?.let { runCatching { wm.removeView(it) } }

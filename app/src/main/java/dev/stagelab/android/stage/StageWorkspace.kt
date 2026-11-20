@@ -47,6 +47,11 @@ enum class WindowArrangePreset {
     FULL
 }
 
+enum class GroupArrangePreset {
+    SIDE_BY_SIDE,
+    CASCADE
+}
+
 enum class DropZoneKind {
     NONE,
     WORKSPACE,
@@ -786,6 +791,38 @@ object StageWorkspace {
                 StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
             }
         }
+    }
+
+    /** Multi-window group layout presets (P9 Window menu). */
+    suspend fun arrangeActiveGroup(preset: GroupArrangePreset) {
+        val visible = session.visibleWindowsOf(session.activeGroupId).filter { it.alive }
+        if (visible.isEmpty()) return
+        when (preset) {
+            GroupArrangePreset.SIDE_BY_SIDE -> {
+                if (visible.size == 1) {
+                    arrangeWindow(visible.first().id, WindowArrangePreset.CENTER)
+                    return
+                }
+                val rightWin = visible.last()
+                val leftWin = visible[visible.size - 2]
+                leftWin.geometry = WindowGeometry(0.01f, 0.01f, 0.485f, 0.98f)
+                rightWin.geometry = WindowGeometry(0.505f, 0.01f, 0.485f, 0.98f)
+            }
+            GroupArrangePreset.CASCADE -> {
+                visible.forEachIndexed { idx, w ->
+                    val step = (idx % 5) * 0.055f
+                    w.geometry = WindowGeometry(
+                        x = (0.04f + step).coerceIn(0f, 0.36f),
+                        y = (0.04f + step * 0.8f).coerceIn(0f, 0.28f),
+                        w = 0.62f,
+                        h = 0.74f
+                    )
+                }
+            }
+        }
+        persist()
+        publishState()
+        syncGeometry("arrange-group")
     }
 
     /**

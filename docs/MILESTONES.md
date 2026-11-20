@@ -156,7 +156,16 @@
 - **真机验收**：在 OPPO Pad mini 上连续点击左栏切换"计算器"与"工作区 1"，窗口平滑过渡且 `taskId`（524）与几何坐标（`1121,305,2046,1198`）完整保留，无进程重启或输入异常。
 - 验收证据：`docs/p8-animated-switch.png`。
 
-## 第二阶段进度状态（P1–P8 已提交）
+### P9 扩展能力 —— 已完成，真机通过（基础范围）
+
+- **iPad 风格顶部 Window 菜单栏（StageLab 自有全局实现）**：在状态栏下方居中放置 `•••` 胶囊触发入口，点击弹出全局 Window 菜单，包含双窗左右并排、层叠排列窗口、最大化/还原、最小化、显示所有工作台以及 `DisplayManager` 真实外接显示器状态探测。
+- **窗口排列预设**：新增 `GroupArrangePreset.SIDE_BY_SIDE`（双窗左右并排）与 `CASCADE`（层叠排列），以及单窗 `LEFT_HALF / RIGHT_HALF / CENTER / FULL`。
+- **外接键盘快捷键**：`StageHostActivity.dispatchKeyEvent()` 支持 `Alt/Meta + Tab` 切换工作台、`Meta + ↑` 打开所有工作台概览、`Meta + ←/→` 左右贴靠、`Meta + M` 最小化、`Meta + W` 关闭、`Meta + N` 新建工作台。
+- **鼠标与触控板**：标题栏右键（`BUTTON_SECONDARY`）直接弹出窗口控制菜单，拖动与缩放天然兼容鼠标指针事件。
+- **外接显示器**：通过 `DisplayManager.DISPLAY_CATEGORY_PRESENTATION` 实时探测外接显示器（未连接时诚实显示"未连接"，不虚报独立外接屏多任务支持）。
+- 验收证据：`docs/p9-window-menu.png`（顶部 Window 菜单弹出）、`docs/p9-side-by-side.png`（点击"双窗左右并排"后 `便签 #502` 占 `712..1575`、`Via #545` 占 `1592..2455`）。
+
+## 第二阶段全部完成状态（P1–P9 逐项独立提交）
 
 | 阶段 | 状态 | 关键提交 |
 |---|---|---|
@@ -167,7 +176,10 @@
 | P5 Dock 完整重构 | 真机通过（固定/最近分区、状态点、长按菜单、自动隐藏） | a4bc2e9 |
 | P6 应用窗口管理 | 真机通过（多实例探测、App Exposé、Show All Windows） | 86fa218 |
 | P7 手势体系 | 真机通过（左边缘/底边唤出、上滑概览、底边左右切组） | f4b1240 |
-| P8 真实窗口动画 | 真机通过（`StageWindowAnimator` 缓动真实 Task bounds，保护原生输入） | 本次提交 |
+| P8 真实窗口动画 | 真机通过（`StageWindowAnimator` 缓动真实 Task bounds，保护原生输入） | c0f9fd8 |
+| P9 扩展能力 | 真机通过（Window 菜单栏、排列预设、快捷键、右键菜单、外接屏探测） | 本次提交 |
+
+> 注：场景 E（1 小时连续长稳压测）及外接物理显示器实际投屏多任务需长时/外设环境单独执行，不在本次短时验收中虚报。
 
 ### 遗留清单（按优先级）
 

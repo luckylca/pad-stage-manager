@@ -86,8 +86,9 @@ class StageHostActivity : ComponentActivity() {
                     dockModel = dev.stagelab.android.ui.loadDockModel(context)
                 }
 
-                LaunchedEffect(state.ready, state.landscape, navBottom) {
+                LaunchedEffect(state.ready, state.landscape, navBottom, statusTop) {
                     chrome.updateBottomEdgeStrip(state.ready, navBottom)
+                    chrome.updateMenuBarPill(state.ready, statusTop)
                 }
 
                 LaunchedEffect(state.windows.size) {
@@ -349,7 +350,90 @@ class StageHostActivity : ComponentActivity() {
             lifecycleScope.launch { StageWorkspace.switchAdjacentGroup(direction) }
         }
 
+        override fun onGlobalMenuBarClick(anchorX: Int, anchorY: Int) {
+            showGlobalWindowMenu(anchorX, anchorY)
+        }
+
         override fun onChromeTapOutside() = Unit
+    }
+
+    /** Hardware keyboard shortcuts for external keyboards (P9). */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            val mod = event.isMetaPressed || event.isAltPressed
+            if (mod) {
+                val focusedId = StageWorkspace.state.value.focusedWindow?.id
+                when (event.keyCode) {
+                    android.view.KeyEvent.KEYCODE_TAB -> {
+                        lifecycleScope.launch {
+                            StageWorkspace.switchAdjacentGroup(if (event.isShiftPressed) -1 else 1)
+                        }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                        showStageOverview()
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> if (focusedId != null) {
+                        lifecycleScope.launch { StageWorkspace.arrangeWindow(focusedId, WindowArrangePreset.LEFT_HALF) }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> if (focusedId != null) {
+                        lifecycleScope.launch { StageWorkspace.arrangeWindow(focusedId, WindowArrangePreset.RIGHT_HALF) }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_M -> if (focusedId != null) {
+                        lifecycleScope.launch { StageWorkspace.minimize(focusedId) }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_W -> if (focusedId != null) {
+                        lifecycleScope.launch { StageWorkspace.closeWindow(focusedId) }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_N -> {
+                        StageWorkspace.createGroup()
+                        lifecycleScope.launch { StageWorkspace.syncGeometry("shortcut-new-group") }
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    /** StageLab's iPad-style global Window menu (P9). */
+    private fun showGlobalWindowMenu(anchorX: Int, anchorY: Int) {
+        val state = StageWorkspace.state.value
+        val focused = state.focusedWindow
+        val items = ArrayList<WindowChromeController.MenuItem>()
+        items += WindowChromeController.MenuItem("双窗左右并排") {
+            lifecycleScope.launch { StageWorkspace.arrangeActiveGroup(GroupArrangePreset.SIDE_BY_SIDE) }
+        }
+        items += WindowChromeController.MenuItem("层叠排列窗口") {
+            lifecycleScope.launch { StageWorkspace.arrangeActiveGroup(GroupArrangePreset.CASCADE) }
+        }
+        if (focused != null) {
+            items += WindowChromeController.MenuItem("最大化 / 还原「${focused.title}」") {
+                chrome.toggleZoom(focused.id)
+            }
+            items += WindowChromeController.MenuItem("最小化「${focused.title}」") {
+                lifecycleScope.launch { StageWorkspace.minimize(focused.id) }
+            }
+        }
+        items += WindowChromeController.MenuItem("显示所有工作台") {
+            showStageOverview()
+        }
+        val displayManager = getSystemService(android.hardware.display.DisplayManager::class.java)
+        val externalDisplays = displayManager?.getDisplays(android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            ?: emptyArray()
+        val displaySummary = if (externalDisplays.isEmpty()) {
+            "外接显示器：未连接"
+        } else {
+            val d = externalDisplays.first()
+            "外接显示器：${d.name} (#${d.displayId})"
+        }
+        items += WindowChromeController.MenuItem(displaySummary) { /* informational probe */ }
+        chrome.showWindowMenu("窗口 · ${state.activeGroupTitle}", anchorX, anchorY, items)
     }
 
     /** iPad-style Dock icon context menu (P5). */

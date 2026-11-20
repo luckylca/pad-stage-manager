@@ -182,8 +182,6 @@ class StageHostActivity : ComponentActivity() {
                         },
                         onAddApp = { openAppPicker() },
                         onExit = { lifecycleScope.launch { StageModeController.stop(); finish() } },
-                        onRestoreMinimized = { id -> lifecycleScope.launch { StageWorkspace.restore(id) } },
-                        onCloseMinimized = { id -> lifecycleScope.launch { StageWorkspace.closeWindow(id) } },
                         onEmptyTap = { StageWorkspace.setRailVisible(false) }
                     )
                 }

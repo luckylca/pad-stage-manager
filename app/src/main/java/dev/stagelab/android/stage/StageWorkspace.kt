@@ -430,28 +430,60 @@ object StageWorkspace {
         persist()
     }
 
+    /**
+     * iPad semantics: minimizing removes the window from the current group and returns it to the
+     * recent list as a single-window group of its own. The task stays alive; it can be dragged
+     * back into any group later.
+     */
     suspend fun minimize(windowId: String) {
         val window = session.windows[windowId] ?: return
-        window.minimized = true
-        // Sending the task behind the stage host is what actually hides it: WindowContainerTransaction
-        // setHidden is a no-op for tasks owned by the system organizer on this build.
+        val sourceGroupId = session.groupOf(windowId)?.id ?: return
+        window.minimized = false
+
+        // Detach from the current group.
+        session.groups.forEach { it.windowIds.remove(windowId) }
+
+        // Park the task behind the stage host (it must stay alive and hidden from the workspace).
         runCatching {
+            setFocusable(window.taskId, false)
             StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId))
         }
+
+        // Put it at the top of the recent list as its own group (or reuse the existing singleton).
+        val existingGroup = session.groups.firstOrNull { group ->
+            group.id != sourceGroupId &&
+                group.windowIds.size == 1 &&
+                session.windowsOf(group.id).firstOrNull()?.packageName == window.packageName
+        }
+        val groupId = existingGroup?.id ?: run {
+            val group = session.newGroup(window.label)
+            group.id
+        }
+        session.group(groupId)!!.windowIds += windowId
+        session.group(groupId)!!.lastActiveAt = now() - 1 // just below the active group
         persist()
         publishState()
-        // Promote the next window in the group.
-        session.visibleWindowsOf(session.activeGroupId).lastOrNull()?.let { next ->
+
+        // Promote the next window in the source group.
+        session.visibleWindowsOf(sourceGroupId).lastOrNull()?.let { next ->
             runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", next.taskId)) }
         }
     }
 
+    /** Restores a minimized window into the current group (drag or tap from the recent list). */
     suspend fun restore(windowId: String) {
         val window = session.windows[windowId] ?: return
         window.minimized = false
-        session.bringToFront(windowId)
+        val currentGroup = session.groupOf(windowId)
+        if (currentGroup == null || currentGroup.id == session.activeGroupId) {
+            // Already part of the active group: bring it back into the workspace.
+            session.bringToFront(windowId)
+        } else {
+            // Coming from the recent list: move it into the active group.
+            session.moveWindow(windowId, session.activeGroupId)
+        }
         runCatching {
-            StageRuntime.command(JSONObject().put("cmd", "show").put("taskId", window.taskId))
+            setFocusable(window.taskId, true)
             StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
         }
         persist()
@@ -609,6 +641,8 @@ object StageWorkspace {
                     windows.forEach { window ->
                         if (!window.alive) return@forEach
                         if (window.minimized) {
+                            // Minimized windows live in the recent list, not in the workspace.
+                            runCatching { setFocusable(window.taskId, false) }
                             runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
                             return@forEach
                         }
@@ -617,7 +651,9 @@ object StageWorkspace {
                         runCatching { applyBounds(window.taskId, rect) }
                     }
                 } else if (railShouldShow()) {
-                    val otherGroups = session.sortedGroups().filter { it.id != activeId }
+                    val otherGroups = session.sortedGroups()
+                        .filter { it.id != activeId }
+                        .filter { group -> session.visibleWindowsOf(group.id).isNotEmpty() }
                     val slot = otherGroups.indexOfFirst { it.id == group.id }
                     val rect = tileRect(slot.coerceAtLeast(0), otherGroups.size)
                     if (rect == null || slot > 0) {
@@ -648,6 +684,11 @@ object StageWorkspace {
                         runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
                     }
                 }
+            }
+            // Minimized windows sit in the recent list, never in the workspace.
+            session.windows.values.filter { it.minimized && it.alive }.forEach { window ->
+                runCatching { setFocusable(window.taskId, false) }
+                runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
             }
             // The focused window must be brought back to the front after parking others.
             session.visibleWindowsOf(activeId).lastOrNull()?.let { front ->
@@ -737,6 +778,7 @@ object StageWorkspace {
         val workspace = workspaceRect()
         val activeId = session.activeGroupId
         val groups = session.sortedGroups()
+        // Recent list: every non-active group (minimized windows live here as singleton groups).
         val tiles = groups.mapIndexedNotNull { index, group ->
             if (group.id == activeId) return@mapIndexedNotNull null
             val otherIndex = groups.filter { it.id != activeId }.indexOfFirst { it.id == group.id }
@@ -768,9 +810,13 @@ object StageWorkspace {
             }
         val minimized = windows.filter { it.minimized }
         val railShown = railShouldShow()
-        // "+" button rectangle, shared with the rail touch overlay.
+        // "+" button sits after the rail content, or at the rail top when it is empty.
         val railLeft = railRect()?.left ?: dp(12f)
-        val railBottom = tiles.maxOfOrNull { it.rect.bottom } ?: (workspace.top + dp(8f))
+        val railBottom = if (railShown && tiles.isNotEmpty()) {
+            tiles.maxOf { it.rect.bottom }
+        } else {
+            railRect()?.top ?: (workspace.top + dp(8f))
+        }
         val addSize = dp(44f)
         val addRect = StageRect(
             left = railLeft,

@@ -1,4 +1,4 @@
-package dev.stagelab.android.stage
+﻿package dev.stagelab.android.stage
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -75,8 +75,6 @@ fun StageWorkspaceScreen(
     onDockDrop: (DockApp, android.graphics.PointF) -> Unit,
     onAddApp: () -> Unit,
     onExit: () -> Unit,
-    onRestoreMinimized: (String) -> Unit,
-    onCloseMinimized: (String) -> Unit,
     onEmptyTap: () -> Unit
 ) {
     val density = LocalDensity.current
@@ -114,8 +112,6 @@ fun StageWorkspaceScreen(
             onAddApp = onAddApp,
             onExit = onExit,
             onToggleRail = onToggleRail,
-            onRestoreMinimized = onRestoreMinimized,
-            onCloseMinimized = onCloseMinimized,
             onDragState = { app, offset, origin ->
                 dragging = app
                 dragOffset = offset
@@ -410,8 +406,6 @@ private fun StageDock(
     onAddApp: () -> Unit,
     onExit: () -> Unit,
     onToggleRail: () -> Unit,
-    onRestoreMinimized: (String) -> Unit,
-    onCloseMinimized: (String) -> Unit,
     onDragState: (DockApp, Offset, Offset) -> Unit,
     onDragLost: () -> Unit
 ) {
@@ -420,10 +414,6 @@ private fun StageDock(
         modifier = modifier.padding(bottom = with(density) { 14.dp }),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (state.minimized.isNotEmpty()) {
-            MinimizedTray(state.minimized, onRestoreMinimized, onCloseMinimized)
-            Spacer(Modifier.height(8.dp))
-        }
         Row(
             modifier = Modifier
                 .shadow(28.dp, RoundedCornerShape(28.dp), ambientColor = Color.Black)
@@ -447,46 +437,6 @@ private fun StageDock(
             DockAction(icon = "＋", label = "应用库") { onAddApp() }
             Spacer(Modifier.width(2.dp))
             DockAction(icon = "⏻", label = "关闭 Stage Manager", danger = true) { onExit() }
-        }
-    }
-}
-
-@Composable
-private fun MinimizedTray(
-    windows: List<WindowTile>,
-    onRestore: (String) -> Unit,
-    onClose: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(Color(0xCC11161F))
-            .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(18.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        windows.forEach { window ->
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0x22FFFFFF))
-                    .clickable { onRestore(window.id) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(window.title.take(6), color = Ink, fontSize = 10.sp)
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    modifier = Modifier
-                        .size(18.dp)
-                        .clip(CircleShape)
-                        .clickable { onClose(window.id) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("✕", color = InkMuted, fontSize = 9.sp)
-                }
-            }
         }
     }
 }

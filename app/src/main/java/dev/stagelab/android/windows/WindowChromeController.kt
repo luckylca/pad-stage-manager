@@ -36,6 +36,7 @@ class WindowChromeController(
         fun onZoomToggled(id: String, maximized: Boolean)
         fun onWindowMenuRequested(id: String, anchorX: Int, anchorY: Int)
         fun onLeftEdgeSwipe()
+        fun onBottomEdgeSwipeUp()
         fun onChromeTapOutside()
     }
 
@@ -75,6 +76,7 @@ class WindowChromeController(
     private val wm: WindowManager = activity.getSystemService(WindowManager::class.java)
     private val holders = LinkedHashMap<String, Holder>()
     private var edgeStrip: View? = null
+    private var bottomEdgeStrip: View? = null
     private var railOverlay: View? = null
     private var dropHighlightView: DropHighlightOverlayView? = null
     private var menuScrimView: View? = null
@@ -189,6 +191,51 @@ class WindowChromeController(
         )
         runCatching { wm.addView(strip, params) }.onSuccess { edgeStrip = strip }
             .onFailure { Log.w(TAG, "edge strip failed: ${it.message}") }
+    }
+
+    /**
+     * Thin centered bottom-edge gesture strip used to reveal an auto-hidden Dock (P5).
+     * Kept narrow horizontally (36% of screen width) and above the system home pill inset so it
+     * does not conflict with Android's system Home or Back gestures.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun updateBottomEdgeStrip(enabled: Boolean) {
+        if (!enabled) {
+            bottomEdgeStrip?.let { runCatching { wm.removeView(it) } }
+            bottomEdgeStrip = null
+            return
+        }
+        val metrics = activity.resources.displayMetrics
+        val stripW = (metrics.widthPixels * 0.36f).roundToInt().coerceAtLeast(px(160f))
+        val stripH = px(18f)
+        val x = (metrics.widthPixels - stripW) / 2
+        val y = metrics.heightPixels - stripH - px(2f)
+        val existing = bottomEdgeStrip
+        if (existing != null) {
+            layout(existing, x, y, stripW, stripH)
+            return
+        }
+        val strip = View(activity).apply {
+            setBackgroundColor(0x00000000)
+            setOnTouchListener(object : android.view.View.OnTouchListener {
+                private var startY = 0f
+                override fun onTouch(v: View, event: android.view.MotionEvent): Boolean {
+                    when (event.actionMasked) {
+                        android.view.MotionEvent.ACTION_DOWN -> startY = event.rawY
+                        android.view.MotionEvent.ACTION_UP -> {
+                            val dy = startY - event.rawY
+                            if (dy > px(20f)) {
+                                callbacks.onBottomEdgeSwipeUp()
+                            }
+                        }
+                    }
+                    return true
+                }
+            })
+        }
+        val params = overlayParams(stripW, stripH, x, y, touchable = true)
+        runCatching { wm.addView(strip, params) }.onSuccess { bottomEdgeStrip = strip }
+            .onFailure { Log.w(TAG, "bottom edge strip failed: ${it.message}") }
     }
 
     /**
@@ -714,6 +761,8 @@ class WindowChromeController(
         holders.keys.toList().forEach { remove(it) }
         edgeStrip?.let { runCatching { wm.removeView(it) } }
         edgeStrip = null
+        bottomEdgeStrip?.let { runCatching { wm.removeView(it) } }
+        bottomEdgeStrip = null
         railOverlay?.let { runCatching { wm.removeView(it) } }
         railOverlay = null
         dropHighlightView?.let { runCatching { wm.removeView(it) } }

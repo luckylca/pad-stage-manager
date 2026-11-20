@@ -61,6 +61,8 @@ class StageCommandReceiver : BroadcastReceiver() {
                 StageWorkspace.syncGeometry("test-new-group")
             }
             "rail" -> StageWorkspace.setRailVisible(intent.getBooleanExtra("visible", true))
+            "dockAutoHide" -> StageWorkspace.setDockAutoHide(intent.getBooleanExtra("enabled", false))
+            "dockReveal" -> StageWorkspace.setDockRevealed(intent.getBooleanExtra("visible", true))
             "closeGroup" -> StageModeController.post { closeActiveGroup() }
             "reset" -> StageModeController.post { StageWorkspace.resetSession() }
             else -> Log.w(TAG, "unknown command: $command")

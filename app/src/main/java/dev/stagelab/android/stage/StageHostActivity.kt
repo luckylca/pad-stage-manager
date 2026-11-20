@@ -77,11 +77,15 @@ class StageHostActivity : ComponentActivity() {
                 val statusTop = WindowInsets.statusBars.getTop(density)
                 val navBottom = WindowInsets.navigationBars.getBottom(density)
                 val densityValue = remember { density.density }
-                var dockApps by remember { mutableStateOf(emptyList<dev.stagelab.android.ui.DockApp>()) }
+                var dockModel by remember { mutableStateOf(dev.stagelab.android.ui.DockModel()) }
                 val context = this
 
-                LaunchedEffect(Unit) {
-                    dockApps = dev.stagelab.android.ui.loadDockApps(context)
+                LaunchedEffect(state.dockRefreshVersion) {
+                    dockModel = dev.stagelab.android.ui.loadDockModel(context)
+                }
+
+                LaunchedEffect(state.dockAutoHide, state.dockVisible, state.landscape) {
+                    chrome.updateBottomEdgeStrip(state.dockAutoHide && !state.dockVisible)
                 }
 
                 LaunchedEffect(state.windows.size) {
@@ -192,7 +196,7 @@ class StageHostActivity : ComponentActivity() {
                 ) {
                     StageWorkspaceScreen(
                         state = state,
-                        dockApps = dockApps,
+                        dockModel = dockModel,
                         onGroupClick = { id -> lifecycleScope.launch { StageWorkspace.activateGroup(id) } },
                         onNewGroup = {
                             StageWorkspace.createGroup()
@@ -202,12 +206,15 @@ class StageHostActivity : ComponentActivity() {
                         onRailScroll = { dir ->
                             StageWorkspace.scrollRail(-dir * resources.displayMetrics.density * 140f)
                         },
-                        onToggleRail = { StageWorkspace.toggleRail() },
                         onDockApp = { app ->
                             lifecycleScope.launch {
                                 StageWorkspace.activateOrOpenApp(app.packageName, app.label, app.activityName)
                             }
                         },
+                        onDockLongPress = { app, pos ->
+                            showDockContextMenu(app, pos.x.roundToInt(), pos.y.roundToInt(), dockModel)
+                        },
+                        onDockDismissMenu = { chrome.dismissWindowMenu() },
                         onDockDragMove = { point ->
                             StageWorkspace.updateExternalDragTarget(point.x.roundToInt(), point.y.roundToInt())
                         },
@@ -237,8 +244,10 @@ class StageHostActivity : ComponentActivity() {
                         },
                         onDockDragCancel = { StageWorkspace.clearDropHighlight() },
                         onAddApp = { openAppPicker() },
-                        onExit = { lifecycleScope.launch { StageModeController.stop(); finish() } },
-                        onEmptyTap = { StageWorkspace.setRailVisible(false) }
+                        onEmptyTap = {
+                            if (state.dockAutoHide) StageWorkspace.setDockRevealed(false)
+                            if (!state.landscape) StageWorkspace.setRailVisible(false)
+                        }
                     )
                 }
             }
@@ -320,7 +329,70 @@ class StageHostActivity : ComponentActivity() {
             StageWorkspace.setRailVisible(true)
         }
 
+        override fun onBottomEdgeSwipeUp() {
+            StageWorkspace.setDockRevealed(true)
+        }
+
         override fun onChromeTapOutside() = Unit
+    }
+
+    /** iPad-style Dock icon context menu (P5). */
+    private fun showDockContextMenu(
+        app: dev.stagelab.android.ui.DockApp,
+        anchorX: Int,
+        anchorY: Int,
+        dockModel: dev.stagelab.android.ui.DockModel
+    ) {
+        val items = ArrayList<WindowChromeController.MenuItem>()
+        items += WindowChromeController.MenuItem("加入当前工作台") {
+            lifecycleScope.launch {
+                StageWorkspace.openApp(app.packageName, app.label, app.activityName, null)
+            }
+        }
+        if (app.supportsMultiWindow) {
+            items += WindowChromeController.MenuItem("新建窗口 (New Window)") {
+                lifecycleScope.launch {
+                    StageWorkspace.openApp(app.packageName, app.label, app.activityName, null)
+                }
+            }
+        }
+        val appWindows = StageWorkspace.session.windows.values
+            .filter { it.packageName == app.packageName && it.alive }
+        if (appWindows.isNotEmpty()) {
+            items += WindowChromeController.MenuItem("显示所有窗口 (${appWindows.size})") {
+                val windowItems = appWindows.map { w ->
+                    val grpTitle = StageWorkspace.session.groupOf(w.id)?.title ?: "工作区"
+                    WindowChromeController.MenuItem("${w.label} · $grpTitle (#${w.taskId})") {
+                        lifecycleScope.launch {
+                            val owner = StageWorkspace.session.groupOf(w.id)
+                            if (owner != null && owner.id != StageWorkspace.session.activeGroupId) {
+                                StageWorkspace.activateGroup(owner.id)
+                            }
+                            StageWorkspace.focusWindow(w.id)
+                        }
+                    }
+                }
+                chrome.showWindowMenu("${app.label} 的所有窗口", anchorX, anchorY - 220, windowItems)
+            }
+        }
+        val currentPinned = dockModel.pinned.map { it.packageName }
+        if (app.pinned) {
+            items += WindowChromeController.MenuItem("从 Dock 移除") {
+                dev.stagelab.android.ui.DockConfigStore.unpin(this, app.packageName, currentPinned)
+                StageWorkspace.notifyDockChanged()
+            }
+        } else {
+            items += WindowChromeController.MenuItem("固定到 Dock") {
+                dev.stagelab.android.ui.DockConfigStore.pin(this, app.packageName, currentPinned)
+                StageWorkspace.notifyDockChanged()
+            }
+        }
+        val autoHide = StageWorkspace.state.value.dockAutoHide
+        items += WindowChromeController.MenuItem(if (autoHide) "始终显示 Dock" else "自动隐藏 Dock") {
+            StageWorkspace.setDockAutoHide(!autoHide)
+        }
+        val menuY = (anchorY - (items.size * 115 + 120)).coerceAtLeast(80)
+        chrome.showWindowMenu(app.label, anchorX - 180, menuY, items)
     }
 
     /** Desk colour at a given y so the corner masks match the background exactly. */

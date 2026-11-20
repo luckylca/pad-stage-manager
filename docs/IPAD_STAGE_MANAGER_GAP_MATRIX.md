@@ -36,9 +36,9 @@
 | 17 | 最小化 = 离开当前组回到最近列表 | ✅ | `f5aa5da`：`StageWorkspace.minimize()` 转为单窗口最近组；`docs/p4-minimize.png` | — | — | 已通过 | **P4** |
 | 18 | 长按窗口控制菜单 | ✅ | `ChromeOverlayView` 420ms 长按 + `WindowChromeController.showWindowMenu()`；`docs/p4-menu.png` | — | — | 已通过 | **P4** |
 | 19 | 关闭只关所选 Task | ✅ | `removeTask` + 失败保留 | — | — | 已通过 | 已达成 |
-| 20 | Dock 固定应用 / 最近 / 建议 / 应用库 | 🟠 | `DockApps.kt` 硬编码列表；Dock 仍含 `◧` / `⏻` 开发者按钮 | 删除开发者按钮；持久化固定应用 + 最近/建议分区 + 分隔线 + 网格应用库图标 + 活动状态圆点 | `ui/DockApps.kt`、`StageWorkspaceScreen.kt`、`StageHostActivity.kt` | 真机 Dock 截图与交互 | **P5** |
-| 21 | Dock 长按上下文菜单 / New Window / Show All Windows | ⛔ | 长按仅拖动 | 长按静止弹出上下文菜单（固定/取消固定、加入当前工作台、New Window、Show All Windows），拖动则进入拖放 | `StageWorkspaceScreen.kt`、`StageHostActivity.kt` | 真机长按 Dock 图标 | **P5** |
-| 22 | Dock 自动隐藏 / 底边唤出 | ⛔ | 常显 | Dock 自动隐藏配置 + 底部边缘上滑唤出 | `StageWorkspace.kt`、`WindowChromeController.kt`、`StageWorkspaceScreen.kt` | 真机底边轻扫唤出 | **P5/P7** |
+| 20 | Dock 固定应用 / 最近 / 建议 / 应用库 | ✅ | `DockApps.kt` + `StageWorkspaceScreen.StageDock`；已删开发者按钮，加状态点与 2×2 应用库；`docs/p5-dock.png` | — | — | 已通过 | **P5** |
+| 21 | Dock 长按上下文菜单 / New Window / Show All Windows | ✅ | `StageHostActivity.showDockContextMenu()` + `supportsMultiInstance()`；`docs/p5-dock-menu.png` | — | — | 已通过 | **P5** |
+| 22 | Dock 自动隐藏 / 底边唤出 | ✅ | `StageWorkspace.setDockAutoHide()` + `WindowChromeController.updateBottomEdgeStrip()` | — | — | 已通过 | **P5/P7** |
 | 23 | 同应用多窗口（多实例能力探测） | ⛔ | `openApp` 仅靠系统返回 `reused` | 实际探测 `ActivityInfo.launchMode` / `documentLaunchMode` / 多任务支持，支持时允许 New Window，不支持时禁用不伪造 | `ui/DockApps.kt`、`StageWorkspace.kt`、`core/privileged/TaskMutations.kt` | 支持/不支持应用对照真机测试 | **P6** |
 | 24 | App Exposé / Show All Windows | ⛔ | 无 | 按应用展示全部打开窗口（含其他工作台），点击跳转或恢复 | 新文件 `stage/WindowExposeOverlay.kt`、`StageWorkspace.kt` | 真机触发 Show All Windows | **P6** |
 | 25 | 左边缘滑入最近组 & 自动隐藏 | 🟠 | `edgeStrip` 可唤出；无横屏自动隐藏设置 | 支持最近列表自动隐藏开关与左边缘滑入临时显示 | `StageWorkspace.kt`、`WindowChromeController.kt` | 真机边缘滑入 | **P7** |

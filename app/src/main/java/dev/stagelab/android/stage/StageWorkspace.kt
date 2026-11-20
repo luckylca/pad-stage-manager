@@ -79,6 +79,11 @@ data class WorkspaceState(
     val railUpRect: StageRect = StageRect(0, 0, 0, 0),
     val railDownRect: StageRect = StageRect(0, 0, 0, 0),
     val dropHighlight: DropHighlight = DropHighlight(),
+    val dockVisible: Boolean = true,
+    val dockAutoHide: Boolean = false,
+    val activePackages: Set<String> = emptySet(),
+    val runningPackages: Set<String> = emptySet(),
+    val dockRefreshVersion: Int = 0,
     val backend: String = "",
     val error: String? = null
 ) {
@@ -125,10 +130,39 @@ object StageWorkspace {
     private var railPinnedPortrait = false
     private var railScroll = 0f
     private var currentDropHighlight = DropHighlight()
+    private var dockAutoHide = false
+    private var dockRevealed = false
+    private var dockRefreshVersion = 0
 
     fun isLandscape(): Boolean = landscape
 
     private fun railShouldShow(): Boolean = if (landscape) !railHiddenByUser else railPinnedPortrait
+
+    private fun dockShouldShow(): Boolean = !dockAutoHide || dockRevealed
+
+    fun setDockAutoHide(enabled: Boolean) {
+        if (dockAutoHide == enabled) return
+        dockAutoHide = enabled
+        dockRevealed = false
+        appContext?.getSharedPreferences("stagelab_prefs_v1", Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean("dock_auto_hide", enabled)?.apply()
+        computeLayout()
+        publishState()
+        scope.launch { runCatching { syncGeometry("dock-autohide") } }
+    }
+
+    fun setDockRevealed(revealed: Boolean) {
+        if (!dockAutoHide) return
+        if (dockRevealed == revealed) return
+        dockRevealed = revealed
+        computeLayout()
+        publishState()
+    }
+
+    fun notifyDockChanged() {
+        dockRefreshVersion++
+        publishState()
+    }
 
     // ------------------------------------------------------------------ layout
 
@@ -145,19 +179,21 @@ object StageWorkspace {
             right = (screenW + dockW) / 2,
             bottom = screenH - navInset - dp(14f)
         )
+        val dockShown = dockShouldShow()
+        val dockBottomEdge = if (dockShown) dock.top - dp(12f) else screenH - navInset - dp(12f)
         val railLeft = dp(12f)
         val rail = StageRect(
             left = railLeft,
             top = statusInset + dp(10f),
             right = railLeft + railWidthPx(),
-            bottom = dock.top - dp(12f)
+            bottom = dockBottomEdge
         )
         val workspaceLeft = if (railShouldShow()) rail.right + dp(14f) else dp(18f)
         val workspace = StageRect(
             left = workspaceLeft,
             top = statusInset + dp(10f),
             right = screenW - dp(18f),
-            bottom = dock.top - dp(12f)
+            bottom = dockBottomEdge
         )
         _layout = Layout(dock = dock, workspace = workspace, dockHeight = dockH, rail = rail)
     }
@@ -258,6 +294,9 @@ object StageWorkspace {
         appContext = context.applicationContext
         store = StageSessionStore(context.applicationContext)
         session = store?.load() ?: StageSession.createDefault()
+        dockAutoHide = context.applicationContext
+            .getSharedPreferences("stagelab_prefs_v1", Context.MODE_PRIVATE)
+            .getBoolean("dock_auto_hide", false)
         publishState()
     }
 
@@ -372,6 +411,10 @@ object StageWorkspace {
         label: String,
         component: String
     ): Result<StageWindow> {
+        if (dockAutoHide && dockRevealed) {
+            dockRevealed = false
+            computeLayout()
+        }
         val activeId = session.activeGroupId
         // 1. Check active group first.
         val inActive = session.visibleWindowsOf(activeId).lastOrNull { it.packageName == packageName }
@@ -407,6 +450,10 @@ object StageWorkspace {
      * moves the group's windows into the current active group, placing the front window at [at].
      */
     suspend fun addGroupToActiveGroup(sourceGroupId: String, at: android.graphics.PointF? = null): Boolean {
+        if (dockAutoHide && dockRevealed) {
+            dockRevealed = false
+            computeLayout()
+        }
         val activeId = session.activeGroupId
         if (sourceGroupId == activeId) return false
         val sourceGroup = session.group(sourceGroupId) ?: return false
@@ -583,6 +630,14 @@ object StageWorkspace {
                 taskId = data.optInt("taskId"),
                 geometry = geometry
             )
+            appContext?.let {
+                dev.stagelab.android.ui.DockConfigStore.recordRecent(it, packageName)
+                dockRefreshVersion++
+            }
+            if (dockAutoHide && dockRevealed) {
+                dockRevealed = false
+                computeLayout()
+            }
             persist()
             syncGeometry("open")
             publishState()
@@ -1096,6 +1151,8 @@ object StageWorkspace {
         val downRect = if (scrollable) {
             StageRect(railRightEdge - chevron - dp(8f), railBottomEdge - chevron - dp(8f), railRightEdge - dp(8f), railBottomEdge - dp(8f))
         } else StageRect(0, 0, 0, 0)
+        val activePackages = windows.filterNot { it.minimized }.map { it.packageName }.toSet()
+        val runningPackages = session.windows.values.filter { it.alive }.map { it.packageName }.toSet()
         _state.value = WorkspaceState(
             ready = screenW > 0,
             activeGroupId = activeId,
@@ -1112,6 +1169,11 @@ object StageWorkspace {
             railUpRect = upRect,
             railDownRect = downRect,
             dropHighlight = currentDropHighlight,
+            dockVisible = dockShouldShow(),
+            dockAutoHide = dockAutoHide,
+            activePackages = activePackages,
+            runningPackages = runningPackages,
+            dockRefreshVersion = dockRefreshVersion,
             backend = StageRuntime.state.value.backend,
             error = null
         )

@@ -5,8 +5,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
 import dev.stagelab.android.ui.DockApp
+import dev.stagelab.android.ui.DockModel
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private val SurfaceTop = Color(0xFF141922)
@@ -66,17 +68,17 @@ private val Accent = Color(0xFF8AA0FF)
 @Composable
 fun StageWorkspaceScreen(
     state: WorkspaceState,
-    dockApps: List<DockApp>,
+    dockModel: DockModel,
     onGroupClick: (String) -> Unit,
     onNewGroup: () -> Unit,
     onRailScroll: (Int) -> Unit,
-    onToggleRail: () -> Unit,
     onDockApp: (DockApp) -> Unit,
+    onDockLongPress: (DockApp, android.graphics.PointF) -> Unit,
+    onDockDismissMenu: () -> Unit,
     onDockDragMove: (android.graphics.PointF) -> Unit,
     onDockDrop: (DockApp, android.graphics.PointF) -> Unit,
     onDockDragCancel: () -> Unit,
     onAddApp: () -> Unit,
-    onExit: () -> Unit,
     onEmptyTap: () -> Unit
 ) {
     val density = LocalDensity.current
@@ -106,32 +108,38 @@ fun StageWorkspaceScreen(
             EmptyWorkspaceHint()
         }
 
-        StageDock(
+        AnimatedVisibility(
+            visible = state.dockVisible,
             modifier = Modifier.align(Alignment.BottomCenter),
-            state = state,
-            dockApps = dockApps,
-            onDockApp = onDockApp,
-            onAddApp = onAddApp,
-            onExit = onExit,
-            onToggleRail = onToggleRail,
-            onDragState = { app, offset, origin ->
-                dragging = app
-                dragOffset = offset
-                dragOrigin = origin
-                val position = origin + offset
-                onDockDragMove(android.graphics.PointF(position.x, position.y))
-            },
-            onDragLost = { cancelled ->
-                val app = dragging
-                if (app != null && !cancelled) {
-                    val position = dragOrigin + dragOffset
-                    onDockDrop(app, android.graphics.PointF(position.x, position.y))
-                } else {
-                    onDockDragCancel()
+            enter = slideInVertically(tween(220)) { it } + fadeIn(tween(180)),
+            exit = slideOutVertically(tween(200)) { it } + fadeOut(tween(150))
+        ) {
+            StageDock(
+                state = state,
+                dockModel = dockModel,
+                onDockApp = onDockApp,
+                onDockLongPress = onDockLongPress,
+                onDockDismissMenu = onDockDismissMenu,
+                onAddApp = onAddApp,
+                onDragState = { app, offset, origin ->
+                    dragging = app
+                    dragOffset = offset
+                    dragOrigin = origin
+                    val position = origin + offset
+                    onDockDragMove(android.graphics.PointF(position.x, position.y))
+                },
+                onDragLost = { cancelled ->
+                    val app = dragging
+                    if (app != null && !cancelled) {
+                        val position = dragOrigin + dragOffset
+                        onDockDrop(app, android.graphics.PointF(position.x, position.y))
+                    } else {
+                        onDockDragCancel()
+                    }
+                    dragging = null
                 }
-                dragging = null
-            }
-        )
+            )
+        }
 
         dragging?.let { app ->
             val position = dragOrigin + dragOffset
@@ -402,15 +410,20 @@ private fun EmptyWorkspaceHint() {
 private fun StageDock(
     modifier: Modifier = Modifier,
     state: WorkspaceState,
-    dockApps: List<DockApp>,
+    dockModel: DockModel,
     onDockApp: (DockApp) -> Unit,
+    onDockLongPress: (DockApp, android.graphics.PointF) -> Unit,
+    onDockDismissMenu: () -> Unit,
     onAddApp: () -> Unit,
-    onExit: () -> Unit,
-    onToggleRail: () -> Unit,
     onDragState: (DockApp, Offset, Offset) -> Unit,
     onDragLost: (Boolean) -> Unit
 ) {
     val density = LocalDensity.current
+    val pinnedLimit = if (state.landscape) 7 else 4
+    val recentLimit = if (state.landscape) 3 else 2
+    val pinned = dockModel.pinned.take(pinnedLimit)
+    val recent = dockModel.recent.take(recentLimit)
+
     Column(
         modifier = modifier.padding(bottom = with(density) { 14.dp }),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -419,25 +432,46 @@ private fun StageDock(
             modifier = Modifier
                 .shadow(28.dp, RoundedCornerShape(28.dp), ambientColor = Color.Black)
                 .clip(RoundedCornerShape(28.dp))
-                .background(Color(0xE6171D27))
-                .border(1.dp, Color(0x1AFFFFFF), RoundedCornerShape(28.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .background(Color(0xD919202D))
+                .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(28.dp))
+                .padding(horizontal = 14.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            DockAction(icon = "◧", label = "应用组") { onToggleRail() }
-            Spacer(Modifier.width(2.dp))
-            dockApps.take(6).forEach { app ->
+            pinned.forEach { app ->
                 DockIcon(
                     app = app,
+                    activeInStage = app.packageName in state.activePackages,
+                    runningElsewhere = app.packageName in state.runningPackages,
                     onClick = { onDockApp(app) },
+                    onLongPress = { pos -> onDockLongPress(app, pos) },
+                    onDismissMenu = onDockDismissMenu,
                     onDragState = onDragState,
                     onDragLost = onDragLost
                 )
             }
-            DockAction(icon = "＋", label = "应用库") { onAddApp() }
-            Spacer(Modifier.width(2.dp))
-            DockAction(icon = "⏻", label = "关闭 Stage Manager", danger = true) { onExit() }
+            if (pinned.isNotEmpty() && (recent.isNotEmpty() || true)) {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 2.dp)
+                        .width(1.dp)
+                        .height(34.dp)
+                        .background(Color(0x2EFFFFFF))
+                )
+            }
+            recent.forEach { app ->
+                DockIcon(
+                    app = app,
+                    activeInStage = app.packageName in state.activePackages,
+                    runningElsewhere = app.packageName in state.runningPackages,
+                    onClick = { onDockApp(app) },
+                    onLongPress = { pos -> onDockLongPress(app, pos) },
+                    onDismissMenu = onDockDismissMenu,
+                    onDragState = onDragState,
+                    onDragLost = onDragLost
+                )
+            }
+            AppLibraryIcon(onClick = onAddApp)
         }
     }
 }
@@ -445,82 +479,152 @@ private fun StageDock(
 @Composable
 private fun DockIcon(
     app: DockApp,
+    activeInStage: Boolean,
+    runningElsewhere: Boolean,
     onClick: () -> Unit,
+    onLongPress: (android.graphics.PointF) -> Unit,
+    onDismissMenu: () -> Unit,
     onDragState: (DockApp, Offset, Offset) -> Unit,
     onDragLost: (Boolean) -> Unit
 ) {
+    val density = LocalDensity.current
+    val dragThresholdPx = with(density) { 18.dp.toPx() }
     var origin by remember { mutableStateOf(Offset.Zero) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var dragging by remember { mutableStateOf(false) }
+    var menuShown by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (dragging) 1.12f else 1f, tween(120), label = "dock-scale")
 
-    Box(
-        modifier = Modifier
-            .size(54.dp)
-            .onGloballyPositioned { coordinates ->
-                origin = coordinates.positionInRoot() + Offset(
-                    coordinates.size.width / 2f,
-                    coordinates.size.height / 2f
-                )
-            }
-            .pointerInput(app.packageName) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = {
-                        dragging = true
-                        offset = Offset.Zero
-                        onDragState(app, offset, origin)
-                    },
-                    onDrag = { change, amount ->
-                        change.consume()
-                        offset += amount
-                        onDragState(app, offset, origin)
-                    },
-                    onDragEnd = {
-                        dragging = false
-                        onDragLost(false)
-                    },
-                    onDragCancel = {
-                        dragging = false
-                        onDragLost(true)
-                    }
-                )
-            }
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        val icon = app.icon
-        if (icon != null) {
-            Image(
-                bitmap = icon,
-                contentDescription = app.label,
-                modifier = Modifier
-                    .size((48 * scale).dp)
-                    .clip(RoundedCornerShape(14.dp))
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0x33FFFFFF)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(app.label.take(1), color = Ink, fontSize = 18.sp)
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .onGloballyPositioned { coordinates ->
+                    origin = coordinates.positionInRoot() + Offset(
+                        coordinates.size.width / 2f,
+                        coordinates.size.height / 2f
+                    )
+                }
+                .pointerInput(app.packageName) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = {
+                            offset = Offset.Zero
+                            dragging = false
+                            menuShown = true
+                            onLongPress(android.graphics.PointF(origin.x, origin.y))
+                        },
+                        onDrag = { change, amount ->
+                            change.consume()
+                            offset += amount
+                            val dist = hypot(offset.x.toDouble(), offset.y.toDouble()).toFloat()
+                            if (!dragging && dist > dragThresholdPx) {
+                                dragging = true
+                                if (menuShown) {
+                                    menuShown = false
+                                    onDismissMenu()
+                                }
+                            }
+                            if (dragging) {
+                                onDragState(app, offset, origin)
+                            }
+                        },
+                        onDragEnd = {
+                            if (dragging) {
+                                dragging = false
+                                onDragLost(false)
+                            }
+                            menuShown = false
+                        },
+                        onDragCancel = {
+                            if (dragging) {
+                                dragging = false
+                                onDragLost(true)
+                            }
+                            menuShown = false
+                        }
+                    )
+                }
+                .clickable { onClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            val icon = app.icon
+            if (icon != null) {
+                Image(
+                    bitmap = icon,
+                    contentDescription = app.label,
+                    modifier = Modifier
+                        .size((48 * scale).dp)
+                        .clip(RoundedCornerShape(13.dp))
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Color(0x33FFFFFF)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(app.label.take(1), color = Ink, fontSize = 18.sp)
+                }
             }
         }
+        // iPad-style activity indicator dot.
+        val dotColor = when {
+            activeInStage -> Ink
+            runningElsewhere -> Ink.copy(alpha = 0.42f)
+            else -> Color.Transparent
+        }
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+    }
+}
+
+/** iPad-style 2x2 mini-grid App Library tile at the right end of the Dock. */
+@Composable
+private fun AppLibraryIcon(onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .padding(2.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(Color(0x24FFFFFF))
+                .border(1.dp, Color(0x1EFFFFFF), RoundedCornerShape(13.dp))
+                .clickable(onClick = onClick)
+                .padding(8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MiniAppTile(Color(0xFF6FA8FF))
+                    MiniAppTile(Color(0xFFFFB74D))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MiniAppTile(Color(0xFF7CE09B))
+                    MiniAppTile(Color(0xFFFF7A90))
+                }
+            }
+        }
+        Spacer(Modifier.size(5.dp))
     }
 }
 
 @Composable
-private fun DockAction(icon: String, label: String, danger: Boolean = false, onClick: () -> Unit) {
+private fun MiniAppTile(color: Color) {
     Box(
         modifier = Modifier
-            .size(48.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (danger) Color(0x26FF8E8E) else Color(0x14FFFFFF))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(icon, color = if (danger) Color(0xFFFF9B9B) else Ink, fontSize = 17.sp)
-    }
+            .size(13.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = 0.88f))
+    )
 }

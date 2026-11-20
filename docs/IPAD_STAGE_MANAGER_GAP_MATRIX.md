@@ -34,7 +34,7 @@
 | 15 | 最大化 / 还原 | ✅ | `WindowChromeController.toggleZoom()`（绿点） | — | — | 已通过 | **P4** |
 | 16 | 双击标题栏缩放 | ✅ | `ChromeOverlayView.ACTION_DOUBLE_TAP` → `toggleZoom()` | — | — | 已通过 | **P4** |
 | 17 | 最小化 = 离开当前组回到最近列表 | ✅ | `f5aa5da`：`StageWorkspace.minimize()` 转为单窗口最近组；`docs/p4-minimize.png` | — | — | 已通过 | **P4** |
-| 18 | 长按窗口控制菜单 | ⛔ | `ACTION_LONG_PRESS_CANDIDATE` 仅在单击触发且被忽略 | 真正长按检测（标题栏/控制点）+ 悬浮控制菜单（关闭/最小化/最大化/移到工作台/新建工作台） | `ChromeOverlayView.kt`、`WindowChromeController.kt`、`StageHostActivity.kt` | 真机长按弹出并操作 | **P4** |
+| 18 | 长按窗口控制菜单 | ✅ | `ChromeOverlayView` 420ms 长按 + `WindowChromeController.showWindowMenu()`；`docs/p4-menu.png` | — | — | 已通过 | **P4** |
 | 19 | 关闭只关所选 Task | ✅ | `removeTask` + 失败保留 | — | — | 已通过 | 已达成 |
 | 20 | Dock 固定应用 / 最近 / 建议 / 应用库 | 🟠 | `DockApps.kt` 硬编码列表；Dock 仍含 `◧` / `⏻` 开发者按钮 | 删除开发者按钮；持久化固定应用 + 最近/建议分区 + 分隔线 + 网格应用库图标 + 活动状态圆点 | `ui/DockApps.kt`、`StageWorkspaceScreen.kt`、`StageHostActivity.kt` | 真机 Dock 截图与交互 | **P5** |
 | 21 | Dock 长按上下文菜单 / New Window / Show All Windows | ⛔ | 长按仅拖动 | 长按静止弹出上下文菜单（固定/取消固定、加入当前工作台、New Window、Show All Windows），拖动则进入拖放 | `StageWorkspaceScreen.kt`、`StageHostActivity.kt` | 真机长按 Dock 图标 | **P5** |

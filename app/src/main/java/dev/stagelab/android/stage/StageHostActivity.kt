@@ -266,6 +266,45 @@ class StageHostActivity : ComponentActivity() {
             // Geometry is committed through onGeometryChanged; nothing else to do for now.
         }
 
+        override fun onWindowMenuRequested(id: String, anchorX: Int, anchorY: Int) {
+            val window = StageWorkspace.session.windows[id] ?: return
+            val items = ArrayList<WindowChromeController.MenuItem>()
+            items += WindowChromeController.MenuItem("最大化 / 还原") {
+                chrome.toggleZoom(id)
+            }
+            items += WindowChromeController.MenuItem("贴靠左侧半屏") {
+                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.LEFT_HALF) }
+            }
+            items += WindowChromeController.MenuItem("贴靠右侧半屏") {
+                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.RIGHT_HALF) }
+            }
+            items += WindowChromeController.MenuItem("居中排列") {
+                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.CENTER) }
+            }
+            items += WindowChromeController.MenuItem("移出当前工作台（最小化）") {
+                lifecycleScope.launch { StageWorkspace.minimize(id) }
+            }
+            items += WindowChromeController.MenuItem("移至新工作台") {
+                lifecycleScope.launch {
+                    val group = StageWorkspace.createGroup()
+                    StageWorkspace.moveWindowToGroup(id, group.id)
+                }
+            }
+            val activeId = StageWorkspace.session.activeGroupId
+            StageWorkspace.session.sortedGroups()
+                .filter { it.id != activeId }
+                .take(3)
+                .forEach { group ->
+                    items += WindowChromeController.MenuItem("移至「${group.title}」") {
+                        lifecycleScope.launch { StageWorkspace.moveWindowToGroup(id, group.id) }
+                    }
+                }
+            items += WindowChromeController.MenuItem("关闭窗口", danger = true) {
+                lifecycleScope.launch { StageWorkspace.closeWindow(id) }
+            }
+            chrome.showWindowMenu(window.label, anchorX, anchorY, items)
+        }
+
         override fun onWindowDragging(id: String, x: Int, y: Int) {
             StageWorkspace.updateWindowDragTarget(x, y)
         }

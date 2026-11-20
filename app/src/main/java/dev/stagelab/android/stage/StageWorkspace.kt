@@ -40,6 +40,13 @@ data class WindowTile(
     val alive: Boolean
 )
 
+enum class WindowArrangePreset {
+    LEFT_HALF,
+    RIGHT_HALF,
+    CENTER,
+    FULL
+}
+
 enum class DropZoneKind {
     NONE,
     WORKSPACE,
@@ -621,6 +628,24 @@ object StageWorkspace {
         }
         publishState()
         persist()
+    }
+
+    /** Snaps a window to a standard iPad-style arrangement inside the current workspace. */
+    suspend fun arrangeWindow(windowId: String, preset: WindowArrangePreset) {
+        val window = session.windows[windowId] ?: return
+        window.geometry = when (preset) {
+            WindowArrangePreset.LEFT_HALF -> WindowGeometry(0.01f, 0.01f, 0.485f, 0.98f)
+            WindowArrangePreset.RIGHT_HALF -> WindowGeometry(0.505f, 0.01f, 0.485f, 0.98f)
+            WindowArrangePreset.CENTER -> WindowGeometry(0.18f, 0.08f, 0.64f, 0.84f)
+            WindowArrangePreset.FULL -> WindowGeometry(0.01f, 0.01f, 0.98f, 0.98f)
+        }
+        session.bringToFront(windowId)
+        persist()
+        publishState()
+        commitGeometry(windowId)
+        runCatching {
+            StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+        }
     }
 
     /**

@@ -108,6 +108,18 @@ class ChromeOverlayView(
     private var downY = 0f
     private var downTime = 0L
     private var lastTapTime = 0L
+    private var pressedDot = DOT_NONE
+    private var dragging = false
+    private var longPressed = false
+
+    private val longPressRunnable = Runnable {
+        if (!dragging && mode == ChromeMode.TITLE) {
+            longPressed = true
+            pressedDot = DOT_NONE
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            onAction?.invoke(ACTION_LONG_PRESS)
+        }
+    }
 
     /** Latest raw pointer position, read by the chrome controller for drop routing. */
     var lastRawPos: Pair<Int, Int> = 0 to 0
@@ -307,52 +319,94 @@ class ChromeOverlayView(
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        val touchSlop = 12f * density()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.rawX
                 downY = event.rawY
                 downTime = System.currentTimeMillis()
                 lastRawPos = event.rawX.roundToInt() to event.rawY.roundToInt()
+                longPressed = false
+                dragging = false
+                pressedDot = DOT_NONE
                 if (mode == ChromeMode.TITLE) {
-                    if (closeRect.contains(event.x, event.y)) {
-                        onAction?.invoke(ACTION_CLOSE)
-                        return true
+                    pressedDot = when {
+                        closeRect.contains(event.x, event.y) -> DOT_CLOSE
+                        minimizeRect.contains(event.x, event.y) -> DOT_MINIMIZE
+                        zoomRect.contains(event.x, event.y) -> DOT_ZOOM
+                        else -> DOT_NONE
                     }
-                    if (minimizeRect.contains(event.x, event.y)) {
-                        onAction?.invoke(ACTION_MINIMIZE)
-                        return true
+                    removeCallbacks(longPressRunnable)
+                    postDelayed(longPressRunnable, LONG_PRESS_MS)
+                    if (pressedDot == DOT_NONE) {
+                        onTouch(PHASE_START, 0f, 0f)
                     }
-                    if (zoomRect.contains(event.x, event.y)) {
-                        onAction?.invoke(ACTION_ZOOM)
-                        return true
-                    }
+                    return true
                 }
                 onTouch(PHASE_START, 0f, 0f)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 lastRawPos = event.rawX.roundToInt() to event.rawY.roundToInt()
-                onTouch(PHASE_MOVE, event.rawX - downX, event.rawY - downY)
+                if (longPressed) return true
+                val moved = kotlin.math.abs(event.rawX - downX) + kotlin.math.abs(event.rawY - downY)
+                if (moved > touchSlop) {
+                    removeCallbacks(longPressRunnable)
+                    if (!dragging) {
+                        dragging = true
+                        if (mode == ChromeMode.TITLE && pressedDot != DOT_NONE) {
+                            pressedDot = DOT_NONE
+                            onTouch(PHASE_START, 0f, 0f)
+                        }
+                    }
+                }
+                if (dragging || mode != ChromeMode.TITLE) {
+                    onTouch(PHASE_MOVE, event.rawX - downX, event.rawY - downY)
+                }
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                removeCallbacks(longPressRunnable)
+                if (longPressed) {
+                    longPressed = false
+                    return true
+                }
                 val moved = kotlin.math.abs(event.rawX - downX) + kotlin.math.abs(event.rawY - downY)
-                val quick = System.currentTimeMillis() - downTime < 260
-                if (mode == ChromeMode.TITLE && moved < 12f && quick) {
+                val quick = System.currentTimeMillis() - downTime < 350
+                if (mode == ChromeMode.TITLE && pressedDot != DOT_NONE && moved < touchSlop) {
+                    when (pressedDot) {
+                        DOT_CLOSE -> onAction?.invoke(ACTION_CLOSE)
+                        DOT_MINIMIZE -> onAction?.invoke(ACTION_MINIMIZE)
+                        DOT_ZOOM -> onAction?.invoke(ACTION_ZOOM)
+                    }
+                    pressedDot = DOT_NONE
+                    return true
+                }
+                if (mode == ChromeMode.TITLE && moved < touchSlop && quick) {
                     val now = System.currentTimeMillis()
                     if (now - lastTapTime < 280) {
                         onAction?.invoke(ACTION_DOUBLE_TAP)
                         lastTapTime = 0L
                     } else {
                         lastTapTime = now
-                        onAction?.invoke(ACTION_LONG_PRESS_CANDIDATE)
                     }
                 }
-                onTouch(PHASE_END, 0f, 0f)
+                pressedDot = DOT_NONE
+                if (dragging || mode != ChromeMode.TITLE) {
+                    onTouch(PHASE_END, 0f, 0f)
+                }
+                dragging = false
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
-                onTouch(PHASE_END, 0f, 0f)
+                removeCallbacks(longPressRunnable)
+                val wasDragging = dragging
+                dragging = false
+                longPressed = false
+                pressedDot = DOT_NONE
+                if (wasDragging || mode != ChromeMode.TITLE) {
+                    onTouch(PHASE_END, 0f, 0f)
+                }
                 return true
             }
         }
@@ -368,6 +422,12 @@ class ChromeOverlayView(
         const val ACTION_MINIMIZE = 1
         const val ACTION_ZOOM = 2
         const val ACTION_DOUBLE_TAP = 3
-        const val ACTION_LONG_PRESS_CANDIDATE = 4
+        const val ACTION_LONG_PRESS = 4
+
+        private const val DOT_NONE = 0
+        private const val DOT_CLOSE = 1
+        private const val DOT_MINIMIZE = 2
+        private const val DOT_ZOOM = 3
+        private const val LONG_PRESS_MS = 420L
     }
 }

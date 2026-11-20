@@ -34,9 +34,17 @@ class WindowChromeController(
         fun onCloseRequested(id: String)
         fun onMinimizeRequested(id: String)
         fun onZoomToggled(id: String, maximized: Boolean)
+        fun onWindowMenuRequested(id: String, anchorX: Int, anchorY: Int)
         fun onLeftEdgeSwipe()
         fun onChromeTapOutside()
     }
+
+    /** One item in the floating long-press window control menu. */
+    data class MenuItem(
+        val label: String,
+        val danger: Boolean = false,
+        val onClick: () -> Unit
+    )
 
     data class ChromeWindow(
         val id: String,
@@ -69,6 +77,8 @@ class WindowChromeController(
     private var edgeStrip: View? = null
     private var railOverlay: View? = null
     private var dropHighlightView: DropHighlightOverlayView? = null
+    private var menuScrimView: View? = null
+    private var menuPopupView: View? = null
 
     /** A tappable (and optionally draggable) region above the parked rail windows. */
     data class TapTarget(
@@ -348,6 +358,11 @@ class WindowChromeController(
                     ChromeOverlayView.ACTION_MINIMIZE -> callbacks.onMinimizeRequested(window.id)
                     ChromeOverlayView.ACTION_ZOOM -> toggleZoom(window.id)
                     ChromeOverlayView.ACTION_DOUBLE_TAP -> toggleZoom(window.id)
+                    ChromeOverlayView.ACTION_LONG_PRESS -> {
+                        val pos = holders[window.id]?.titleBar?.lastRawPos
+                            ?: (window.rect.left + px(48f) to window.rect.top + titleHeight)
+                        callbacks.onWindowMenuRequested(window.id, pos.first, pos.second)
+                    }
                     else -> Unit
                 }
             }
@@ -581,7 +596,121 @@ class WindowChromeController(
         }
     }
 
+    /**
+     * Shows a floating iPad-style window control menu above all real tasks (P4).
+     * Tapping anywhere outside dismisses it without disturbing the underlying windows.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun showWindowMenu(title: String, anchorX: Int, anchorY: Int, items: List<MenuItem>) {
+        dismissWindowMenu()
+        if (items.isEmpty()) return
+
+        val metrics = activity.resources.displayMetrics
+        val scrim = View(activity).apply {
+            setBackgroundColor(0x01000000)
+            setOnClickListener { dismissWindowMenu() }
+        }
+        val scrimParams = overlayParams(
+            metrics.widthPixels,
+            metrics.heightPixels,
+            0,
+            0,
+            touchable = true
+        )
+
+        val menuWidth = px(228f)
+        val container = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val bg = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.argb(244, 24, 29, 39))
+                cornerRadius = px(18f).toFloat()
+                setStroke(px(1f), android.graphics.Color.argb(46, 255, 255, 255))
+            }
+            background = bg
+            elevation = px(18f).toFloat()
+            setPadding(px(8f), px(10f), px(8f), px(10f))
+        }
+
+        if (title.isNotBlank()) {
+            val header = android.widget.TextView(activity).apply {
+                text = title
+                setTextColor(android.graphics.Color.argb(175, 196, 206, 224))
+                textSize = 12f
+                setPadding(px(12f), px(4f), px(12f), px(8f))
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            container.addView(header)
+        }
+
+        items.forEachIndexed { idx, item ->
+            val row = android.widget.TextView(activity).apply {
+                text = item.label
+                textSize = 14f
+                setTextColor(
+                    if (item.danger) android.graphics.Color.rgb(255, 118, 112)
+                    else android.graphics.Color.rgb(238, 243, 252)
+                )
+                setPadding(px(12f), px(10f), px(12f), px(10f))
+                val rowBg = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.TRANSPARENT)
+                    cornerRadius = px(10f).toFloat()
+                }
+                background = rowBg
+                setOnClickListener {
+                    dismissWindowMenu()
+                    item.onClick()
+                }
+            }
+            container.addView(
+                row,
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+            if (idx < items.lastIndex) {
+                val divider = View(activity).apply {
+                    setBackgroundColor(android.graphics.Color.argb(24, 255, 255, 255))
+                }
+                container.addView(
+                    divider,
+                    android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        max(1, px(0.8f))
+                    )
+                )
+            }
+        }
+
+        val estHeight = px(44f) * items.size + px(48f)
+        val x = anchorX.coerceIn(px(12f), (metrics.widthPixels - menuWidth - px(12f)).coerceAtLeast(px(12f)))
+        val y = anchorY.coerceIn(px(12f), (metrics.heightPixels - estHeight - px(12f)).coerceAtLeast(px(12f)))
+        val popupParams = overlayParams(
+            menuWidth,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            x,
+            y,
+            touchable = true
+        )
+
+        runCatching { wm.addView(scrim, scrimParams) }.onSuccess { menuScrimView = scrim }
+        runCatching { wm.addView(container, popupParams) }.onSuccess { menuPopupView = container }
+            .onFailure {
+                dismissWindowMenu()
+                Log.w(TAG, "window menu overlay failed: ${it.message}")
+            }
+    }
+
+    fun dismissWindowMenu() {
+        menuPopupView?.let { runCatching { wm.removeView(it) } }
+        menuPopupView = null
+        menuScrimView?.let { runCatching { wm.removeView(it) } }
+        menuScrimView = null
+    }
+
     fun destroy() {
+        dismissWindowMenu()
         holders.keys.toList().forEach { remove(it) }
         edgeStrip?.let { runCatching { wm.removeView(it) } }
         edgeStrip = null

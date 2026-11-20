@@ -3,9 +3,16 @@
 import android.app.ActivityOptions
 import android.content.ComponentName
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.graphics.Rect
+import android.hardware.HardwareBuffer
 import android.os.Bundle
+import android.util.Base64
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Thin, reflection based wrapper over the platform task/window binder interfaces.
@@ -298,6 +305,180 @@ class TaskMutations {
         // Fallback: hide through WindowContainerTransaction.
         return applyWct { wct: Any -> HiddenApi.invoke(wct, "setHidden", token, true) }
             .let { "wct.setHidden($taskId,true)" }
+    }
+
+    /**
+     * Raises the StageHostActivity task above parked background freeform tasks so only the active
+     * group's windows (raised immediately afterwards) remain visible on screen.
+     */
+    fun bringHostAboveParked(hostComponent: String): String {
+        val host = listTasks().firstOrNull { task ->
+            task.topActivity?.contains(hostComponent) == true ||
+                task.baseActivity?.contains(hostComponent) == true
+        } ?: return "host not found"
+        val token = host.token ?: taskTokens[host.taskId]
+        if (token != null) {
+            runCatching {
+                applyWct { wct: Any -> HiddenApi.invoke(wct, "reorder", token, true) }
+                return "wct.reorder(host=${host.taskId},true)"
+            }
+        }
+        return runCatching { focusTask(host.taskId) }.getOrElse { "host focus failed: ${it.message}" }
+    }
+
+    data class SnapshotResult(val width: Int, val height: Int, val jpegBase64: String)
+
+    var lastSnapshotError: String? = null
+        private set
+
+    @Volatile
+    private var cachedScreenBitmap: Bitmap? = null
+    @Volatile
+    private var cachedScreenAtMs: Long = 0L
+
+    /**
+     * Captures a scaled JPEG thumbnail of [taskId].
+     *
+     * Strategy:
+     *  1. Try platform TaskSnapshot API (direct declared-method lookup on IActivityTaskManager).
+     *  2. If unavailable on Android 16/17 OEM builds and the task is currently visible on screen,
+     *     capture the framebuffer via Shell UID `screencap` (cached 300ms across sibling windows)
+     *     and crop the task's exact bounds.
+     */
+    fun captureTaskSnapshot(taskId: Int, maxDim: Int = 420): SnapshotResult? {
+        lastSnapshotError = null
+        // 1. Platform TaskSnapshot path (works for both visible and occluded tasks when exposed).
+        captureViaPlatformSnapshot(taskId, maxDim)?.let { return it }
+        // 2. Shell framebuffer crop path (works on 100% of Android 12-17 OEM builds for visible tasks).
+        return captureViaScreencapCrop(taskId, maxDim)
+    }
+
+    private fun captureViaPlatformSnapshot(taskId: Int, maxDim: Int): SnapshotResult? {
+        val snapshot = fetchRawTaskSnapshot(taskId) ?: return null
+        val buffer = runCatching {
+            HiddenApi.invoke(snapshot, "getHardwareBuffer") as? HardwareBuffer
+        }.getOrNull() ?: runCatching {
+            HiddenApi.fieldOrNull(snapshot.javaClass, "mSnapshot")?.get(snapshot) as? HardwareBuffer
+        }.getOrNull() ?: return null
+        val colorSpace = runCatching {
+            HiddenApi.invoke(snapshot, "getColorSpace") as? ColorSpace
+        }.getOrNull() ?: runCatching {
+            HiddenApi.fieldOrNull(snapshot.javaClass, "mColorSpace")?.get(snapshot) as? ColorSpace
+        }.getOrNull()
+
+        var hwBitmap: Bitmap? = null
+        var swBitmap: Bitmap? = null
+        return try {
+            hwBitmap = Bitmap.wrapHardwareBuffer(buffer, colorSpace) ?: return null
+            swBitmap = hwBitmap.copy(Bitmap.Config.ARGB_8888, false) ?: return null
+            encodeThumbnail(swBitmap, maxDim)
+        } catch (t: Throwable) {
+            lastSnapshotError = describeError(t)
+            null
+        } finally {
+            runCatching { swBitmap?.recycle() }
+            runCatching { hwBitmap?.recycle() }
+            runCatching { buffer.close() }
+        }
+    }
+
+    private fun captureViaScreencapCrop(taskId: Int, maxDim: Int): SnapshotResult? {
+        val entry = listTasks().firstOrNull { it.taskId == taskId }
+        val rect = entry?.bounds ?: taskBounds(taskId)
+        if (entry == null || !entry.isVisible || rect == null || rect.width() <= 4 || rect.height() <= 4) {
+            lastSnapshotError = "task $taskId not visible for screencap crop"
+            return null
+        }
+        val screen = acquireScreenBitmap() ?: run {
+            lastSnapshotError = "screencap returned null"
+            return null
+        }
+        val left = rect.left.coerceIn(0, (screen.width - 1).coerceAtLeast(0))
+        val top = rect.top.coerceIn(0, (screen.height - 1).coerceAtLeast(0))
+        val right = rect.right.coerceIn(left + 1, screen.width)
+        val bottom = rect.bottom.coerceIn(top + 1, screen.height)
+        val w = right - left
+        val h = bottom - top
+        if (w <= 4 || h <= 4) return null
+        var cropped: Bitmap? = null
+        return try {
+            cropped = Bitmap.createBitmap(screen, left, top, w, h)
+            encodeThumbnail(cropped, maxDim)
+        } catch (t: Throwable) {
+            lastSnapshotError = "crop failed: ${describeError(t)}"
+            null
+        } finally {
+            runCatching { cropped?.recycle() }
+        }
+    }
+
+    @Synchronized
+    private fun acquireScreenBitmap(): Bitmap? {
+        val now = System.currentTimeMillis()
+        val existing = cachedScreenBitmap
+        if (existing != null && !existing.isRecycled && now - cachedScreenAtMs < 350L) {
+            return existing
+        }
+        return try {
+            val process = ProcessBuilder("/system/bin/screencap", "-p").start()
+            val bytes = process.inputStream.readBytes()
+            process.waitFor()
+            if (bytes.isEmpty()) return null
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: return null
+            runCatching { cachedScreenBitmap?.recycle() }
+            cachedScreenBitmap = decoded
+            cachedScreenAtMs = System.currentTimeMillis()
+            decoded
+        } catch (t: Throwable) {
+            lastSnapshotError = "screencap: ${describeError(t)}"
+            null
+        }
+    }
+
+    private fun encodeThumbnail(source: Bitmap, maxDim: Int): SnapshotResult? {
+        val srcW = source.width
+        val srcH = source.height
+        if (srcW <= 0 || srcH <= 0) return null
+        var scaled: Bitmap? = null
+        return try {
+            val scale = maxDim.toFloat() / max(srcW, srcH).toFloat()
+            val outBitmap = if (scale < 1f) {
+                val dstW = (srcW * scale).roundToInt().coerceAtLeast(1)
+                val dstH = (srcH * scale).roundToInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(source, dstW, dstH, true).also { scaled = it }
+            } else {
+                source
+            }
+            val stream = ByteArrayOutputStream(16 * 1024)
+            outBitmap.compress(Bitmap.CompressFormat.JPEG, 82, stream)
+            val b64 = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+            SnapshotResult(outBitmap.width, outBitmap.height, b64)
+        } finally {
+            runCatching { scaled?.recycle() }
+        }
+    }
+
+    private fun fetchRawTaskSnapshot(taskId: Int): Any? {
+        val cls = atm.javaClass
+        val attempts: List<Pair<java.lang.reflect.Method?, Array<Any?>>> = listOf(
+            HiddenApi.methodOrNull(cls, "getTaskSnapshot", Integer.TYPE, java.lang.Boolean.TYPE) to arrayOf(taskId, false),
+            HiddenApi.methodOrNull(cls, "getTaskSnapshot", Integer.TYPE, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE) to arrayOf(taskId, false, true),
+            HiddenApi.methodOrNull(cls, "takeTaskSnapshot", Integer.TYPE, java.lang.Boolean.TYPE) to arrayOf(taskId, true),
+            HiddenApi.methodOrNull(cls, "takeTaskSnapshot", Integer.TYPE) to arrayOf(taskId)
+        )
+        for ((method, args) in attempts) {
+            if (method == null) continue
+            val result = runCatching {
+                method.isAccessible = true
+                method.invoke(atm, *args)
+            }.getOrNull()
+            if (result != null) return result
+        }
+        return null
     }
 
     fun enableFreeformGlobally(): String {

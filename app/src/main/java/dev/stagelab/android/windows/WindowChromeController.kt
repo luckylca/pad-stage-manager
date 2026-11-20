@@ -27,9 +27,11 @@ class WindowChromeController(
 ) {
 
     interface Callbacks {
-        fun onGeometryChanged(id: String, rect: StageRect, final: Boolean)
+        fun onGeometryChanged(id: String, rect: StageRect, final: Boolean, resized: Boolean = false)
+        fun onGestureStateChanged(id: String, active: Boolean)
         fun onWindowDragging(id: String, x: Int, y: Int)
         fun onWindowDropped(id: String, x: Int, y: Int)
+        fun onWindowDragCancelled(id: String)
         fun onFocusRequested(id: String)
         fun onCloseRequested(id: String)
         fun onMinimizeRequested(id: String)
@@ -70,6 +72,7 @@ class WindowChromeController(
     ) {
         var gestureBase: StageRect = rect
         var restoredRect: StageRect? = null
+        var inGesture: Boolean = false
         /** Raw pointer position at gesture start, for drop-point routing. */
         var touchStart: Pair<Int, Int> = 0 to 0
         /** Latest pointer position during the gesture. */
@@ -101,12 +104,12 @@ class WindowChromeController(
     private val dp: Float get() = activity.resources.displayMetrics.density
     private fun px(value: Float): Int = (value * dp).roundToInt()
 
-    private val titleHeight = px(34f)
-    private val gripSize = px(28f)
+    private val titleHeight = px(28f)
+    private val gripSize = px(38f)
     private val edgeSize = px(14f)
     private val minWidth = px(232f)
     private val minHeight = px(200f)
-    private val cornerRadius = px(22f)
+    private val cornerRadius = px(15f)
 
     // ------------------------------------------------------------------ public API
 
@@ -125,7 +128,15 @@ class WindowChromeController(
                 val square = cornerSquare(window.rect, corner)
                 above.none { candidate -> intersects(square, candidate.rect) }
             }
-            addOrUpdate(window, flags)
+            val pillCenterX = (window.rect.left + window.rect.right) / 2
+            val pillBox = StageRect(
+                pillCenterX - px(24f),
+                window.rect.top,
+                pillCenterX + px(24f),
+                window.rect.top + titleHeight
+            )
+            val showPill = above.none { candidate -> intersects(pillBox, candidate.rect) }
+            addOrUpdate(window, flags, showPill)
         }
     }
 
@@ -314,10 +325,10 @@ class WindowChromeController(
             return
         }
         val metrics = activity.resources.displayMetrics
-        val pillW = px(76f)
-        val pillH = px(22f)
+        val pillW = px(54f)
+        val pillH = px(18f)
         val x = (metrics.widthPixels - pillW) / 2
-        val y = max(statusInsetPx, px(8f))
+        val y = px(4f)
         val existing = menuBarPill
         if (existing != null) {
             layout(existing, x, y, pillW, pillH)
@@ -483,19 +494,26 @@ class WindowChromeController(
 
     // ------------------------------------------------------------------ window chrome
 
-    private fun addOrUpdate(window: ChromeWindow, maskFlags: BooleanArray = booleanArrayOf(true, true, true, true)) {
+    private fun addOrUpdate(
+        window: ChromeWindow,
+        maskFlags: BooleanArray = booleanArrayOf(true, true, true, true),
+        pillVisible: Boolean = true
+    ) {
         val existing = holders[window.id]
         if (existing != null) {
-            existing.rect = window.rect
             existing.workspace = window.workspace
             existing.titleBar.focused = window.focused
+            existing.titleBar.pillVisible = pillVisible
             existing.titleBar.title = window.title
             existing.decoration.focused = window.focused
             existing.decoration.maskColor = window.deskTopColor
             existing.decoration.maskColorBottom = window.deskBottomColor
             existing.decoration.maskVisible = maskFlags
             existing.handles.forEach { (_, view) -> view.focused = window.focused }
-            position(existing)
+            if (!existing.inGesture) {
+                existing.rect = window.rect
+                position(existing)
+            }
             return
         }
 
@@ -509,6 +527,13 @@ class WindowChromeController(
                     ChromeOverlayView.ACTION_MINIMIZE -> callbacks.onMinimizeRequested(window.id)
                     ChromeOverlayView.ACTION_ZOOM -> toggleZoom(window.id)
                     ChromeOverlayView.ACTION_DOUBLE_TAP -> toggleZoom(window.id)
+                    ChromeOverlayView.ACTION_MENU_TAP -> {
+                        val h = holders[window.id]
+                        val r = h?.rect ?: window.rect
+                        val anchorX = (r.left + r.right) / 2 - px(114f)
+                        val anchorY = r.top + titleHeight + px(4f)
+                        callbacks.onWindowMenuRequested(window.id, anchorX, anchorY)
+                    }
                     ChromeOverlayView.ACTION_LONG_PRESS -> {
                         val pos = holders[window.id]?.titleBar?.lastRawPos
                             ?: (window.rect.left + px(48f) to window.rect.top + titleHeight)
@@ -519,6 +544,7 @@ class WindowChromeController(
             }
         ).apply {
             focused = window.focused
+            this.pillVisible = pillVisible
             title = window.title
             cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
         }
@@ -635,9 +661,11 @@ class WindowChromeController(
         val holder = holders[id] ?: return
         when (phase) {
             ChromeOverlayView.PHASE_START -> {
+                holder.inGesture = true
                 holder.gestureBase = holder.rect
                 holder.touchStart = holder.titleBar.lastRawPos
                 holder.touchLast = holder.touchStart
+                callbacks.onGestureStateChanged(id, true)
                 callbacks.onFocusRequested(id)
             }
             ChromeOverlayView.PHASE_MOVE -> {
@@ -691,18 +719,28 @@ class WindowChromeController(
                 holder.rect = clamped
                 holder.restoredRect = null
                 position(holder)
-                callbacks.onGeometryChanged(id, clamped, false)
+                callbacks.onGeometryChanged(id, clamped, false, resized = mode != ChromeMode.TITLE)
                 if (mode == ChromeMode.TITLE) {
                     holder.touchLast = holder.titleBar.lastRawPos
                     callbacks.onWindowDragging(id, holder.touchLast.first, holder.touchLast.second)
                 }
             }
             ChromeOverlayView.PHASE_END -> {
+                holder.inGesture = false
                 holder.touchLast = holder.titleBar.lastRawPos
-                callbacks.onGeometryChanged(id, holder.rect, true)
+                callbacks.onGestureStateChanged(id, false)
+                callbacks.onGeometryChanged(id, holder.rect, true, resized = mode != ChromeMode.TITLE)
                 if (mode == ChromeMode.TITLE) {
                     callbacks.onWindowDropped(id, holder.touchLast.first, holder.touchLast.second)
                 }
+            }
+            ChromeOverlayView.PHASE_CANCEL -> {
+                holder.inGesture = false
+                holder.rect = holder.gestureBase
+                position(holder)
+                callbacks.onGestureStateChanged(id, false)
+                callbacks.onGeometryChanged(id, holder.gestureBase, true, resized = false)
+                callbacks.onWindowDragCancelled(id)
             }
         }
     }

@@ -20,13 +20,21 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+data class GroupWindowPreview(
+    val id: String,
+    val taskId: Int,
+    val packageName: String,
+    val label: String
+)
+
 data class GroupTile(
     val id: String,
     val title: String,
     val windowCount: Int,
     val active: Boolean,
     val rect: StageRect,
-    val live: Boolean
+    val live: Boolean,
+    val previews: List<GroupWindowPreview> = emptyList()
 )
 
 data class WindowTile(
@@ -115,6 +123,20 @@ object StageWorkspace {
     private var store: StageSessionStore? = null
     private var pollJob: Job? = null
     private var applying = false
+    private val activeGestureWindows = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private var lastSnapshotPollMs = 0L
+
+    /** Registered by [StageHostActivity] to play 60/120fps 3D spring transitions over real tasks. */
+    var transitionPlayer: (suspend (List<dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard>, Long) -> Unit)? = null
+
+    fun setWindowGestureActive(windowId: String, active: Boolean) {
+        if (active) activeGestureWindows.add(windowId) else activeGestureWindows.remove(windowId)
+    }
+
+    fun rememberWindowSize(windowId: String) {
+        val w = session.windows[windowId] ?: return
+        WindowSizing.rememberSize(appContext, w.packageName, w.geometry.w, w.geometry.h)
+    }
 
     var session: StageSession = StageSession.createDefault()
         private set
@@ -251,7 +273,7 @@ object StageWorkspace {
         }
     }
 
-    fun railWidthPx(): Int = dp(238f)
+    fun railWidthPx(): Int = dp(140f)
 
     fun railRect(): StageRect? = layout?.rail
 
@@ -259,47 +281,52 @@ object StageWorkspace {
 
     fun dockRect(): StageRect = layout?.dock ?: StageRect(0, 0, 0, 0)
 
+    private fun railItemHeightPx(): Int = dp(94f)
+    private fun railItemGapPx(): Int = dp(14f)
+
     /** Vertical scroll of the rail, in pixels. */
     fun scrollRail(delta: Float) {
         val rail = railRect() ?: return
-        val items = session.sortedGroups().size - 1
+        val items = (session.sortedGroups().size - 1).coerceAtLeast(0)
         if (items <= 0) return
-        val perItem = dp(256f) + dp(12f)
-        val maxScroll = (items * perItem - rail.height).coerceAtLeast(0).toFloat()
+        val perItem = railItemHeightPx() + railItemGapPx()
+        val totalHeight = items * perItem - railItemGapPx()
+        val maxScroll = (totalHeight - rail.height).coerceAtLeast(0).toFloat()
         val next = (railScroll - delta).coerceIn(0f, maxScroll)
         if (next == railScroll) return
         railScroll = next
         publishState()
-        scope.launch { runCatching { syncGeometry("rail-scroll") } }
     }
 
     /**
-     * Rail slots: the most recent group gets a full live-preview tile (a real task window fits the
-     * system minimum), the older groups get compact tiles (icon + name). A live preview is not
-     * possible for every tile because Android enforces a ~220dp minimum freeform window size.
+     * Authentic iPad Stage Manager left rail slots (G1-G5):
+     * narrow (~140dp) vertically centered column of rounded 3D-tilted snapshot thumbnails
+     * floating directly over the wallpaper — no dark container, no text, no arrows, no "+" button.
      */
     fun tileRect(index: Int, count: Int): StageRect? {
         val rail = railRect() ?: return null
         if (count <= 0) return null
-        val gap = dp(12f)
-        val liveHeight = dp(256f)
-        val compactHeight = dp(64f)
-        val rect = if (index == 0) {
-            StageRect(rail.left, rail.top - railScroll.roundToInt(), rail.right, rail.top - railScroll.roundToInt() + liveHeight)
+        val itemH = railItemHeightPx()
+        val gap = railItemGapPx()
+        val totalH = count * itemH + (count - 1).coerceAtLeast(0) * gap
+        val startTop = if (totalH < rail.height) {
+            rail.top + (rail.height - totalH) / 2
         } else {
-            val top = rail.top + liveHeight + gap + (index - 1) * (compactHeight + dp(8f)) - railScroll.roundToInt()
-            StageRect(rail.left, top, rail.right, top + compactHeight)
+            rail.top + dp(6f)
         }
-        if (rect.bottom > rail.bottom + 1 || rect.top < rail.top - 1) return null
-        return rect
+        val top = startTop + index * (itemH + gap) - railScroll.roundToInt()
+        val bottom = top + itemH
+        if (bottom < rail.top || top > rail.bottom) return null
+        return StageRect(rail.left, top, rail.right, bottom)
     }
 
-    fun isLiveRailSlot(index: Int): Boolean = index == 0
+    fun isLiveRailSlot(index: Int): Boolean = false
 
     fun railCanScroll(): Boolean {
         val rail = railRect() ?: return false
         val items = (session.sortedGroups().size - 1).coerceAtLeast(0)
-        return items * (dp(256f) + dp(12f)) > rail.height + dp(4f)
+        val totalH = items * railItemHeightPx() + (items - 1).coerceAtLeast(0) * railItemGapPx()
+        return totalH > rail.height + dp(4f)
     }
 
     /** The live preview is inset so the tile ring and its caption strip stay visible. */
@@ -659,7 +686,7 @@ object StageWorkspace {
     ): Result<StageWindow> {
         val group = session.activeGroup()
         val existing = session.visibleWindowsOf(group.id).size
-        val geometry = defaultGeometryFor(existing, at)
+        val geometry = WindowSizing.defaultGeometry(appContext, packageName, component, workspaceRect(), existing, at)
         val rect = pxRectFor(geometry)
         // Glide the newly launched real task upward from the Dock edge into its final slot (P8).
         val launchRect = StageRect(
@@ -834,21 +861,37 @@ object StageWorkspace {
         val window = session.windows[windowId] ?: return
         val sourceGroupId = session.groupOf(windowId)?.id ?: return
         val fromRect = pxRectFor(window.geometry)
-        val railSlot = tileRect(0, max(session.groups.size, 1))?.let { tileInner(it) }
-        if (window.alive && railShouldShow() && railSlot != null) {
-            StageWindowAnimator.animate(fromRect, railSlot, steps = 5, durationMs = 140L) { step ->
-                runCatching { applyBounds(window.taskId, step) }
-            }
-        }
+        val railSlot = tileRect(0, max(session.groups.size, 1))
+        val snap = if (window.alive) {
+            dev.stagelab.android.windows.TaskSnapshotStore.capture(window.taskId, force = true)
+        } else null
         window.minimized = false
 
         // Detach from the current group.
         session.groups.forEach { it.windowIds.remove(windowId) }
 
-        // Park the task behind the stage host (it must stay alive and hidden from the workspace).
+        // Park the task behind the stage host immediately (keeping its real workspace bounds intact!).
         runCatching {
             setFocusable(window.taskId, false)
             StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId))
+            StageRuntime.command(JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity"))
+        }
+
+        // Play 60/120fps 3D spring glide from center stage into the left rail slot.
+        val player = transitionPlayer
+        if (window.alive && railShouldShow() && railSlot != null && player != null) {
+            player(
+                listOf(
+                    dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
+                        bitmap = snap,
+                        fromRect = fromRect,
+                        toRect = railSlot,
+                        fromTiltY = 0f,
+                        toTiltY = 14f
+                    )
+                ),
+                240L
+            )
         }
 
         // Put it at the top of the recent list as its own group (or reuse the existing singleton).
@@ -973,15 +1016,19 @@ object StageWorkspace {
     suspend fun activateGroup(groupId: String) {
         if (groupId == session.activeGroupId) return
         val previousGroupId = session.activeGroupId
-        val outgoingFront = session.visibleWindowsOf(previousGroupId).lastOrNull { it.alive }
-        val railPreviewRect = tileRect(0, max(session.groups.size - 1, 1))?.let { tileInner(it) }
+        val outgoingWindows = session.visibleWindowsOf(previousGroupId).filter { it.alive }
+        val otherGroups = session.sortedGroups().filter { it.id != previousGroupId }
+        val incomingIndex = otherGroups.indexOfFirst { it.id == groupId }.coerceAtLeast(0)
+        val incomingSlot = tileRect(incomingIndex, max(otherGroups.size, 1))
+        val topRailSlot = tileRect(0, max(otherGroups.size, 1))
 
-        // Outgoing front window glides smoothly toward the left rail slot (P8).
-        if (outgoingFront != null && railShouldShow() && railPreviewRect != null) {
-            val fromRect = pxRectFor(outgoingFront.geometry)
-            StageWindowAnimator.animate(fromRect, railPreviewRect, steps = 5, durationMs = 130L) { step ->
-                runCatching { applyBounds(outgoingFront.taskId, step) }
-            }
+        // Capture fresh snapshots of outgoing active windows before parking them toBack.
+        val outgoingFront = outgoingWindows.lastOrNull()
+        val outgoingSnap = outgoingFront?.let {
+            dev.stagelab.android.windows.TaskSnapshotStore.capture(it.taskId, force = true)
+        }
+        outgoingWindows.dropLast(1).forEach { w ->
+            scope.launch { dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false) }
         }
 
         // Portrait (or landscape auto-hide): selecting a group tucks the rail back.
@@ -992,19 +1039,53 @@ object StageWorkspace {
             railTempRevealed = false
             computeLayout()
         }
+
+        // Park outgoing windows toBack at their original bounds (no shrinking!) and raise host above them.
+        outgoingWindows.forEach { w ->
+            runCatching { setFocusable(w.taskId, false) }
+            runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", w.taskId)) }
+        }
+        if (outgoingWindows.isNotEmpty()) {
+            runCatching {
+                StageRuntime.command(JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity"))
+            }
+        }
+
         session.makeActive(groupId)
         persist()
         publishState()
         ensureGroupAlive(groupId)
 
-        // Incoming front window glides smoothly from the left rail slot into its workspace rect (P8).
-        val incomingFront = session.visibleWindowsOf(groupId).lastOrNull { it.alive }
-        if (incomingFront != null && railPreviewRect != null) {
-            val targetRect = pxRectFor(incomingFront.geometry)
-            runCatching { setFocusable(incomingFront.taskId, true) }
-            runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", incomingFront.taskId)) }
-            StageWindowAnimator.animate(railPreviewRect, targetRect, steps = 5, durationMs = 140L) { step ->
-                runCatching { applyBounds(incomingFront.taskId, step) }
+        val incomingWindows = session.visibleWindowsOf(groupId).filter { it.alive }
+        val incomingFront = incomingWindows.lastOrNull()
+        val incomingSnap = incomingFront?.let {
+            dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(it.taskId)
+        }
+
+        // Play butter-smooth 60/120fps 3D spring transition (outgoing folds into rail, incoming unfolds from rail).
+        val player = transitionPlayer
+        if (player != null && topRailSlot != null && incomingSlot != null) {
+            val cards = ArrayList<dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard>(2)
+            if (outgoingFront != null) {
+                cards += dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
+                    bitmap = outgoingSnap,
+                    fromRect = pxRectFor(outgoingFront.geometry),
+                    toRect = topRailSlot,
+                    fromTiltY = 0f,
+                    toTiltY = 14f
+                )
+            }
+            if (incomingFront != null) {
+                cards += dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
+                    bitmap = incomingSnap,
+                    fromRect = incomingSlot,
+                    toRect = pxRectFor(incomingFront.geometry),
+                    fromTiltY = 14f,
+                    toTiltY = 0f
+                )
+            }
+            if (cards.isNotEmpty()) {
+                player(cards, 250L)
             }
         }
 
@@ -1114,73 +1195,50 @@ object StageWorkspace {
 
     // ------------------------------------------------------------------ sync
 
-    /** Applies session geometry to the real tasks: active group free, other groups parked in rail. */
+    /** Applies session geometry to the real tasks: active group free, other groups parked toBack (with snapshot thumbnails in rail). */
     suspend fun syncGeometry(reason: String) {
         if (applying) return
         applying = true
         try {
             val groups = session.groups
             val activeId = session.activeGroupId
-            groups.forEachIndexed { groupIndex, group ->
-                val isActive = group.id == activeId
-                val windows = session.windowsOf(group.id)
-                if (windows.isEmpty()) return@forEachIndexed
-                if (isActive) {
-                    windows.forEach { window ->
-                        if (!window.alive) return@forEach
-                        if (window.minimized) {
-                            // Minimized windows live in the recent list, not in the workspace.
-                            runCatching { setFocusable(window.taskId, false) }
-                            runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
-                            return@forEach
+            var parkedAny = false
+            // 1. Park all non-active and minimized windows first.
+            groups.forEach { group ->
+                if (group.id == activeId) return@forEach
+                session.windowsOf(group.id).forEach { window ->
+                    if (!window.alive) return@forEach
+                    if (dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(window.taskId) == null) {
+                        scope.launch {
+                            dev.stagelab.android.windows.TaskSnapshotStore.capture(window.taskId, force = false)
                         }
-                        val rect = pxRectFor(window.geometry)
-                        runCatching { setFocusable(window.taskId, true) }
-                        runCatching { applyBounds(window.taskId, rect) }
                     }
-                } else if (railShouldShow()) {
-                    val otherGroups = session.sortedGroups()
-                        .filter { it.id != activeId }
-                        .filter { group -> session.visibleWindowsOf(group.id).isNotEmpty() }
-                    val slot = otherGroups.indexOfFirst { it.id == group.id }
-                    val rect = tileRect(slot.coerceAtLeast(0), otherGroups.size)
-                    if (rect == null || slot > 0) {
-                        // Compact slot (or scrolled out of view): keep the task alive but behind the
-                        // stage host. Only the most recent group gets a live preview tile.
-                        windows.forEach { window ->
-                            if (!window.alive) return@forEach
-                            runCatching { setFocusable(window.taskId, false) }
-                            runCatching {
-                                StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId))
-                            }
-                        }
-                        return@forEachIndexed
-                    }
-                    val inner = tileInner(rect)
-                    windows.forEach { window ->
-                        if (!window.alive) return@forEach
-                        // A non focusable task cannot be raised above the stage host, which would
-                        // leave a black hole where the live preview should be.
-                        runCatching { setFocusable(window.taskId, true) }
-                        runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId)) }
-                        runCatching { applyBounds(window.taskId, inner) }
-                    }
-                } else {
-                    windows.forEach { window ->
-                        if (!window.alive) return@forEach
-                        runCatching { setFocusable(window.taskId, false) }
-                        runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
-                    }
+                    runCatching { setFocusable(window.taskId, false) }
+                    runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
+                    parkedAny = true
                 }
             }
-            // Minimized windows sit in the recent list, never in the workspace.
             session.windows.values.filter { it.minimized && it.alive }.forEach { window ->
                 runCatching { setFocusable(window.taskId, false) }
                 runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
+                parkedAny = true
             }
-            // The focused window must be brought back to the front after parking others.
-            session.visibleWindowsOf(activeId).lastOrNull()?.let { front ->
-                runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", front.taskId)) }
+            // 2. Ensure StageHostActivity sits above parked freeform tasks (required on Android 17 / ColorOS 17).
+            if (parkedAny) {
+                runCatching {
+                    StageRuntime.command(
+                        JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity")
+                    )
+                }
+            }
+            // 3. Raise active group's visible windows above StageHostActivity in exact z-order.
+            session.windowsOf(activeId).forEach { window ->
+                if (!window.alive || window.minimized) return@forEach
+                if (window.id in activeGestureWindows) return@forEach
+                val rect = pxRectFor(window.geometry)
+                runCatching { setFocusable(window.taskId, true) }
+                runCatching { applyBounds(window.taskId, rect) }
+                runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId)) }
             }
             Log.d(TAG, "syncGeometry($reason) groups=${groups.size} rail=${railShouldShow()} landscape=$landscape")
         } finally {
@@ -1250,12 +1308,50 @@ object StageWorkspace {
             persist()
             publishState()
         }
-        // Focus follows the system task list so the UI can show the active window.
-        val focusedTask = tasks.firstOrNull { it.focused }?.taskId ?: -1
-        val focusedWindow = session.windows.values.firstOrNull { it.taskId == focusedTask }
-        if (focusedWindow != null && session.windowsOf(session.activeGroupId).lastOrNull()?.id != focusedWindow.id) {
-            session.bringToFront(focusedWindow.id)
-            publishState()
+        // Sync active group z-order & focus from the real system task stack (getTasks returns top-to-bottom).
+        val activeGroup = session.activeGroup()
+        val taskOrder = tasks.mapIndexed { idx, t -> t.taskId to idx }.toMap()
+        val aliveIds = activeGroup.windowIds.filter { id ->
+            val w = session.windows[id]
+            w != null && w.alive && !w.minimized && taskOrder.containsKey(w.taskId)
+        }
+        if (aliveIds.size > 1) {
+            // Bottom-most (largest index in getTasks) first, topmost (smallest index) last.
+            val sortedAlive = aliveIds.sortedByDescending { id ->
+                taskOrder[session.windows[id]?.taskId] ?: Int.MAX_VALUE
+            }
+            if (sortedAlive != aliveIds) {
+                val otherIds = activeGroup.windowIds.filterNot { it in aliveIds }
+                activeGroup.windowIds.clear()
+                activeGroup.windowIds.addAll(otherIds)
+                activeGroup.windowIds.addAll(sortedAlive)
+                publishState()
+            }
+        } else {
+            val focusedTask = tasks.firstOrNull { it.focused }?.taskId ?: -1
+            val focusedWindow = session.windows.values.firstOrNull { it.taskId == focusedTask }
+            if (focusedWindow != null && session.windowsOf(session.activeGroupId).lastOrNull()?.id != focusedWindow.id) {
+                session.bringToFront(focusedWindow.id)
+                publishState()
+            }
+        }
+        // Periodically refresh TaskSnapshots for active windows and any uncached background windows.
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastSnapshotPollMs > 5000L && activeGestureWindows.isEmpty()) {
+            lastSnapshotPollMs = nowMs
+            val activeWins = session.visibleWindowsOf(session.activeGroupId).filter { it.alive }
+            activeWins.forEach { w ->
+                scope.launch {
+                    dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false)
+                }
+            }
+            session.windows.values.filter { it.alive && dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(it.taskId) == null }
+                .take(3)
+                .forEach { w ->
+                    scope.launch {
+                        dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false)
+                    }
+                }
         }
     }
 
@@ -1267,18 +1363,25 @@ object StageWorkspace {
         val activeId = session.activeGroupId
         val groups = session.sortedGroups()
         // Recent list: every non-active group (minimized windows live here as singleton groups).
-        val tiles = groups.mapIndexedNotNull { index, group ->
-            if (group.id == activeId) return@mapIndexedNotNull null
-            val otherIndex = groups.filter { it.id != activeId }.indexOfFirst { it.id == group.id }
-            val rect = tileRect(otherIndex.coerceAtLeast(0), max(groups.size - 1, 1))
-                ?: return@mapIndexedNotNull null
+        val otherGroups = groups.filter { it.id != activeId && session.visibleWindowsOf(it.id).isNotEmpty() }
+        val tiles = otherGroups.mapIndexedNotNull { otherIndex, group ->
+            val rect = tileRect(otherIndex, otherGroups.size) ?: return@mapIndexedNotNull null
+            val visibleWins = session.visibleWindowsOf(group.id)
             GroupTile(
                 id = group.id,
                 title = group.title,
-                windowCount = session.visibleWindowsOf(group.id).size,
+                windowCount = visibleWins.size,
                 active = false,
                 rect = rect,
-                live = isLiveRailSlot(otherIndex)
+                live = false,
+                previews = visibleWins.takeLast(3).map { w ->
+                    GroupWindowPreview(
+                        id = w.id,
+                        taskId = w.taskId,
+                        packageName = w.packageName,
+                        label = w.label
+                    )
+                }
             )
         }
         val windows = session.windowsOf(activeId)
@@ -1298,30 +1401,6 @@ object StageWorkspace {
             }
         val minimized = windows.filter { it.minimized }
         val railShown = railShouldShow()
-        // "+" button sits after the rail content, or at the rail top when it is empty.
-        val railLeft = railRect()?.left ?: dp(12f)
-        val railBottom = if (railShown && tiles.isNotEmpty()) {
-            tiles.maxOf { it.rect.bottom }
-        } else {
-            (railRect()?.top ?: (workspace.top + dp(8f))) + dp(62f)
-        }
-        val addSize = dp(44f)
-        val addRect = StageRect(
-            left = railLeft,
-            top = railBottom + dp(12f),
-            right = railLeft + addSize,
-            bottom = railBottom + dp(12f) + addSize
-        )
-        val scrollable = railShown && railCanScroll()
-        val chevron = dp(38f)
-        val railBottomEdge = railRect()?.bottom ?: 0
-        val railRightEdge = railRect()?.right ?: 0
-        val upRect = if (scrollable) {
-            StageRect(railRightEdge - chevron - dp(8f), railBottomEdge - chevron * 2 - dp(16f), railRightEdge - dp(8f), railBottomEdge - chevron - dp(16f))
-        } else StageRect(0, 0, 0, 0)
-        val downRect = if (scrollable) {
-            StageRect(railRightEdge - chevron - dp(8f), railBottomEdge - chevron - dp(8f), railRightEdge - dp(8f), railBottomEdge - dp(8f))
-        } else StageRect(0, 0, 0, 0)
         val activePackages = windows.filterNot { it.minimized }.map { it.packageName }.toSet()
         val runningPackages = session.windows.values.filter { it.alive }.map { it.packageName }.toSet()
         _state.value = WorkspaceState(
@@ -1335,10 +1414,11 @@ object StageWorkspace {
             landscape = landscape,
             workspace = workspace,
             dock = dock,
-            addGroupRect = if (railShown) addRect else StageRect(0, 0, 0, 0),
+            // iPad Stage Manager has no "+" button or scroll chevron buttons in the left rail.
+            addGroupRect = StageRect(0, 0, 0, 0),
             rail = railRect() ?: StageRect(0, 0, 0, 0),
-            railUpRect = upRect,
-            railDownRect = downRect,
+            railUpRect = StageRect(0, 0, 0, 0),
+            railDownRect = StageRect(0, 0, 0, 0),
             dropHighlight = currentDropHighlight,
             dockVisible = dockShouldShow(),
             dockAutoHide = dockAutoHide,

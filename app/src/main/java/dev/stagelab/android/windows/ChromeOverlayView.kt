@@ -52,8 +52,19 @@ class ChromeOverlayView(
 
     var focused: Boolean = false
         set(value) {
-            field = value
-            invalidate()
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
+    /** Hidden when another window in front occludes this window's top-center `•••` pill. */
+    var pillVisible: Boolean = true
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
         }
 
     var title: String = ""
@@ -100,22 +111,22 @@ class ChromeOverlayView(
             invalidate()
         }
 
-    private var closeRect = RectF()
-    private var minimizeRect = RectF()
-    private var zoomRect = RectF()
+    private var pillRect = RectF()
+    private var pillHitRect = RectF()
 
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
     private var lastTapTime = 0L
-    private var pressedDot = DOT_NONE
+    private var pressedPill = false
+    private var activeHandle = false
     private var dragging = false
     private var longPressed = false
 
     private val longPressRunnable = Runnable {
         if (!dragging && mode == ChromeMode.TITLE) {
             longPressed = true
-            pressedDot = DOT_NONE
+            pressedPill = false
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
             onAction?.invoke(ACTION_LONG_PRESS)
         }
@@ -125,22 +136,18 @@ class ChromeOverlayView(
     var lastRawPos: Pair<Int, Int> = 0 to 0
         private set
 
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(236, 26, 30, 38)
-    }
-    private val barBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val pillFill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pillBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2f
-        color = Color.argb(46, 255, 255, 255)
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(236, 238, 243, 252)
-        isFakeBoldText = true
     }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
+    }
+    private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -155,7 +162,7 @@ class ChromeOverlayView(
 
     // ------------------------------------------------------------------ corner masks
 
-    /** One overlay with the four corner masks and the focus ring. */
+    /** One overlay with the four corner masks and a hairline specular edge (no blue focus border). */
     private fun drawDecoration(canvas: Canvas) {
         val r = cornerRadius
         if (r <= 0f) return
@@ -163,7 +170,7 @@ class ChromeOverlayView(
         if (maskVisible.getOrElse(1) { true }) dragMask(canvas, 1, width - r, 0f, r, maskColor)
         if (maskVisible.getOrElse(2) { true }) dragMask(canvas, 2, 0f, height - r, r, maskColorBottom)
         if (maskVisible.getOrElse(3) { true }) dragMask(canvas, 3, width - r, height - r, r, maskColorBottom)
-        if (focused) drawRing(canvas)
+        drawRing(canvas)
     }
 
     private fun dragMask(
@@ -211,12 +218,17 @@ class ChromeOverlayView(
         canvas.drawPath(mask, maskPaint)
     }
 
-    // ------------------------------------------------------------------ focus ring
+    // ------------------------------------------------------------------ hairline edge (no blue ring)
 
+    /**
+     * iPadOS Stage Manager windows never use a coloured focus outline; focus is expressed through
+     * shadow depth. Only a whisper-thin translucent specular edge keeps overlapping windows crisp.
+     */
     private fun drawRing(canvas: Canvas) {
-        val stroke = 2.2f * density()
+        val d = density()
+        val stroke = 0.8f * d
         ringPaint.strokeWidth = stroke
-        ringPaint.color = if (focused) Color.argb(230, 138, 160, 255) else Color.argb(40, 255, 255, 255)
+        ringPaint.color = if (focused) Color.argb(48, 255, 255, 255) else Color.argb(24, 255, 255, 255)
         val inset = stroke / 2f + 0.5f
         canvas.drawRoundRect(
             RectF(inset, inset, width - inset, height - inset),
@@ -226,90 +238,83 @@ class ChromeOverlayView(
         )
     }
 
-    // ------------------------------------------------------------------ title bar
+    // ------------------------------------------------------------------ iPad top multitasking pill
 
+    /**
+     * Authentic iPadOS Stage Manager top chrome: completely transparent drag strip with only the
+     * iconic centered `•••` multitasking pill. No dark macOS titlebar, no traffic lights.
+     */
     private fun drawTitleBar(canvas: Canvas) {
-        val r = cornerRadius.coerceAtMost(height.toFloat())
-        val path = Path().apply {
-            addRoundRect(
-                RectF(0f, 0f, width.toFloat(), height.toFloat()),
-                floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f),
-                Path.Direction.CW
-            )
+        if (!pillVisible) {
+            pillRect = RectF()
+            pillHitRect = RectF()
+            return
         }
-        canvas.drawPath(path, fill)
-        if (width > 4) {
-            canvas.drawPath(path, barBorder)
+        val d = density()
+        val pillW = (38f * d).coerceAtMost(width * 0.4f)
+        val pillH = 16f * d
+        val cx = width / 2f
+        val top = 5f * d
+        pillRect = RectF(cx - pillW / 2f, top, cx + pillW / 2f, top + pillH)
+        // Generous invisible touch slop around the `•••` pill for reliable finger taps.
+        val hitPadX = 14f * d
+        val hitPadY = 8f * d
+        pillHitRect = RectF(
+            pillRect.left - hitPadX,
+            (pillRect.top - hitPadY).coerceAtLeast(0f),
+            pillRect.right + hitPadX,
+            (pillRect.bottom + hitPadY).coerceAtMost(height.toFloat())
+        )
+
+        pillFill.color = when {
+            pressedPill -> Color.argb(190, 42, 48, 62)
+            focused -> Color.argb(138, 26, 30, 40)
+            else -> Color.argb(72, 26, 30, 40)
         }
-        drawTrafficLights(canvas)
-        drawTitle(canvas)
+        pillBorder.strokeWidth = 0.8f * d
+        pillBorder.color = if (focused) Color.argb(64, 255, 255, 255) else Color.argb(28, 255, 255, 255)
+
+        val pr = pillH / 2f
+        canvas.drawRoundRect(pillRect, pr, pr, pillFill)
+        canvas.drawRoundRect(pillRect, pr, pr, pillBorder)
+
+        val dotR = 2.1f * d
+        val dotGap = 7.4f * d
+        val cy = pillRect.centerY()
+        dotPaint.color = if (focused) Color.argb(238, 244, 247, 255) else Color.argb(145, 232, 238, 248)
+        canvas.drawCircle(cx - dotGap, cy, dotR, dotPaint)
+        canvas.drawCircle(cx, cy, dotR, dotPaint)
+        canvas.drawCircle(cx + dotGap, cy, dotR, dotPaint)
     }
 
-    private fun drawTrafficLights(canvas: Canvas) {
-        val r = height * 0.155f
-        val cy = height * 0.52f
-        val startX = height * 0.46f
-        val gap = height * 0.50f
-        closeRect = RectF(startX - r, cy - r, startX + r, cy + r)
-        minimizeRect = RectF(startX + gap - r, cy - r, startX + gap + r, cy + r)
-        zoomRect = RectF(startX + 2 * gap - r, cy - r, startX + 2 * gap + r, cy + r)
-
-        dotPaint.color = Color.rgb(255, 99, 92)
-        canvas.drawCircle(closeRect.centerX(), cy, r, dotPaint)
-        dotPaint.color = Color.rgb(255, 196, 74)
-        canvas.drawCircle(minimizeRect.centerX(), cy, r, dotPaint)
-        dotPaint.color = Color.rgb(96, 208, 122)
-        canvas.drawCircle(zoomRect.centerX(), cy, r, dotPaint)
-
-        val glyph = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(190, 50, 18, 16)
-            strokeWidth = 3.0f * density()
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-        val d = r * 0.44f
-        canvas.drawLine(closeRect.centerX() - d, cy - d, closeRect.centerX() + d, cy + d, glyph)
-        canvas.drawLine(closeRect.centerX() + d, cy - d, closeRect.centerX() - d, cy + d, glyph)
-        canvas.drawLine(minimizeRect.centerX() - d, cy, minimizeRect.centerX() + d, cy, glyph)
-        // Zoom glyph: a small diagonal double arrow.
-        canvas.drawLine(zoomRect.centerX() - d, cy + d, zoomRect.centerX() + d, cy - d, glyph)
-        canvas.drawLine(zoomRect.centerX() - d, cy + d, zoomRect.centerX() - d * 0.2f, cy + d, glyph)
-        canvas.drawLine(zoomRect.centerX() + d, cy - d, zoomRect.centerX() + d * 0.2f, cy - d, glyph)
-    }
-
-    private fun drawTitle(canvas: Canvas) {
-        if (title.isBlank()) return
-        val available = width - height * 3.4f
-        var text = title
-        textPaint.textSize = height * 0.33f
-        while (textPaint.measureText(text) > available && text.length > 4) {
-            text = text.dropLast(2)
-        }
-        val x = width / 2f - textPaint.measureText(text) / 2f
-        val y = height / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-        canvas.drawText(text, x, y, textPaint)
-    }
-
-    // ------------------------------------------------------------------ resize grips
+    // ------------------------------------------------------------------ iPad curved corner resize arc
 
     private fun drawGrip(canvas: Canvas) {
-        // iPad windows have no visible resize affordances: the edges simply respond to drags.
-        // A very faint hint is drawn only for the focused window's bottom-right corner.
-        if (mode != ChromeMode.RESIZE_CORNER || !focused) return
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(52, 255, 255, 255)
-            style = Paint.Style.STROKE
-            strokeWidth = 3f * density()
-            strokeCap = Paint.Cap.ROUND
+        if (mode != ChromeMode.RESIZE_CORNER && mode != ChromeMode.RESIZE_BOTTOM_LEFT) return
+        if (!focused && !activeHandle) return
+        val d = density()
+        arcPaint.strokeWidth = (if (activeHandle) 3.8f else 3.0f) * d
+        arcPaint.color = if (activeHandle) {
+            Color.argb(225, 245, 248, 255)
+        } else {
+            Color.argb(115, 236, 242, 255)
         }
-        val inset = 9f * density()
-        for (index in 0..1) {
-            val offset = index * 9f * density()
-            canvas.drawLine(
-                width - inset - offset, height - inset,
-                width - inset, height - inset - offset,
-                paint
-            )
+        // The grip overlay is centered on the window corner, so the window corner lies at (width/2, height/2).
+        val arcR = 13f * d
+        val inset = 4.5f * d
+        if (mode == ChromeMode.RESIZE_CORNER) {
+            // Bottom-right curved quarter-arc hugging the window's bottom-right rounded corner.
+            val cornerX = width / 2f - inset
+            val cornerY = height / 2f - inset
+            val oval = RectF(cornerX - arcR * 2f, cornerY - arcR * 2f, cornerX, cornerY)
+            canvas.drawArc(oval, 12f, 66f, false, arcPaint)
+        } else {
+            // Bottom-left curved quarter-arc (shown when actively grabbing bottom-left).
+            if (!activeHandle) return
+            val cornerX = width / 2f + inset
+            val cornerY = height / 2f - inset
+            val oval = RectF(cornerX, cornerY - arcR * 2f, cornerX + arcR * 2f, cornerY)
+            canvas.drawArc(oval, 102f, 66f, false, arcPaint)
         }
     }
 
@@ -328,7 +333,9 @@ class ChromeOverlayView(
                 lastRawPos = event.rawX.roundToInt() to event.rawY.roundToInt()
                 longPressed = false
                 dragging = false
-                pressedDot = DOT_NONE
+                pressedPill = false
+                activeHandle = mode != ChromeMode.TITLE
+                if (activeHandle) invalidate()
                 if (mode == ChromeMode.TITLE) {
                     // Mouse/trackpad right-click opens the window control menu immediately (P9).
                     if ((event.buttonState and MotionEvent.BUTTON_SECONDARY) != 0) {
@@ -336,15 +343,11 @@ class ChromeOverlayView(
                         onAction?.invoke(ACTION_LONG_PRESS)
                         return true
                     }
-                    pressedDot = when {
-                        closeRect.contains(event.x, event.y) -> DOT_CLOSE
-                        minimizeRect.contains(event.x, event.y) -> DOT_MINIMIZE
-                        zoomRect.contains(event.x, event.y) -> DOT_ZOOM
-                        else -> DOT_NONE
-                    }
+                    pressedPill = pillHitRect.contains(event.x, event.y)
+                    if (pressedPill) invalidate()
                     removeCallbacks(longPressRunnable)
                     postDelayed(longPressRunnable, LONG_PRESS_MS)
-                    if (pressedDot == DOT_NONE) {
+                    if (!pressedPill) {
                         onTouch(PHASE_START, 0f, 0f)
                     }
                     return true
@@ -360,8 +363,9 @@ class ChromeOverlayView(
                     removeCallbacks(longPressRunnable)
                     if (!dragging) {
                         dragging = true
-                        if (mode == ChromeMode.TITLE && pressedDot != DOT_NONE) {
-                            pressedDot = DOT_NONE
+                        if (mode == ChromeMode.TITLE && pressedPill) {
+                            pressedPill = false
+                            invalidate()
                             onTouch(PHASE_START, 0f, 0f)
                         }
                     }
@@ -373,20 +377,25 @@ class ChromeOverlayView(
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
+                if (activeHandle) {
+                    activeHandle = false
+                    invalidate()
+                }
                 if (longPressed) {
                     longPressed = false
                     return true
                 }
                 val moved = kotlin.math.abs(event.rawX - downX) + kotlin.math.abs(event.rawY - downY)
                 val quick = System.currentTimeMillis() - downTime < 350
-                if (mode == ChromeMode.TITLE && pressedDot != DOT_NONE && moved < touchSlop) {
-                    when (pressedDot) {
-                        DOT_CLOSE -> onAction?.invoke(ACTION_CLOSE)
-                        DOT_MINIMIZE -> onAction?.invoke(ACTION_MINIMIZE)
-                        DOT_ZOOM -> onAction?.invoke(ACTION_ZOOM)
-                    }
-                    pressedDot = DOT_NONE
+                if (mode == ChromeMode.TITLE && pressedPill && moved < touchSlop) {
+                    pressedPill = false
+                    invalidate()
+                    onAction?.invoke(ACTION_MENU_TAP)
                     return true
+                }
+                if (pressedPill) {
+                    pressedPill = false
+                    invalidate()
                 }
                 if (mode == ChromeMode.TITLE && moved < touchSlop && quick) {
                     val now = System.currentTimeMillis()
@@ -397,7 +406,6 @@ class ChromeOverlayView(
                         lastTapTime = now
                     }
                 }
-                pressedDot = DOT_NONE
                 if (dragging || mode != ChromeMode.TITLE) {
                     onTouch(PHASE_END, 0f, 0f)
                 }
@@ -409,9 +417,13 @@ class ChromeOverlayView(
                 val wasDragging = dragging
                 dragging = false
                 longPressed = false
-                pressedDot = DOT_NONE
+                if (pressedPill || activeHandle) {
+                    pressedPill = false
+                    activeHandle = false
+                    invalidate()
+                }
                 if (wasDragging || mode != ChromeMode.TITLE) {
-                    onTouch(PHASE_END, 0f, 0f)
+                    onTouch(PHASE_CANCEL, 0f, 0f)
                 }
                 return true
             }
@@ -423,17 +435,15 @@ class ChromeOverlayView(
         const val PHASE_START = 0
         const val PHASE_MOVE = 1
         const val PHASE_END = 2
+        const val PHASE_CANCEL = 3
 
         const val ACTION_CLOSE = 0
         const val ACTION_MINIMIZE = 1
         const val ACTION_ZOOM = 2
         const val ACTION_DOUBLE_TAP = 3
         const val ACTION_LONG_PRESS = 4
+        const val ACTION_MENU_TAP = 5
 
-        private const val DOT_NONE = 0
-        private const val DOT_CLOSE = 1
-        private const val DOT_MINIMIZE = 2
-        private const val DOT_ZOOM = 3
         private const val LONG_PRESS_MS = 420L
     }
 }

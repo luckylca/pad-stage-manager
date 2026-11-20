@@ -27,13 +27,14 @@ import dev.stagelab.android.core.stage.StageRect
 import dev.stagelab.android.core.stage.StageRuntime
 import dev.stagelab.android.ui.AppPickerActivity
 import dev.stagelab.android.ui.StageLabTheme
+import dev.stagelab.android.ui.WallpaperBackdrop
 import dev.stagelab.android.ui.rememberDockApps
+import dev.stagelab.android.windows.StageTransitionOverlay
 import dev.stagelab.android.windows.WindowChromeController
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
 /**
@@ -44,11 +45,37 @@ import kotlin.math.roundToInt
  */
 class StageHostActivity : ComponentActivity() {
 
+    private data class GeometryCommit(
+        val rect: StageRect,
+        val final: Boolean,
+        val resized: Boolean
+    )
+
     private lateinit var chrome: WindowChromeController
     private lateinit var exposeOverlay: dev.stagelab.android.windows.StageExposeOverlay
+    private lateinit var transitionOverlay: StageTransitionOverlay
+    private lateinit var wallpaperBackdrop: WallpaperBackdrop
 
-    @OptIn(FlowPreview::class)
-    private val pendingGeometry = MutableStateFlow<Triple<String, StageRect, Boolean>?>(null)
+    /** Per-window conflated channels so committing window B never cancels window A (G14). */
+    private val geometryQueues = ConcurrentHashMap<String, Channel<GeometryCommit>>()
+
+    private fun enqueueGeometry(id: String, rect: StageRect, final: Boolean, resized: Boolean) {
+        val channel = geometryQueues.computeIfAbsent(id) {
+            val ch = Channel<GeometryCommit>(Channel.CONFLATED)
+            lifecycleScope.launch {
+                for (update in ch) {
+                    StageWorkspace.updateGeometryPx(id, update.rect)
+                    StageWorkspace.commitGeometry(id)
+                    if (update.final) {
+                        if (update.resized) StageWorkspace.rememberWindowSize(id)
+                        StageWorkspace.persist()
+                    }
+                }
+            }
+            ch
+        }
+        channel.trySend(GeometryCommit(rect, final, resized))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,18 +86,13 @@ class StageHostActivity : ComponentActivity() {
 
         chrome = WindowChromeController(this, chromeCallbacks)
         exposeOverlay = dev.stagelab.android.windows.StageExposeOverlay(this)
+        transitionOverlay = StageTransitionOverlay(this)
+        wallpaperBackdrop = WallpaperBackdrop.load(this)
+        StageWorkspace.transitionPlayer = { cards, durationMs ->
+            transitionOverlay.play(cards, durationMs)
+        }
         chrome.ensureEdgeStrip()
         current = this
-
-        lifecycleScope.launch {
-            pendingGeometry.collectLatest { pending ->
-                if (pending == null) return@collectLatest
-                val (id, rect, final) = pending
-                StageWorkspace.updateGeometryPx(id, rect)
-                StageWorkspace.commitGeometry(id)
-                if (final) StageWorkspace.persist()
-            }
-        }
 
         setContent {
             StageLabTheme {
@@ -110,8 +132,8 @@ class StageHostActivity : ComponentActivity() {
                                 title = window.title,
                                 focused = window.focused,
                                 minimized = window.minimized,
-                                deskTopColor = deskColorAt(window.rect.top, state),
-                                deskBottomColor = deskColorAt(window.rect.bottom, state),
+                                deskTopColor = deskColorAt(window.rect.left, window.rect.top),
+                                deskBottomColor = deskColorAt(window.rect.left, window.rect.bottom),
                                 workspace = state.workspace
                             )
                         },
@@ -200,6 +222,7 @@ class StageHostActivity : ComponentActivity() {
                     StageWorkspaceScreen(
                         state = state,
                         dockModel = dockModel,
+                        wallpaper = wallpaperBackdrop,
                         onGroupClick = { id -> lifecycleScope.launch { StageWorkspace.activateGroup(id) } },
                         onNewGroup = {
                             StageWorkspace.createGroup()
@@ -258,8 +281,16 @@ class StageHostActivity : ComponentActivity() {
     }
 
     private val chromeCallbacks = object : WindowChromeController.Callbacks {
-        override fun onGeometryChanged(id: String, rect: StageRect, final: Boolean) {
-            pendingGeometry.value = Triple(id, rect, final)
+        override fun onGeometryChanged(id: String, rect: StageRect, final: Boolean, resized: Boolean) {
+            enqueueGeometry(id, rect, final, resized)
+        }
+
+        override fun onGestureStateChanged(id: String, active: Boolean) {
+            StageWorkspace.setWindowGestureActive(id, active)
+        }
+
+        override fun onWindowDragCancelled(id: String) {
+            StageWorkspace.clearDropHighlight()
         }
 
         override fun onFocusRequested(id: String) {
@@ -554,19 +585,11 @@ class StageHostActivity : ComponentActivity() {
         )
     }
 
-    /** Desk colour at a given y so the corner masks match the background exactly. */
-    private fun deskColorAt(y: Int, state: dev.stagelab.android.stage.WorkspaceState): Int {
+    /** Samples the wallpaper/desk colour at (x, y) so window corner masks blend cleanly. */
+    private fun deskColorAt(x: Int, y: Int): Int {
+        val width = resources.displayMetrics.widthPixels.coerceAtLeast(1)
         val height = resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val t = (y.toFloat() / height).coerceIn(0f, 1f)
-        return lerpColor(0xFF141922.toInt(), 0xFF0A0D13.toInt(), t)
-    }
-
-    private fun lerpColor(from: Int, to: Int, t: Float): Int {
-        val a = ((from ushr 24 and 0xFF) + ((to ushr 24 and 0xFF) - (from ushr 24 and 0xFF)) * t).toInt()
-        val r = ((from ushr 16 and 0xFF) + ((to ushr 16 and 0xFF) - (from ushr 16 and 0xFF)) * t).toInt()
-        val g = ((from ushr 8 and 0xFF) + ((to ushr 8 and 0xFF) - (from ushr 8 and 0xFF)) * t).toInt()
-        val b = ((from and 0xFF) + ((to and 0xFF) - (from and 0xFF)) * t).toInt()
-        return (a shl 24) or (r shl 16) or (g shl 8) or b
+        return wallpaperBackdrop.sampleColor(x.toFloat() / width, y.toFloat() / height)
     }
 
     private fun openAppPicker() {
@@ -605,6 +628,10 @@ class StageHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        StageWorkspace.transitionPlayer = null
+        geometryQueues.values.forEach { it.close() }
+        geometryQueues.clear()
+        runCatching { transitionOverlay.cancelImmediate() }
         runCatching { exposeOverlay.dismiss() }
         runCatching { chrome.destroy() }
         if (current === this) current = null

@@ -1,17 +1,21 @@
 ﻿package dev.stagelab.android.stage
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,39 +41,44 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.toSize
+import dev.stagelab.android.ui.AppIconCache
 import dev.stagelab.android.ui.DockApp
 import dev.stagelab.android.ui.DockModel
+import dev.stagelab.android.ui.WallpaperBackdrop
+import dev.stagelab.android.windows.TaskSnapshotStore
 import kotlin.math.hypot
-import kotlin.math.roundToInt
 
-private val SurfaceTop = Color(0xFF141922)
-private val SurfaceBottom = Color(0xFF0A0D13)
 private val Ink = Color(0xFFEAF0FA)
-private val InkMuted = Color(0xFF94A0B2)
-private val Accent = Color(0xFF8AA0FF)
+private val InkMuted = Color(0xFFA6B2C6)
 
 /**
- * The iPad-flavoured Stage Manager surface: desk, recent-group rail, window frames and the dock.
+ * The iPadOS Stage Manager desktop surface: wallpaper backdrop, layered window shadows,
+ * floating 3D-tilted recent-group thumbnail rail, and frosted-glass Dock.
  *
- * The real application windows are composited above this by WindowManager, so everything here is
- * chrome: desk, tile cards, dock, and the space between windows.
+ * The real application windows are composited above this by WindowManager, while non-active
+ * groups stay parked behind it at their original bounds and appear as crisp 3D snapshot cards.
  */
 @Composable
 fun StageWorkspaceScreen(
     state: WorkspaceState,
     dockModel: DockModel,
+    wallpaper: WallpaperBackdrop,
     onGroupClick: (String) -> Unit,
     onNewGroup: () -> Unit,
     onRailScroll: (Int) -> Unit,
@@ -81,7 +91,7 @@ fun StageWorkspaceScreen(
     onAddApp: () -> Unit,
     onEmptyTap: () -> Unit
 ) {
-    val density = LocalDensity.current
+    val snapshotVersion by TaskSnapshotStore.version.collectAsState()
     var dragging by remember { mutableStateOf<DockApp?>(null) }
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
     var dragOrigin by remember { mutableStateOf(Offset.Zero) }
@@ -89,18 +99,24 @@ fun StageWorkspaceScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(SurfaceTop, SurfaceBottom)))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onEmptyTap
+            )
     ) {
-        // Soft shadows behind the real windows. Drawn by the host, so they are visible around the
-        // task instead of being covered by it.
+        // 1. Real system wallpaper (or atmospheric iPadOS twilight fallback).
+        WallpaperLayer(wallpaper)
+
+        // 2. Layered iPadOS window shadows (deeper for focused window, softer for unfocused).
         WindowShadows(state)
 
-        if (state.railVisible) {
+        // 3. Floating 3D-tilted recent-group snapshot thumbnails (no container box, no text labels).
+        if (state.railVisible && state.groups.isNotEmpty()) {
             RecentGroupsRail(
                 state = state,
-                onGroupClick = onGroupClick,
-                onNewGroup = onNewGroup,
-                onRailScroll = onRailScroll
+                snapshotVersion = snapshotVersion,
+                onGroupClick = onGroupClick
             )
         }
 
@@ -108,6 +124,7 @@ fun StageWorkspaceScreen(
             EmptyWorkspaceHint()
         }
 
+        // 4. Frosted-glass floating iPadOS Dock.
         AnimatedVisibility(
             visible = state.dockVisible,
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -141,251 +158,263 @@ fun StageWorkspaceScreen(
             )
         }
 
+        // 5. Floating Dock drag preview.
         dragging?.let { app ->
             val position = dragOrigin + dragOffset
             val dragDensity = LocalDensity.current
             Box(
                 modifier = Modifier
                     .offset(
-                        x = with(dragDensity) { position.x.toDp() } - 28.dp,
-                        y = with(dragDensity) { position.y.toDp() } - 28.dp
+                        x = with(dragDensity) { position.x.toDp() } - 30.dp,
+                        y = with(dragDensity) { position.y.toDp() } - 30.dp
                     )
-                    .size(56.dp)
-                    .alpha(0.85f)
-                    .shadow(18.dp, RoundedCornerShape(16.dp))
+                    .size(60.dp)
+                    .alpha(0.92f)
+                    .shadow(22.dp, RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
                     .background(Color(0x33FFFFFF)),
                 contentAlignment = Alignment.Center
             ) {
-                app.icon?.let { Image(bitmap = it, contentDescription = null, modifier = Modifier.size(56.dp)) }
+                app.icon?.let { Image(bitmap = it, contentDescription = null, modifier = Modifier.size(60.dp)) }
             }
         }
     }
 }
 
 @Composable
+private fun WallpaperLayer(wallpaper: WallpaperBackdrop) {
+    val img = wallpaper.imageBitmap
+    if (img != null) {
+        Image(
+            bitmap = img,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        // Subtle atmospheric scrim so window shadows and frosted surfaces read cleanly on bright wallpapers.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.14f))
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(WallpaperBackdrop.FALLBACK_TOP),
+                            Color(WallpaperBackdrop.FALLBACK_MID),
+                            Color(WallpaperBackdrop.FALLBACK_BOTTOM)
+                        )
+                    )
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(Color(0x2A4C66B8), Color(0x00000000)),
+                            center = Offset(0.28f, 0.22f),
+                            radius = 1600f
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(Color(0x206848A8), Color(0x00000000)),
+                            center = Offset(0.78f, 0.72f),
+                            radius = 1500f
+                        )
+                    )
+            )
+        }
+    }
+}
+
+/**
+ * Layered ambient + key shadows behind real application windows (G11).
+ * Focused windows cast a noticeably deeper, wider shadow than background windows — matching iPadOS
+ * without relying on coloured focus outlines.
+ */
+@Composable
 private fun WindowShadows(state: WorkspaceState) {
-    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-        val radius = 22.dp.toPx()
+    Canvas(Modifier.fillMaxSize()) {
+        val radius = 15.dp.toPx()
         state.windows.forEach { window ->
             val rect = window.rect
             if (rect.width <= 0 || rect.height <= 0) return@forEach
-            // Concentric rounded rectangles approximate a soft drop shadow without a blur filter.
-            for (step in 9 downTo 1) {
-                val spread = step * 1.4.dp.toPx()
-                val alpha = 0.018f * (10 - step)
+            val layers = if (window.focused) 12 else 7
+            val stepDp = if (window.focused) 2.2f else 1.7f
+            val baseAlpha = if (window.focused) 0.025f else 0.017f
+            val yOffset = (if (window.focused) 5.5f else 2.5f).dp.toPx()
+
+            for (step in layers downTo 1) {
+                val spread = step * stepDp.dp.toPx()
+                val weight = (layers + 1 - step).toFloat() / layers.toFloat()
+                val alpha = baseAlpha * (0.4f + weight * 1.1f)
                 drawRoundRect(
                     color = Color.Black.copy(alpha = alpha),
-                    topLeft = Offset(rect.left - spread, rect.top - spread + 2.dp.toPx()),
-                    size = androidx.compose.ui.geometry.Size(
-                        rect.width + spread * 2,
-                        rect.height + spread * 2
-                    ),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius + spread)
+                    topLeft = Offset(rect.left - spread, rect.top - spread * 0.7f + yOffset),
+                    size = Size(rect.width + spread * 2, rect.height + spread * 1.85f),
+                    cornerRadius = CornerRadius(radius + spread * 0.65f)
                 )
             }
         }
     }
 }
 
-@Composable
-private fun DeskGlow() {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(Color(0x14384A80), Color(0x00000000)),
-                    center = Offset(0.5f, 0.35f),
-                    radius = 1800f
-                )
-            )
-    )
-}
-
+/**
+ * Authentic iPadOS Stage Manager left recent-apps strip (G1-G5):
+ * - No dark container box: thumbnails float directly over the wallpaper.
+ * - No text titles, window count squares, scroll chevrons, or "+" button.
+ * - Each group tile is rendered with iPadOS 3D perspective tilt (rotationY = +14°) facing the stage.
+ * - Multi-window groups fan/stack subtly inside the slot with crisp app icon badges.
+ */
 @Composable
 private fun RecentGroupsRail(
     state: WorkspaceState,
-    onGroupClick: (String) -> Unit,
-    onNewGroup: () -> Unit,
-    onRailScroll: (Int) -> Unit
+    snapshotVersion: Int,
+    onGroupClick: (String) -> Unit
 ) {
     val density = LocalDensity.current
+    val context = LocalContext.current
+    // Touch snapshotVersion so Compose recomposes when fresh TaskSnapshots arrive.
+    val _version = snapshotVersion
+
     Box(Modifier.fillMaxSize()) {
-        // Rail panel: a persistent column in landscape, a drawer in portrait.
-        Box(
-            modifier = Modifier
-                .offset(
-                    x = with(density) { (state.rail.left - 4).toDp() },
-                    y = with(density) { state.rail.top.toDp() }
-                )
-                .width(with(density) { (state.rail.width + 8).toDp() })
-                .height(with(density) { state.rail.height.toDp() })
-                .clip(RoundedCornerShape(26.dp))
-                .background(Color(0xB30E131B))
-                .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(26.dp))
-        )
-        if (state.groups.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .offset(
-                        x = with(density) { (state.rail.left + 12).toDp() },
-                        y = with(density) { (state.rail.top + 18).toDp() }
-                    )
-                    .width(with(density) { (state.rail.width - 24).toDp() })
-            ) {
-                Text("最近工作台", color = InkMuted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(6.dp))
-                Text("切换后会出现在这里", color = InkMuted.copy(alpha = 0.7f), fontSize = 9.sp)
-            }
-        }
         state.groups.forEach { group ->
             val widthDp = with(density) { group.rect.width.toDp() }
             val heightDp = with(density) { group.rect.height.toDp() }
             val xDp = with(density) { group.rect.left.toDp() }
             val yDp = with(density) { group.rect.top.toDp() }
-            if (!group.live) {
-                // Compact tile: Android's minimum window size does not fit a second live preview,
-                // so older groups are represented by identity + window count.
-                Box(
-                    modifier = Modifier
-                        .offset(x = xDp, y = yDp)
-                        .width(widthDp)
-                        .height(heightDp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0x14FFFFFF))
-                        .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(16.dp))
-                        .clickable { onGroupClick(group.id) }
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(30.dp)
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(Color(0x2AFFFFFF)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                "${group.windowCount}",
-                                color = Ink,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                group.title,
-                                color = Ink,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                if (group.windowCount > 0) "轻点切换" else "空工作区",
-                                color = InkMuted,
-                                fontSize = 9.sp
-                            )
-                        }
-                    }
-                }
-                return@forEach
-            }
+
             Box(
                 modifier = Modifier
                     .offset(x = xDp, y = yDp)
                     .width(widthDp)
                     .height(heightDp)
+                    .graphicsLayer {
+                        rotationY = 14f
+                        cameraDistance = 12f * density.density
+                        transformOrigin = TransformOrigin(0.05f, 0.5f)
+                    }
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onGroupClick(group.id) }
             ) {
-                // Tile card: the real (parked) task window is inset inside this card, so the ring
-                // and the caption strip drawn here stay visible around it.
+                val previews = group.previews
+                if (previews.size <= 1) {
+                    val primary = previews.firstOrNull()
+                    RailWindowThumbnail(
+                        preview = primary,
+                        modifier = Modifier.fillMaxSize(),
+                        showIconBadge = true,
+                        context = context,
+                        snapshotVersion = _version
+                    )
+                } else {
+                    // Multi-window group: fan up to 3 windows subtly inside the thumbnail slot.
+                    val visible = previews.takeLast(3)
+                    val count = visible.size
+                    visible.forEachIndexed { idx, preview ->
+                        val frac = idx.toFloat() / (count - 1).coerceAtLeast(1)
+                        val offsetX = (widthDp.value * (0.04f + frac * 0.16f)).dp
+                        val offsetY = (heightDp.value * (0.10f - frac * 0.08f)).dp
+                        val cardW = (widthDp.value * 0.80f).dp
+                        val cardH = (heightDp.value * 0.86f).dp
+                        RailWindowThumbnail(
+                            preview = preview,
+                            modifier = Modifier
+                                .offset(x = offsetX, y = offsetY)
+                                .width(cardW)
+                                .height(cardH),
+                            showIconBadge = idx == visible.lastIndex,
+                            context = context,
+                            snapshotVersion = _version
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RailWindowThumbnail(
+    preview: GroupWindowPreview?,
+    modifier: Modifier,
+    showIconBadge: Boolean,
+    context: android.content.Context,
+    snapshotVersion: Int
+) {
+    val snap = remember(preview?.taskId, snapshotVersion) {
+        preview?.let { TaskSnapshotStore.imageBitmapFor(it.taskId) }
+    }
+    val appIcon = remember(preview?.packageName) {
+        preview?.let { AppIconCache.icon(context, it.packageName) }
+    }
+    val shape = RoundedCornerShape(12.dp)
+
+    Box(
+        modifier = modifier
+            .shadow(14.dp, shape, ambientColor = Color.Black, spotColor = Color.Black)
+            .clip(shape)
+            .background(Color(0x661C2230))
+            .border(0.8.dp, Color(0x38FFFFFF), shape)
+    ) {
+        if (snap != null) {
+            Image(
+                bitmap = snap,
+                contentDescription = preview?.label,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            // Subtle bottom-left scrim so the app icon badge pops cleanly over light app content.
+            if (showIconBadge && appIcon != null) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .shadow(16.dp, RoundedCornerShape(22.dp))
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(Color(0x1FFFFFFF))
-                        .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(22.dp))
-                )
-                Column(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
+                        .padding(6.dp)
+                        .size(22.dp)
+                        .shadow(6.dp, RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xCC141922))
                 ) {
-                    Text(
-                        group.title,
-                        color = Ink,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        if (group.windowCount > 0) "${group.windowCount} 个窗口 · 轻点切换" else "空工作区",
-                        color = InkMuted,
-                        fontSize = 9.sp
+                    Image(
+                        bitmap = appIcon,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
-                // Transparent tap target on top of the live preview.
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable(indication = null, interactionSource = androidx.compose.foundation.interaction.MutableInteractionSource()) {
-                            onGroupClick(group.id)
-                        }
-                )
             }
-        }
-
-        // Scroll chevrons when the rail has more groups than fit.
-        listOf(
-            state.railUpRect to "▲",
-            state.railDownRect to "▼"
-        ).forEach { (rect, glyph) ->
-            if (rect.width > 0) {
-                Box(
-                    modifier = Modifier
-                        .offset(
-                            x = with(density) { rect.left.toDp() },
-                            y = with(density) { rect.top.toDp() }
-                        )
-                        .width(with(density) { rect.width.toDp() })
-                        .height(with(density) { rect.height.toDp() })
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x33FFFFFF))
-                        .clickable {
-                            if (glyph == "▲") onRailScroll(-1) else onRailScroll(1)
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(glyph, color = Ink, fontSize = 12.sp)
-                }
-            }
-        }
-
-        // New-group button, positioned by the workspace (shared with the rail touch overlay).
-        val addRect = state.addGroupRect
-        if (addRect.width > 0) {
+        } else {
+            // FLAG_SECURE or not yet captured: translucent frosted glass card with centered app icon.
             Box(
                 modifier = Modifier
-                    .offset(
-                        x = with(density) { addRect.left.toDp() },
-                        y = with(density) { addRect.top.toDp() }
-                    )
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(Color(0x22FFFFFF))
-                    .border(1.dp, Color(0x22FFFFFF), CircleShape)
-                    .clickable { onNewGroup() },
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0x88242C3E), Color(0xAA161B26))
+                        )
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                Text("＋", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Light)
+                if (appIcon != null) {
+                    Image(
+                        bitmap = appIcon,
+                        contentDescription = preview?.label,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                    )
+                }
             }
         }
     }
@@ -395,11 +424,11 @@ private fun RecentGroupsRail(
 private fun EmptyWorkspaceHint() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("工作区为空", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text("工作区为空", color = Ink.copy(alpha = 0.88f), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             Text(
                 "从 Dock 选择应用，或长按图标拖入工作区",
-                color = InkMuted,
+                color = InkMuted.copy(alpha = 0.85f),
                 fontSize = 11.sp
             )
         }
@@ -418,25 +447,24 @@ private fun StageDock(
     onDragState: (DockApp, Offset, Offset) -> Unit,
     onDragLost: (Boolean) -> Unit
 ) {
-    val density = LocalDensity.current
     val pinnedLimit = if (state.landscape) 7 else 4
     val recentLimit = if (state.landscape) 3 else 2
     val pinned = dockModel.pinned.take(pinnedLimit)
     val recent = dockModel.recent.take(recentLimit)
 
     Column(
-        modifier = modifier.padding(bottom = with(density) { 14.dp }),
+        modifier = modifier.padding(bottom = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(
             modifier = Modifier
-                .shadow(28.dp, RoundedCornerShape(28.dp), ambientColor = Color.Black)
-                .clip(RoundedCornerShape(28.dp))
-                .background(Color(0xD919202D))
-                .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(28.dp))
-                .padding(horizontal = 14.dp, vertical = 9.dp),
+                .shadow(28.dp, RoundedCornerShape(26.dp), ambientColor = Color.Black, spotColor = Color.Black)
+                .clip(RoundedCornerShape(26.dp))
+                .background(Color(0xB8181E2B))
+                .border(1.dp, Color(0x30FFFFFF), RoundedCornerShape(26.dp))
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             pinned.forEach { app ->
                 DockIcon(
@@ -450,13 +478,13 @@ private fun StageDock(
                     onDragLost = onDragLost
                 )
             }
-            if (pinned.isNotEmpty() && (recent.isNotEmpty() || true)) {
+            if (pinned.isNotEmpty()) {
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 2.dp)
                         .width(1.dp)
-                        .height(34.dp)
-                        .background(Color(0x2EFFFFFF))
+                        .height(36.dp)
+                        .background(Color(0x33FFFFFF))
                 )
             }
             recent.forEach { app ->
@@ -493,7 +521,11 @@ private fun DockIcon(
     var offset by remember { mutableStateOf(Offset.Zero) }
     var dragging by remember { mutableStateOf(false) }
     var menuShown by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (dragging) 1.12f else 1f, tween(120), label = "dock-scale")
+    val scale by animateFloatAsState(
+        targetValue = if (dragging) 1.14f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "dock-scale"
+    )
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -501,7 +533,7 @@ private fun DockIcon(
     ) {
         Box(
             modifier = Modifier
-                .size(52.dp)
+                .size(54.dp)
                 .onGloballyPositioned { coordinates ->
                     origin = coordinates.positionInRoot() + Offset(
                         coordinates.size.width / 2f,
@@ -556,13 +588,13 @@ private fun DockIcon(
                     bitmap = icon,
                     contentDescription = app.label,
                     modifier = Modifier
-                        .size((48 * scale).dp)
+                        .size((50 * scale).dp)
                         .clip(RoundedCornerShape(13.dp))
                 )
             } else {
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(50.dp)
                         .clip(RoundedCornerShape(13.dp))
                         .background(Color(0x33FFFFFF)),
                     contentAlignment = Alignment.Center
@@ -571,7 +603,6 @@ private fun DockIcon(
                 }
             }
         }
-        // iPad-style activity indicator dot.
         val dotColor = when {
             activeInStage -> Ink
             runningElsewhere -> Ink.copy(alpha = 0.42f)
@@ -579,7 +610,7 @@ private fun DockIcon(
         }
         Box(
             modifier = Modifier
-                .size(5.dp)
+                .size(4.5.dp)
                 .clip(CircleShape)
                 .background(dotColor)
         )
@@ -595,11 +626,11 @@ private fun AppLibraryIcon(onClick: () -> Unit) {
     ) {
         Box(
             modifier = Modifier
-                .size(52.dp)
+                .size(54.dp)
                 .padding(2.dp)
                 .clip(RoundedCornerShape(13.dp))
-                .background(Color(0x24FFFFFF))
-                .border(1.dp, Color(0x1EFFFFFF), RoundedCornerShape(13.dp))
+                .background(Color(0x28FFFFFF))
+                .border(0.8.dp, Color(0x24FFFFFF), RoundedCornerShape(13.dp))
                 .clickable(onClick = onClick)
                 .padding(8.dp),
             contentAlignment = Alignment.Center
@@ -615,7 +646,7 @@ private fun AppLibraryIcon(onClick: () -> Unit) {
                 }
             }
         }
-        Spacer(Modifier.size(5.dp))
+        Spacer(Modifier.size(4.5.dp))
     }
 }
 
@@ -625,6 +656,6 @@ private fun MiniAppTile(color: Color) {
         modifier = Modifier
             .size(13.dp)
             .clip(RoundedCornerShape(4.dp))
-            .background(color.copy(alpha = 0.88f))
+            .background(color.copy(alpha = 0.90f))
     )
 }

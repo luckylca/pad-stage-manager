@@ -52,6 +52,8 @@ object StageEngine {
                 "focusable" -> setFocusable(command)
                 "windowMode" -> setWindowMode(command)
                 "toBack" -> sendToBack(command)
+                "hostFront" -> JSONObject().put("result", tasks.bringHostAboveParked(command.optString("component", "StageHostActivity")))
+                "snapshot" -> snapshot(command)
                 "closeAll" -> closeAll()
                 "freeformOn" -> JSONObject().put("result", tasks.enableFreeformGlobally())
                 "organizerProbe" -> organizerProbe()
@@ -218,6 +220,25 @@ object StageEngine {
         val taskId = resolveTaskId(command)
         tasks.sendToBack(taskId)
         return JSONObject().put("taskId", taskId)
+    }
+
+    private fun snapshot(command: JSONObject): JSONObject {
+        val taskId = resolveTaskId(command)
+        val maxDim = command.optInt("maxDim", 360).coerceIn(120, 720)
+        val result = tasks.captureTaskSnapshot(taskId, maxDim)
+        return if (result != null) {
+            JSONObject()
+                .put("taskId", taskId)
+                .put("available", true)
+                .put("w", result.width)
+                .put("h", result.height)
+                .put("jpeg", result.jpegBase64)
+        } else {
+            JSONObject()
+                .put("taskId", taskId)
+                .put("available", false)
+                .put("reason", tasks.lastSnapshotError ?: "unavailable")
+        }
     }
 
     private fun closeAll(): JSONObject {

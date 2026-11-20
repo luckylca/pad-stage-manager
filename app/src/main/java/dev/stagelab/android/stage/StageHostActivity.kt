@@ -86,8 +86,8 @@ class StageHostActivity : ComponentActivity() {
                     dockModel = dev.stagelab.android.ui.loadDockModel(context)
                 }
 
-                LaunchedEffect(state.dockAutoHide, state.dockVisible, state.landscape) {
-                    chrome.updateBottomEdgeStrip(state.dockAutoHide && !state.dockVisible)
+                LaunchedEffect(state.ready, state.landscape, navBottom) {
+                    chrome.updateBottomEdgeStrip(state.ready, navBottom)
                 }
 
                 LaunchedEffect(state.windows.size) {
@@ -341,6 +341,14 @@ class StageHostActivity : ComponentActivity() {
             StageWorkspace.setDockRevealed(true)
         }
 
+        override fun onBottomSwipeUpHold() {
+            showStageOverview()
+        }
+
+        override fun onBottomHorizontalSwipe(direction: Int) {
+            lifecycleScope.launch { StageWorkspace.switchAdjacentGroup(direction) }
+        }
+
         override fun onChromeTapOutside() = Unit
     }
 
@@ -385,6 +393,10 @@ class StageHostActivity : ComponentActivity() {
         val autoHide = StageWorkspace.state.value.dockAutoHide
         items += WindowChromeController.MenuItem(if (autoHide) "始终显示 Dock" else "自动隐藏 Dock") {
             StageWorkspace.setDockAutoHide(!autoHide)
+        }
+        val railAuto = StageWorkspace.state.value.railAutoHide
+        items += WindowChromeController.MenuItem(if (railAuto) "始终显示最近工作台" else "自动隐藏最近工作台") {
+            StageWorkspace.setRailAutoHide(!railAuto)
         }
         val menuY = (anchorY - (items.size * 115 + 120)).coerceAtLeast(80)
         chrome.showWindowMenu(app.label, anchorX - 180, menuY, items)

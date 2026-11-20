@@ -37,6 +37,8 @@ class WindowChromeController(
         fun onWindowMenuRequested(id: String, anchorX: Int, anchorY: Int)
         fun onLeftEdgeSwipe()
         fun onBottomEdgeSwipeUp()
+        fun onBottomSwipeUpHold()
+        fun onBottomHorizontalSwipe(direction: Int)
         fun onChromeTapOutside()
     }
 
@@ -194,39 +196,100 @@ class WindowChromeController(
     }
 
     /**
-     * Thin centered bottom-edge gesture strip used to reveal an auto-hidden Dock (P5).
-     * Kept narrow horizontally (36% of screen width) and above the system home pill inset so it
-     * does not conflict with Android's system Home or Back gestures.
+     * Centered bottom-edge gesture strip (P5/P7):
+     *  - Quick swipe up -> reveal auto-hidden Dock;
+     *  - Swipe up & pause (or tall upward swipe) -> Stage Overview;
+     *  - Horizontal swipe left/right -> switch adjacent workspace.
+     *
+     * Kept narrow (36% of screen width, 20dp tall) so it does not interfere with Android system
+     * Back/Home edges or IME.
      */
     @SuppressLint("ClickableViewAccessibility")
-    fun updateBottomEdgeStrip(enabled: Boolean) {
+    fun updateBottomEdgeStrip(enabled: Boolean, bottomInsetPx: Int = 0) {
         if (!enabled) {
             bottomEdgeStrip?.let { runCatching { wm.removeView(it) } }
             bottomEdgeStrip = null
             return
         }
         val metrics = activity.resources.displayMetrics
-        val stripW = (metrics.widthPixels * 0.36f).roundToInt().coerceAtLeast(px(160f))
-        val stripH = px(18f)
+        val stripW = (metrics.widthPixels * 0.36f).roundToInt().coerceAtLeast(px(180f))
+        val stripH = px(22f)
         val x = (metrics.widthPixels - stripW) / 2
-        val y = metrics.heightPixels - stripH - px(2f)
+        // Sit just above the OS navigation gesture zone so ColorOS Home/Dock does not steal swipes.
+        val safeInset = max(bottomInsetPx, px(24f))
+        val y = metrics.heightPixels - safeInset - stripH
         val existing = bottomEdgeStrip
         if (existing != null) {
             layout(existing, x, y, stripW, stripH)
             return
         }
-        val strip = View(activity).apply {
+        val strip = object : View(activity) {
+            private val pillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.argb(90, 234, 240, 250)
+            }
+            override fun onDraw(canvas: android.graphics.Canvas) {
+                val pillW = px(56f).toFloat()
+                val pillH = px(3.5f).toFloat()
+                val left = (width - pillW) / 2f
+                val top = height - pillH - px(3f)
+                canvas.drawRoundRect(left, top, left + pillW, top + pillH, pillH / 2f, pillH / 2f, pillPaint)
+            }
+        }.apply {
             setBackgroundColor(0x00000000)
             setOnTouchListener(object : android.view.View.OnTouchListener {
+                private var startX = 0f
                 private var startY = 0f
+                private var downTime = 0L
+                private var holdTriggered = false
+                private val holdRunnable = Runnable {
+                    holdTriggered = true
+                    performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                    callbacks.onBottomSwipeUpHold()
+                }
+
                 override fun onTouch(v: View, event: android.view.MotionEvent): Boolean {
                     when (event.actionMasked) {
-                        android.view.MotionEvent.ACTION_DOWN -> startY = event.rawY
-                        android.view.MotionEvent.ACTION_UP -> {
-                            val dy = startY - event.rawY
-                            if (dy > px(20f)) {
-                                callbacks.onBottomEdgeSwipeUp()
+                        android.view.MotionEvent.ACTION_DOWN -> {
+                            startX = event.rawX
+                            startY = event.rawY
+                            downTime = System.currentTimeMillis()
+                            holdTriggered = false
+                            v.removeCallbacks(holdRunnable)
+                        }
+                        android.view.MotionEvent.ACTION_MOVE -> {
+                            val upDy = startY - event.rawY
+                            val absDx = kotlin.math.abs(event.rawX - startX)
+                            if (!holdTriggered && upDy > px(40f) && upDy > absDx * 1.3f) {
+                                v.removeCallbacks(holdRunnable)
+                                v.postDelayed(holdRunnable, 240L)
+                            } else {
+                                v.removeCallbacks(holdRunnable)
                             }
+                        }
+                        android.view.MotionEvent.ACTION_UP -> {
+                            v.removeCallbacks(holdRunnable)
+                            if (holdTriggered) {
+                                holdTriggered = false
+                                return true
+                            }
+                            val dx = event.rawX - startX
+                            val upDy = startY - event.rawY
+                            val elapsed = System.currentTimeMillis() - downTime
+                            when {
+                                kotlin.math.abs(dx) > px(48f) && kotlin.math.abs(dx) > kotlin.math.abs(upDy) * 1.3f -> {
+                                    callbacks.onBottomHorizontalSwipe(if (dx < 0) 1 else -1)
+                                }
+                                upDy > px(96f) || (upDy > px(40f) && elapsed >= 340L) -> {
+                                    callbacks.onBottomSwipeUpHold()
+                                }
+                                upDy > px(18f) -> {
+                                    callbacks.onBottomEdgeSwipeUp()
+                                }
+                            }
+                        }
+                        android.view.MotionEvent.ACTION_CANCEL -> {
+                            v.removeCallbacks(holdRunnable)
+                            holdTriggered = false
                         }
                     }
                     return true

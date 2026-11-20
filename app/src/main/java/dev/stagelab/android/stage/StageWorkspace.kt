@@ -81,6 +81,7 @@ data class WorkspaceState(
     val dropHighlight: DropHighlight = DropHighlight(),
     val dockVisible: Boolean = true,
     val dockAutoHide: Boolean = false,
+    val railAutoHide: Boolean = false,
     val activePackages: Set<String> = emptySet(),
     val runningPackages: Set<String> = emptySet(),
     val dockRefreshVersion: Int = 0,
@@ -132,13 +133,30 @@ object StageWorkspace {
     private var currentDropHighlight = DropHighlight()
     private var dockAutoHide = false
     private var dockRevealed = false
+    private var railAutoHide = false
+    private var railTempRevealed = false
     private var dockRefreshVersion = 0
 
     fun isLandscape(): Boolean = landscape
 
-    private fun railShouldShow(): Boolean = if (landscape) !railHiddenByUser else railPinnedPortrait
+    private fun railShouldShow(): Boolean = when {
+        landscape && railAutoHide -> railTempRevealed
+        landscape -> !railHiddenByUser
+        else -> railPinnedPortrait
+    }
 
     private fun dockShouldShow(): Boolean = !dockAutoHide || dockRevealed
+
+    fun setRailAutoHide(enabled: Boolean) {
+        if (railAutoHide == enabled) return
+        railAutoHide = enabled
+        railTempRevealed = false
+        appContext?.getSharedPreferences("stagelab_prefs_v1", Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean("rail_auto_hide", enabled)?.apply()
+        computeLayout()
+        publishState()
+        scope.launch { runCatching { syncGeometry("rail-autohide") } }
+    }
 
     fun setDockAutoHide(enabled: Boolean) {
         if (dockAutoHide == enabled) return
@@ -297,6 +315,9 @@ object StageWorkspace {
         dockAutoHide = context.applicationContext
             .getSharedPreferences("stagelab_prefs_v1", Context.MODE_PRIVATE)
             .getBoolean("dock_auto_hide", false)
+        railAutoHide = context.applicationContext
+            .getSharedPreferences("stagelab_prefs_v1", Context.MODE_PRIVATE)
+            .getBoolean("rail_auto_hide", false)
         publishState()
     }
 
@@ -886,9 +907,12 @@ object StageWorkspace {
 
     suspend fun activateGroup(groupId: String) {
         if (groupId == session.activeGroupId) return
-        // Portrait: the rail is a drawer, so selecting a group closes it and the workspace expands.
+        // Portrait (or landscape auto-hide): selecting a group tucks the rail back.
         if (!landscape && railPinnedPortrait) {
             railPinnedPortrait = false
+            computeLayout()
+        } else if (landscape && railAutoHide && railTempRevealed) {
+            railTempRevealed = false
             computeLayout()
         }
         session.makeActive(groupId)
@@ -967,8 +991,23 @@ object StageWorkspace {
         syncGeometry("delete-group")
     }
 
+    /**
+     * Switches to the adjacent recent workspace (P7 bottom horizontal swipe gesture).
+     * [direction] > 0 switches to the most recent other group; < 0 cycles from the oldest group.
+     */
+    suspend fun switchAdjacentGroup(direction: Int): Boolean {
+        val others = session.sortedGroups().filter { it.id != session.activeGroupId }
+        if (others.isEmpty()) return false
+        val target = if (direction >= 0) others.first() else others.last()
+        activateGroup(target.id)
+        return true
+    }
+
     fun setRailVisible(visible: Boolean) {
-        if (landscape) {
+        if (landscape && railAutoHide) {
+            if (railTempRevealed == visible) return
+            railTempRevealed = visible
+        } else if (landscape) {
             if (railHiddenByUser == !visible) return
             railHiddenByUser = !visible
         } else {
@@ -1214,6 +1253,7 @@ object StageWorkspace {
             dropHighlight = currentDropHighlight,
             dockVisible = dockShouldShow(),
             dockAutoHide = dockAutoHide,
+            railAutoHide = railAutoHide,
             activePackages = activePackages,
             runningPackages = runningPackages,
             dockRefreshVersion = dockRefreshVersion,

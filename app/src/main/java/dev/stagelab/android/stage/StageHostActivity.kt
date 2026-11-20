@@ -210,6 +210,12 @@ class StageHostActivity : ComponentActivity() {
             // Geometry is committed through onGeometryChanged; nothing else to do for now.
         }
 
+        override fun onWindowDropped(id: String, x: Int, y: Int) {
+            lifecycleScope.launch {
+                runCatching { StageWorkspace.handleWindowDrop(id, x, y) }
+            }
+        }
+
         override fun onLeftEdgeSwipe() {
             StageWorkspace.setRailVisible(true)
         }

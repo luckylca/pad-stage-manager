@@ -28,6 +28,7 @@ class WindowChromeController(
 
     interface Callbacks {
         fun onGeometryChanged(id: String, rect: StageRect, final: Boolean)
+        fun onWindowDropped(id: String, x: Int, y: Int)
         fun onFocusRequested(id: String)
         fun onCloseRequested(id: String)
         fun onMinimizeRequested(id: String)
@@ -56,6 +57,10 @@ class WindowChromeController(
     ) {
         var gestureBase: StageRect = rect
         var restoredRect: StageRect? = null
+        /** Raw pointer position at gesture start, for drop-point routing. */
+        var touchStart: Pair<Int, Int> = 0 to 0
+        /** Latest pointer position during the gesture. */
+        var touchLast: Pair<Int, Int> = 0 to 0
     }
 
     private val wm: WindowManager = activity.getSystemService(WindowManager::class.java)
@@ -379,6 +384,8 @@ class WindowChromeController(
         when (phase) {
             ChromeOverlayView.PHASE_START -> {
                 holder.gestureBase = holder.rect
+                holder.touchStart = holder.titleBar.lastRawPos
+                holder.touchLast = holder.touchStart
                 callbacks.onFocusRequested(id)
             }
             ChromeOverlayView.PHASE_MOVE -> {
@@ -435,7 +442,11 @@ class WindowChromeController(
                 callbacks.onGeometryChanged(id, clamped, false)
             }
             ChromeOverlayView.PHASE_END -> {
+                holder.touchLast = holder.titleBar.lastRawPos
                 callbacks.onGeometryChanged(id, holder.rect, true)
+                if (mode == ChromeMode.TITLE) {
+                    callbacks.onWindowDropped(id, holder.touchLast.first, holder.touchLast.second)
+                }
             }
         }
     }

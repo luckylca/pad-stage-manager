@@ -1,4 +1,4 @@
-package dev.stagelab.android.windows
+﻿package dev.stagelab.android.windows
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.roundToInt
 
 /** Which piece of window chrome an overlay implements. */
 enum class ChromeMode {
@@ -107,6 +108,10 @@ class ChromeOverlayView(
     private var downY = 0f
     private var downTime = 0L
     private var lastTapTime = 0L
+
+    /** Latest raw pointer position, read by the chrome controller for drop routing. */
+    var lastRawPos: Pair<Int, Int> = 0 to 0
+        private set
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(236, 26, 30, 38)
@@ -307,6 +312,7 @@ class ChromeOverlayView(
                 downX = event.rawX
                 downY = event.rawY
                 downTime = System.currentTimeMillis()
+                lastRawPos = event.rawX.roundToInt() to event.rawY.roundToInt()
                 if (mode == ChromeMode.TITLE) {
                     if (closeRect.contains(event.x, event.y)) {
                         onAction?.invoke(ACTION_CLOSE)
@@ -325,6 +331,7 @@ class ChromeOverlayView(
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                lastRawPos = event.rawX.roundToInt() to event.rawY.roundToInt()
                 onTouch(PHASE_MOVE, event.rawX - downX, event.rawY - downY)
                 return true
             }

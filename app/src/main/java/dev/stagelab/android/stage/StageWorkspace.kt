@@ -1,4 +1,4 @@
-package dev.stagelab.android.stage
+﻿package dev.stagelab.android.stage
 
 import android.content.Context
 import android.util.Log
@@ -510,10 +510,53 @@ object StageWorkspace {
     }
 
     suspend fun moveWindowToGroup(windowId: String, groupId: String) {
+        val window = session.windows[windowId] ?: return
+        val fromActive = groupId != session.activeGroupId
         session.moveWindow(windowId, groupId)
         persist()
-        syncGeometry("move-group")
         publishState()
+        if (fromActive) {
+            // The window left the workspace: park it behind the host, un-focusable.
+            runCatching { setFocusable(window.taskId, false) }
+            runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
+        }
+        syncGeometry("move-group")
+    }
+
+    /**
+     * Drag-and-drop release point routing (P3).
+     *
+     * Called when a title-bar drag ends. Decides what the drop means:
+     *  * over the rail / a group tile / the "+" button -> move the window to that group;
+     *  * over the workspace -> it was just a move, nothing else to do.
+     */
+    suspend fun handleWindowDrop(windowId: String, x: Int, y: Int): Boolean {
+        Log.d(TAG, "windowDrop id=$windowId at $x,$y")
+        val state = _state.value
+        if (!state.railVisible) return false
+        // "+" creates a new group and moves the window there.
+        val add = state.addGroupRect
+        if (add.width > 0 && x >= add.left && x <= add.right && y >= add.top && y <= add.bottom) {
+            val group = createGroup()
+            moveWindowToGroup(windowId, group.id)
+            return true
+        }
+        // Over a group tile -> move to that group.
+        val tile = state.groups.firstOrNull { g ->
+            x >= g.rect.left && x <= g.rect.right && y >= g.rect.top && y <= g.rect.bottom
+        }
+        if (tile != null) {
+            moveWindowToGroup(windowId, tile.id)
+            return true
+        }
+        // Over the rail panel but not a tile -> move out of the current group into the recent list
+        // (a singleton group like minimize does).
+        val rail = state.rail
+        if (rail.width > 0 && x >= rail.left && x <= rail.right && y >= rail.top && y <= rail.bottom) {
+            minimize(windowId)
+            return true
+        }
+        return false
     }
 
     fun createGroup(): StageGroup {

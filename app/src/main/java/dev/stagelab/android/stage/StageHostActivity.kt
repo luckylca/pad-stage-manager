@@ -112,10 +112,22 @@ class StageHostActivity : ComponentActivity() {
                     )
                 }
 
+                LaunchedEffect(state.dropHighlight) {
+                    val hl = state.dropHighlight
+                    if (hl.kind == DropZoneKind.NONE) {
+                        chrome.updateDropHighlight(null, "")
+                    } else {
+                        chrome.updateDropHighlight(hl.rect, hl.label)
+                    }
+                }
+
                 LaunchedEffect(state.railVisible, state.groups, state.addGroupRect, state.rail, state.railUpRect, state.railDownRect) {
                     val targets = ArrayList<WindowChromeController.TapTarget>()
                     state.groups.forEach { group ->
-                        targets += WindowChromeController.TapTarget(group.rect) {
+                        targets += WindowChromeController.TapTarget(
+                            rect = group.rect,
+                            groupId = group.id
+                        ) {
                             lifecycleScope.launch { StageWorkspace.activateGroup(group.id) }
                         }
                     }
@@ -145,9 +157,24 @@ class StageHostActivity : ComponentActivity() {
                     } else {
                         null
                     }
-                    chrome.updateRailTargets(targets, bounds, state.railVisible && targets.isNotEmpty()) { dy ->
-                        StageWorkspace.scrollRail(dy)
-                    }
+                    chrome.updateRailTargets(
+                        targets = targets,
+                        bounds = bounds,
+                        visible = state.railVisible && targets.isNotEmpty(),
+                        onScroll = { dy -> StageWorkspace.scrollRail(dy) },
+                        onRailDragMove = { groupId, x, y ->
+                            StageWorkspace.updateExternalDragTarget(x, y, sourceGroupId = groupId)
+                        },
+                        onRailDragEnd = { groupId, x, y ->
+                            StageWorkspace.clearDropHighlight()
+                            val ws = StageWorkspace.workspaceRect()
+                            if (x >= ws.left && x <= ws.right && y >= ws.top && y <= ws.bottom) {
+                                lifecycleScope.launch {
+                                    StageWorkspace.addGroupToActiveGroup(groupId, PointF(x.toFloat(), y.toFloat()))
+                                }
+                            }
+                        }
+                    )
                 }
 
                 Box(
@@ -176,10 +203,39 @@ class StageHostActivity : ComponentActivity() {
                             StageWorkspace.scrollRail(-dir * resources.displayMetrics.density * 140f)
                         },
                         onToggleRail = { StageWorkspace.toggleRail() },
-                        onDockApp = { app -> lifecycleScope.launch { StageWorkspace.openApp(app.packageName, app.label, app.activityName) } },
-                        onDockDrop = { app, point ->
-                            lifecycleScope.launch { StageWorkspace.openApp(app.packageName, app.label, app.activityName, point) }
+                        onDockApp = { app ->
+                            lifecycleScope.launch {
+                                StageWorkspace.activateOrOpenApp(app.packageName, app.label, app.activityName)
+                            }
                         },
+                        onDockDragMove = { point ->
+                            StageWorkspace.updateExternalDragTarget(point.x.roundToInt(), point.y.roundToInt())
+                        },
+                        onDockDrop = { app, point ->
+                            StageWorkspace.clearDropHighlight()
+                            val currentState = StageWorkspace.state.value
+                            val x = point.x.roundToInt()
+                            val y = point.y.roundToInt()
+                            val ws = currentState.workspace
+                            val railTile = if (currentState.railVisible) {
+                                currentState.groups.firstOrNull { g ->
+                                    x >= g.rect.left && x <= g.rect.right && y >= g.rect.top && y <= g.rect.bottom
+                                }
+                            } else null
+                            when {
+                                x >= ws.left && x <= ws.right && y >= ws.top && y <= ws.bottom -> {
+                                    lifecycleScope.launch {
+                                        StageWorkspace.openApp(app.packageName, app.label, app.activityName, point)
+                                    }
+                                }
+                                railTile != null -> {
+                                    lifecycleScope.launch {
+                                        StageWorkspace.openAppIntoGroup(railTile.id, app.packageName, app.label, app.activityName)
+                                    }
+                                }
+                            }
+                        },
+                        onDockDragCancel = { StageWorkspace.clearDropHighlight() },
                         onAddApp = { openAppPicker() },
                         onExit = { lifecycleScope.launch { StageModeController.stop(); finish() } },
                         onEmptyTap = { StageWorkspace.setRailVisible(false) }
@@ -210,7 +266,12 @@ class StageHostActivity : ComponentActivity() {
             // Geometry is committed through onGeometryChanged; nothing else to do for now.
         }
 
+        override fun onWindowDragging(id: String, x: Int, y: Int) {
+            StageWorkspace.updateWindowDragTarget(x, y)
+        }
+
         override fun onWindowDropped(id: String, x: Int, y: Int) {
+            StageWorkspace.clearDropHighlight()
             lifecycleScope.launch {
                 runCatching { StageWorkspace.handleWindowDrop(id, x, y) }
             }

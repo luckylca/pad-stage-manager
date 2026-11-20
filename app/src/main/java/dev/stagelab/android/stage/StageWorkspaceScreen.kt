@@ -72,7 +72,9 @@ fun StageWorkspaceScreen(
     onRailScroll: (Int) -> Unit,
     onToggleRail: () -> Unit,
     onDockApp: (DockApp) -> Unit,
+    onDockDragMove: (android.graphics.PointF) -> Unit,
     onDockDrop: (DockApp, android.graphics.PointF) -> Unit,
+    onDockDragCancel: () -> Unit,
     onAddApp: () -> Unit,
     onExit: () -> Unit,
     onEmptyTap: () -> Unit
@@ -116,17 +118,16 @@ fun StageWorkspaceScreen(
                 dragging = app
                 dragOffset = offset
                 dragOrigin = origin
+                val position = origin + offset
+                onDockDragMove(android.graphics.PointF(position.x, position.y))
             },
-            onDragLost = {
+            onDragLost = { cancelled ->
                 val app = dragging
-                if (app != null) {
+                if (app != null && !cancelled) {
                     val position = dragOrigin + dragOffset
-                    val area = state.workspace
-                    if (position.x >= area.left && position.x <= area.right &&
-                        position.y >= area.top && position.y <= area.bottom
-                    ) {
-                        onDockDrop(app, android.graphics.PointF(position.x, position.y))
-                    }
+                    onDockDrop(app, android.graphics.PointF(position.x, position.y))
+                } else {
+                    onDockDragCancel()
                 }
                 dragging = null
             }
@@ -407,7 +408,7 @@ private fun StageDock(
     onExit: () -> Unit,
     onToggleRail: () -> Unit,
     onDragState: (DockApp, Offset, Offset) -> Unit,
-    onDragLost: () -> Unit
+    onDragLost: (Boolean) -> Unit
 ) {
     val density = LocalDensity.current
     Column(
@@ -446,7 +447,7 @@ private fun DockIcon(
     app: DockApp,
     onClick: () -> Unit,
     onDragState: (DockApp, Offset, Offset) -> Unit,
-    onDragLost: () -> Unit
+    onDragLost: (Boolean) -> Unit
 ) {
     var origin by remember { mutableStateOf(Offset.Zero) }
     var offset by remember { mutableStateOf(Offset.Zero) }
@@ -476,11 +477,11 @@ private fun DockIcon(
                     },
                     onDragEnd = {
                         dragging = false
-                        onDragLost()
+                        onDragLost(false)
                     },
                     onDragCancel = {
                         dragging = false
-                        onDragLost()
+                        onDragLost(true)
                     }
                 )
             }

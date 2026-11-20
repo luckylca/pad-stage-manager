@@ -41,6 +41,20 @@ class StageCommandReceiver : BroadcastReceiver() {
                     StageWorkspace.openApp(pkg, label, activity, null, extraName, extraValue)
                 }
             }
+            "dockTap" -> {
+                val pkg = intent.getStringExtra("package") ?: return
+                val label = intent.getStringExtra("title") ?: pkg
+                val activity = intent.getStringExtra("activity").orEmpty()
+                StageModeController.post {
+                    StageWorkspace.activateOrOpenApp(pkg, label, activity)
+                }
+            }
+            "railDragIn" -> {
+                val groupId = intent.getStringExtra("groupId") ?: StageWorkspace.state.value.groups.firstOrNull()?.id ?: return
+                StageModeController.post {
+                    StageWorkspace.addGroupToActiveGroup(groupId, null)
+                }
+            }
             "demo" -> StageModeController.post { openDemo(context.packageName) }
             "group" -> StageModeController.post {
                 StageWorkspace.createGroup()

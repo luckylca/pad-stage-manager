@@ -111,14 +111,13 @@
 - 验收证据：`docs/p4-minimize.png`（最小化后左侧出现"哔哩哔哩"单窗口组，点击后恢复到中央）。
 - 仍未完成：长按窗口控制菜单（控制点已发 ACTION 但菜单未实现）。
 
-### P3 工作台拖放闭环 —— 核心已实现，真机通过（部分）
+### P3 工作台拖放闭环 —— 已完成，真机通过
 
-- **中央窗口拖到左栏**：标题栏拖动结束时（`PHASE_END`）把指针落点交给 `handleWindowDrop`：落在组磁贴 → `moveWindowToGroup`；落在栏内非磁贴 → `minimize`（移出当前组，成为最近列表中的单窗口组）；落在"+" → 新建组并移入。实测把 B站窗口拖到左栏后，它成为左栏实时预览磁贴，当前工作区变空（`docs/p3-dragout.png`），任务 535 保留。
-- **"+" 拖放**：新建组并把窗口移入。
-- **跨组移动**：`moveWindowToGroup` 统一入口；离开当前组时任务自动 `toBack` 停放并取消 focusable。
-- **Dock 拖入**：长按拖动 Dock 图标，落点在中央工作区 → 加入当前组（已有能力，本轮保留）。
-- 未完成（留待后续）：拖动过程中的目标磁贴高亮；Dock 应用拖到左栏磁贴的语义；左栏磁贴把窗口拖回中央的闭环（可先点击该组切换，功能等价）。
-- 证据：`docs/p3-dragout.png`。
+- **Dock 普通点击 vs 拖放语义区分**：`StageWorkspace.activateOrOpenApp()` 实现 iPad 语义——普通点击 Dock 应用时，若该应用已有窗口则切换到其工作台并聚焦（实测 Via taskId 545 不变），若无且当前工作台非空则新建工作台（实测点击便签自动创建"便签"工作台，taskId 546）；仅长按拖入中央工作区才将应用加入当前工作台，拖到左栏磁贴则加入该工作台。
+- **左栏磁贴拖入中央工作区**：`WindowChromeController.railOverlay` 支持向右水平拖拽磁贴，松手落在工作区时调用 `addGroupToActiveGroup()` 将该组窗口移入当前工作台（真机 `input swipe 330 400 1700 800 500` 实测通过，便签 taskId 546 与 Via taskId 545 同组并存，空源组自动清理）。
+- **中央窗口拖到左栏 / 跨组 / "+"**：`handleWindowDrop()` 路由到 `moveWindowToGroup` / `minimize` / `createGroup`。
+- **拖动目标高亮反馈**：新增非触摸 `DropHighlightOverlayView`（位于真实 Task 之上，不被实时预览遮挡），拖动窗口、左栏卡片或 Dock 图标时实时高亮目标区域并显示操作标签（"加入当前工作台" / "移入 …" / "移出当前工作台" / "新建工作台"）。
+- 验收证据：`docs/p3-dragout.png`、`docs/p3-rail-drag-in.png`。
 
 ## 第二阶段收尾状态（P1–P4 已提交）
 

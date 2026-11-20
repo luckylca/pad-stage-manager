@@ -40,6 +40,21 @@ data class WindowTile(
     val alive: Boolean
 )
 
+enum class DropZoneKind {
+    NONE,
+    WORKSPACE,
+    RAIL_REMOVE,
+    GROUP_TILE,
+    ADD_GROUP
+}
+
+data class DropHighlight(
+    val kind: DropZoneKind = DropZoneKind.NONE,
+    val targetGroupId: String? = null,
+    val rect: StageRect = StageRect(0, 0, 0, 0),
+    val label: String = ""
+)
+
 data class WorkspaceState(
     val ready: Boolean = false,
     val activeGroupId: String = "",
@@ -56,6 +71,7 @@ data class WorkspaceState(
     /** Chevron targets shown when the rail has more groups than fit. */
     val railUpRect: StageRect = StageRect(0, 0, 0, 0),
     val railDownRect: StageRect = StageRect(0, 0, 0, 0),
+    val dropHighlight: DropHighlight = DropHighlight(),
     val backend: String = "",
     val error: String? = null
 ) {
@@ -101,6 +117,7 @@ object StageWorkspace {
     private var railHiddenByUser = false
     private var railPinnedPortrait = false
     private var railScroll = 0f
+    private var currentDropHighlight = DropHighlight()
 
     fun isLandscape(): Boolean = landscape
 
@@ -333,6 +350,182 @@ object StageWorkspace {
 
     // ------------------------------------------------------------------ operations
 
+    /**
+     * iPad Dock tap semantics (P3):
+     *  - If the app already has a window in the active group -> bring it to front & focus.
+     *  - If the app already has a window in another group -> switch to that group & focus it.
+     *  - Otherwise -> if the current active group is empty, open it here; if the current group
+     *    already has windows, create a new group starting with this app and switch to it.
+     *
+     * Explicitly adding an app into an already-occupied current group is done via long-press drag
+     * from the Dock into the central workspace ([openApp]).
+     */
+    suspend fun activateOrOpenApp(
+        packageName: String,
+        label: String,
+        component: String
+    ): Result<StageWindow> {
+        val activeId = session.activeGroupId
+        // 1. Check active group first.
+        val inActive = session.visibleWindowsOf(activeId).lastOrNull { it.packageName == packageName }
+        if (inActive != null) {
+            if (!inActive.alive) ensureGroupAlive(activeId)
+            focusWindow(inActive.id)
+            return Result.success(inActive)
+        }
+        // 2. Check other groups (most recently active first).
+        for (group in session.sortedGroups()) {
+            if (group.id == activeId) continue
+            val match = session.visibleWindowsOf(group.id).lastOrNull { it.packageName == packageName }
+            if (match != null) {
+                activateGroup(group.id)
+                focusWindow(match.id)
+                return Result.success(match)
+            }
+        }
+        // 3. Not open anywhere: reuse active group only if empty, otherwise create a fresh group.
+        val currentHasWindows = session.visibleWindowsOf(activeId).isNotEmpty()
+        if (currentHasWindows) {
+            val fresh = session.newGroup(label)
+            session.makeActive(fresh.id)
+            persist()
+            publishState()
+            syncGeometry("dock-new-group")
+        }
+        return openApp(packageName, label, component, at = null)
+    }
+
+    /**
+     * Dragging a recent-group tile from the left rail into the central workspace (P3):
+     * moves the group's windows into the current active group, placing the front window at [at].
+     */
+    suspend fun addGroupToActiveGroup(sourceGroupId: String, at: android.graphics.PointF? = null): Boolean {
+        val activeId = session.activeGroupId
+        if (sourceGroupId == activeId) return false
+        val sourceGroup = session.group(sourceGroupId) ?: return false
+        val windowIds = sourceGroup.windowIds.toList()
+        if (windowIds.isEmpty()) return false
+
+        val frontId = windowIds.last()
+        windowIds.forEach { wid ->
+            session.moveWindow(wid, activeId)
+            val w = session.windows[wid] ?: return@forEach
+            w.minimized = false
+            if (wid == frontId && at != null) {
+                val area = workspaceRect()
+                if (area.width > 0 && area.height > 0) {
+                    val halfW = (area.width * w.geometry.w / 2f).roundToInt()
+                    val halfH = (area.height * w.geometry.h / 2f).roundToInt()
+                    val targetRect = StageRect(
+                        at.x.roundToInt() - halfW,
+                        at.y.roundToInt() - halfH,
+                        at.x.roundToInt() + halfW,
+                        at.y.roundToInt() + halfH
+                    )
+                    val g = geometryFor(targetRect)
+                    g.w = w.geometry.w
+                    g.h = w.geometry.h
+                    g.clamp()
+                    w.geometry = g
+                }
+            }
+        }
+        // Remove the source group if it is now empty and we have more than one group.
+        if (sourceGroup.windowIds.isEmpty() && session.groups.size > 1) {
+            session.groups.remove(sourceGroup)
+        }
+        session.bringToFront(frontId)
+        persist()
+        publishState()
+        ensureGroupAlive(activeId)
+        syncGeometry("rail-drag-in")
+        session.windows[frontId]?.let { front ->
+            if (front.alive) {
+                runCatching { setFocusable(front.taskId, true) }
+                runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", front.taskId)) }
+            }
+        }
+        return true
+    }
+
+    /**
+     * Opens an app directly into a specific (possibly non-active) group, e.g. when a Dock icon
+     * is dropped onto a rail group tile.
+     */
+    suspend fun openAppIntoGroup(
+        groupId: String,
+        packageName: String,
+        label: String,
+        component: String
+    ): Result<StageWindow> {
+        if (groupId == session.activeGroupId) {
+            return openApp(packageName, label, component, at = null)
+        }
+        activateGroup(groupId)
+        return openApp(packageName, label, component, at = null)
+    }
+
+    /** Updates the visual drop-zone highlight while dragging a workspace window. */
+    fun updateWindowDragTarget(x: Int, y: Int) {
+        val state = _state.value
+        val next = computeWindowDropHighlight(state, x, y)
+        if (next != currentDropHighlight) {
+            currentDropHighlight = next
+            publishState()
+        }
+    }
+
+    /** Updates the visual drop-zone highlight while dragging a Dock icon or rail group card. */
+    fun updateExternalDragTarget(x: Int, y: Int, sourceGroupId: String? = null) {
+        val state = _state.value
+        val ws = state.workspace
+        val next = when {
+            ws.width > 0 && x >= ws.left && x <= ws.right && y >= ws.top && y <= ws.bottom ->
+                DropHighlight(DropZoneKind.WORKSPACE, state.activeGroupId, ws, "加入当前工作台")
+            state.railVisible -> {
+                val tile = state.groups.firstOrNull { g ->
+                    g.id != sourceGroupId &&
+                        x >= g.rect.left && x <= g.rect.right && y >= g.rect.top && y <= g.rect.bottom
+                }
+                if (tile != null) {
+                    DropHighlight(DropZoneKind.GROUP_TILE, tile.id, tile.rect, "加入 ${tile.title}")
+                } else {
+                    DropHighlight()
+                }
+            }
+            else -> DropHighlight()
+        }
+        if (next != currentDropHighlight) {
+            currentDropHighlight = next
+            publishState()
+        }
+    }
+
+    fun clearDropHighlight() {
+        if (currentDropHighlight.kind == DropZoneKind.NONE) return
+        currentDropHighlight = DropHighlight()
+        publishState()
+    }
+
+    private fun computeWindowDropHighlight(state: WorkspaceState, x: Int, y: Int): DropHighlight {
+        if (!state.railVisible) return DropHighlight()
+        val add = state.addGroupRect
+        if (add.width > 0 && x >= add.left && x <= add.right && y >= add.top && y <= add.bottom) {
+            return DropHighlight(DropZoneKind.ADD_GROUP, null, add, "新建工作台")
+        }
+        val tile = state.groups.firstOrNull { g ->
+            x >= g.rect.left && x <= g.rect.right && y >= g.rect.top && y <= g.rect.bottom
+        }
+        if (tile != null) {
+            return DropHighlight(DropZoneKind.GROUP_TILE, tile.id, tile.rect, "移入 ${tile.title}")
+        }
+        val rail = state.rail
+        if (rail.width > 0 && x >= rail.left && x <= rail.right && y >= rail.top && y <= rail.bottom) {
+            return DropHighlight(DropZoneKind.RAIL_REMOVE, null, rail, "移出当前工作台")
+        }
+        return DropHighlight()
+    }
+
     suspend fun openApp(
         packageName: String,
         label: String,
@@ -532,6 +725,7 @@ object StageWorkspace {
      */
     suspend fun handleWindowDrop(windowId: String, x: Int, y: Int): Boolean {
         Log.d(TAG, "windowDrop id=$windowId at $x,$y")
+        clearDropHighlight()
         val state = _state.value
         if (!state.railVisible) return false
         // "+" creates a new group and moves the window there.
@@ -858,7 +1052,7 @@ object StageWorkspace {
         val railBottom = if (railShown && tiles.isNotEmpty()) {
             tiles.maxOf { it.rect.bottom }
         } else {
-            railRect()?.top ?: (workspace.top + dp(8f))
+            (railRect()?.top ?: (workspace.top + dp(8f))) + dp(62f)
         }
         val addSize = dp(44f)
         val addRect = StageRect(
@@ -892,6 +1086,7 @@ object StageWorkspace {
             rail = railRect() ?: StageRect(0, 0, 0, 0),
             railUpRect = upRect,
             railDownRect = downRect,
+            dropHighlight = currentDropHighlight,
             backend = StageRuntime.state.value.backend,
             error = null
         )

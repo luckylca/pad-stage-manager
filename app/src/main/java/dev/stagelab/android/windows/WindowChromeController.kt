@@ -28,6 +28,7 @@ class WindowChromeController(
 
     interface Callbacks {
         fun onGeometryChanged(id: String, rect: StageRect, final: Boolean)
+        fun onWindowDragging(id: String, x: Int, y: Int)
         fun onWindowDropped(id: String, x: Int, y: Int)
         fun onFocusRequested(id: String)
         fun onCloseRequested(id: String)
@@ -67,11 +68,19 @@ class WindowChromeController(
     private val holders = LinkedHashMap<String, Holder>()
     private var edgeStrip: View? = null
     private var railOverlay: View? = null
+    private var dropHighlightView: DropHighlightOverlayView? = null
 
-    /** A tappable region above the parked rail windows. */
-    data class TapTarget(val rect: StageRect, val action: () -> Unit)
+    /** A tappable (and optionally draggable) region above the parked rail windows. */
+    data class TapTarget(
+        val rect: StageRect,
+        val groupId: String? = null,
+        val action: () -> Unit
+    )
 
     private var railTargets: List<TapTarget> = emptyList()
+    private var railScrollHandler: (Float) -> Unit = {}
+    private var railDragMoveHandler: (String, Int, Int) -> Unit = { _, _, _ -> }
+    private var railDragEndHandler: (String, Int, Int) -> Unit = { _, _, _ -> }
 
     private val dp: Float get() = activity.resources.displayMetrics.density
     private fun px(value: Float): Int = (value * dp).roundToInt()
@@ -173,17 +182,51 @@ class WindowChromeController(
     }
 
     /**
+     * Shows or hides a non-touchable drop-zone highlight overlay above all real task windows so
+     * drag feedback is never occluded by live previews or workspace windows.
+     */
+    fun updateDropHighlight(rect: StageRect?, label: String) {
+        if (rect == null || rect.width <= 0 || rect.height <= 0 || label.isEmpty()) {
+            dropHighlightView?.let { runCatching { wm.removeView(it) } }
+            dropHighlightView = null
+            return
+        }
+        val existing = dropHighlightView
+        if (existing == null) {
+            val view = DropHighlightOverlayView(activity).apply {
+                this.label = label
+            }
+            val params = overlayParams(rect.width, rect.height, rect.left, rect.top, touchable = false)
+            runCatching { wm.addView(view, params) }.onSuccess { dropHighlightView = view }
+                .onFailure { Log.w(TAG, "drop highlight overlay failed: ${it.message}") }
+        } else {
+            existing.label = label
+            layout(existing, rect.left, rect.top, rect.width, rect.height)
+        }
+    }
+
+    /**
      * The parked group previews are real windows above the stage host, so the rail's own tap
      * targets only work through an overlay that sits on top of them.
+     *
+     * Supports three gestures:
+     *  - Tap on a tile -> switch group (or trigger "+" / scroll chevron);
+     *  - Vertical drag -> scroll the rail;
+     *  - Horizontal right drag on a group tile -> drag the group into the central workspace.
      */
     @SuppressLint("ClickableViewAccessibility")
     fun updateRailTargets(
         targets: List<TapTarget>,
         bounds: StageRect?,
         visible: Boolean,
-        onScroll: (Float) -> Unit = {}
+        onScroll: (Float) -> Unit = {},
+        onRailDragMove: (groupId: String, x: Int, y: Int) -> Unit = { _, _, _ -> },
+        onRailDragEnd: (groupId: String, x: Int, y: Int) -> Unit = { _, _, _ -> }
     ) {
         railTargets = targets
+        railScrollHandler = onScroll
+        railDragMoveHandler = onRailDragMove
+        railDragEndHandler = onRailDragEnd
         if (!visible || bounds == null || bounds.width <= 0) {
             railOverlay?.let { runCatching { wm.removeView(it) } }
             railOverlay = null
@@ -194,32 +237,75 @@ class WindowChromeController(
                 setBackgroundColor(0x01000000)
                 isClickable = true
                 setOnTouchListener(object : android.view.View.OnTouchListener {
+                    private var startX = 0f
+                    private var startY = 0f
                     private var lastY = 0f
+                    private var totalDx = 0f
                     private var totalDy = 0f
-                    private var scrolling = false
+                    private var gesture = 0 // 0=none, 1=scroll, 2=dragOut
+                    private var touchedGroupId: String? = null
+
                     override fun onTouch(v: View, event: android.view.MotionEvent): Boolean {
                         when (event.actionMasked) {
                             android.view.MotionEvent.ACTION_DOWN -> {
+                                startX = event.rawX
+                                startY = event.rawY
                                 lastY = event.rawY
+                                totalDx = 0f
                                 totalDy = 0f
-                                scrolling = false
+                                gesture = 0
+                                val x = event.rawX.toInt()
+                                val y = event.rawY.toInt()
+                                touchedGroupId = railTargets.firstOrNull { target ->
+                                    target.groupId != null &&
+                                        x >= target.rect.left && x <= target.rect.right &&
+                                        y >= target.rect.top && y <= target.rect.bottom
+                                }?.groupId
                             }
                             android.view.MotionEvent.ACTION_MOVE -> {
                                 val dy = event.rawY - lastY
                                 lastY = event.rawY
-                                totalDy += dy
-                                if (!scrolling && kotlin.math.abs(totalDy) > px(18f)) scrolling = true
-                                if (scrolling) onScroll(dy)
+                                totalDx = event.rawX - startX
+                                totalDy = event.rawY - startY
+                                if (gesture == 0) {
+                                    if (touchedGroupId != null && totalDx > px(22f) && kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy)) {
+                                        gesture = 2
+                                    } else if (kotlin.math.abs(totalDy) > px(18f)) {
+                                        gesture = 1
+                                    }
+                                }
+                                when (gesture) {
+                                    1 -> railScrollHandler(dy)
+                                    2 -> touchedGroupId?.let { gid ->
+                                        railDragMoveHandler(gid, event.rawX.roundToInt(), event.rawY.roundToInt())
+                                    }
+                                }
                             }
                             android.view.MotionEvent.ACTION_UP -> {
-                                if (!scrolling) {
-                                    val x = event.rawX.toInt()
-                                    val y = event.rawY.toInt()
-                                    railTargets.firstOrNull { target ->
-                                        x >= target.rect.left && x <= target.rect.right &&
-                                            y >= target.rect.top && y <= target.rect.bottom
-                                    }?.action?.invoke()
+                                when (gesture) {
+                                    0 -> {
+                                        val x = event.rawX.toInt()
+                                        val y = event.rawY.toInt()
+                                        railTargets.firstOrNull { target ->
+                                            x >= target.rect.left && x <= target.rect.right &&
+                                                y >= target.rect.top && y <= target.rect.bottom
+                                        }?.action?.invoke()
+                                    }
+                                    2 -> touchedGroupId?.let { gid ->
+                                        railDragEndHandler(gid, event.rawX.roundToInt(), event.rawY.roundToInt())
+                                    }
                                 }
+                                gesture = 0
+                                touchedGroupId = null
+                            }
+                            android.view.MotionEvent.ACTION_CANCEL -> {
+                                if (gesture == 2) {
+                                    touchedGroupId?.let { gid ->
+                                        railDragEndHandler(gid, -1, -1)
+                                    }
+                                }
+                                gesture = 0
+                                touchedGroupId = null
                             }
                         }
                         return true
@@ -440,6 +526,10 @@ class WindowChromeController(
                 holder.restoredRect = null
                 position(holder)
                 callbacks.onGeometryChanged(id, clamped, false)
+                if (mode == ChromeMode.TITLE) {
+                    holder.touchLast = holder.titleBar.lastRawPos
+                    callbacks.onWindowDragging(id, holder.touchLast.first, holder.touchLast.second)
+                }
             }
             ChromeOverlayView.PHASE_END -> {
                 holder.touchLast = holder.titleBar.lastRawPos
@@ -497,9 +587,70 @@ class WindowChromeController(
         edgeStrip = null
         railOverlay?.let { runCatching { wm.removeView(it) } }
         railOverlay = null
+        dropHighlightView?.let { runCatching { wm.removeView(it) } }
+        dropHighlightView = null
     }
 
     private companion object {
         const val TAG = "WindowChrome"
+    }
+}
+
+/**
+ * Non-touchable translucent highlight rendered above real task windows during drag-and-drop so
+ * the user always sees the active drop zone and action label.
+ */
+@SuppressLint("ViewConstructor")
+private class DropHighlightOverlayView(context: android.content.Context) : View(context) {
+
+    var label: String = ""
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
+    private val density = resources.displayMetrics.density
+
+    private val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(46, 122, 162, 255)
+        style = android.graphics.Paint.Style.FILL
+    }
+    private val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(235, 138, 174, 255)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 3f * density
+    }
+    private val pillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(228, 20, 26, 38)
+        style = android.graphics.Paint.Style.FILL
+    }
+    private val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(245, 240, 245, 255)
+        textSize = 13f * density
+        isFakeBoldText = true
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val r = 22f * density
+        val inset = 2f * density
+        val box = android.graphics.RectF(inset, inset, width - inset, height - inset)
+        canvas.drawRoundRect(box, r, r, fillPaint)
+        canvas.drawRoundRect(box, r, r, strokePaint)
+
+        if (label.isNotEmpty()) {
+            val textW = textPaint.measureText(label)
+            val padH = 14f * density
+            val pillH = 30f * density
+            val pillW = textW + padH * 2
+            val cx = width / 2f
+            val cy = (height / 2f).coerceIn(pillH, (height - pillH).coerceAtLeast(pillH))
+            val pill = android.graphics.RectF(cx - pillW / 2f, cy - pillH / 2f, cx + pillW / 2f, cy + pillH / 2f)
+            canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, pillPaint)
+            canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, strokePaint)
+            val textY = cy - (textPaint.descent() + textPaint.ascent()) / 2f
+            canvas.drawText(label, cx - textW / 2f, textY, textPaint)
+        }
     }
 }

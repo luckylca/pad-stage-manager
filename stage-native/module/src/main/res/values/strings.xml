@@ -3,6 +3,7 @@
     <string name="app_name">StageLab Native</string>
     <string name="xposed_description">ColorOS 17 iPad Stage Manager based on native Flexible Window &amp; ShellTaskOrganizer</string>
     <string-array name="xposed_scope">
+        <item>android</item>
         <item>com.android.systemui</item>
         <item>com.android.launcher</item>
     </string-array>

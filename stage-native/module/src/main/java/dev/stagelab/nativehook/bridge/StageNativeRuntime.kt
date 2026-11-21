@@ -18,6 +18,7 @@ import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.StageTransitionController
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.dock.StageDockOverlayController
 import dev.stagelab.nativehook.ui.strip.RecentStripOverlayController
 import dev.stagelab.nativehook.xposed.HookGuard
 import java.util.concurrent.ConcurrentHashMap
@@ -48,6 +49,23 @@ object StageNativeRuntime {
         },
         onLeftEdgeSwipeReveal = {
             recentController.onLeftEdgeSwipeReveal()
+            updateStripUi(registry.snapshot())
+        },
+    )
+
+    val dockOverlay = StageDockOverlayController(
+        onDockAppClicked = { pkg ->
+            pendingLaunches[pkg] = false to System.currentTimeMillis()
+            val session = dockController.onDockAppClicked(pkg)
+            updateStripUi(session)
+        },
+        onDockAppDraggedToCenter = { pkg ->
+            pendingLaunches[pkg] = true to System.currentTimeMillis()
+            val session = dockController.onDockAppDraggedToCenter(pkg)
+            updateStripUi(session)
+        },
+        onBottomSwipeReveal = {
+            dockController.onBottomSwipeReveal()
             updateStripUi(registry.snapshot())
         },
     )
@@ -114,7 +132,8 @@ object StageNativeRuntime {
                     Intent.ACTION_SCREEN_OFF -> {
                         isDeviceLocked = true
                         stripOverlay.detach()
-                        HookGuard.info("LIFECYCLE screen off -> Recent Strip hidden")
+                        dockOverlay.detach()
+                        HookGuard.info("LIFECYCLE screen off -> Recent Strip & Dock hidden")
                     }
                     Intent.ACTION_USER_PRESENT -> {
                         isDeviceLocked = false
@@ -194,11 +213,17 @@ object StageNativeRuntime {
                 recentController.setHiddenByUserSetting(hidden)
                 registry.snapshot()
             }
+            "dock_hide" -> {
+                val hidden = intent.getBooleanExtra("hidden", false)
+                dockController.setDockHiddenBySetting(hidden)
+                registry.snapshot()
+            }
             "disable_module", "reset" -> {
                 // Cleanly remove attached UI and clear logical Stage metadata while keeping user app tasks intact.
                 registry.clear()
                 pendingLaunches.clear()
                 stripOverlay.detach()
+                dockOverlay.detach()
                 bridge.notifyLauncherBackdrop(false)
                 registry.snapshot()
             }
@@ -287,6 +312,7 @@ object StageNativeRuntime {
     private fun updateStripUi(session: StageSession) {
         if (isDeviceLocked) {
             stripOverlay.detach()
+            dockOverlay.detach()
             bridge.notifyLauncherBackdrop(false)
             return
         }
@@ -299,6 +325,12 @@ object StageNativeRuntime {
             session = session,
             hidden = recentController.isHiddenByUserSetting,
             tempRevealed = recentController.isTemporarilyRevealed,
+        )
+        dockOverlay.update(
+            context = ctx,
+            session = session,
+            hidden = dockController.isDockHiddenBySetting,
+            tempRevealed = dockController.isDockTemporarilyRevealed,
         )
     }
 

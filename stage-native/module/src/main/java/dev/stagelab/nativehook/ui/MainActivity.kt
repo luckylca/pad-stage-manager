@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
                 var moduleEnabled by remember { mutableStateOf(prefs.getBoolean("enabled", true)) }
                 var safeMode by remember { mutableStateOf(prefs.getBoolean("safe_mode", false)) }
                 var hideRecentStrip by remember { mutableStateOf(prefs.getBoolean("hide_strip", false)) }
+                var hideDock by remember { mutableStateOf(prefs.getBoolean("hide_dock", false)) }
                 val active = remember { ModuleStatus.isXposedModuleActive() }
 
                 SettingsScreen(
@@ -90,6 +91,7 @@ class MainActivity : ComponentActivity() {
                     moduleEnabled = moduleEnabled,
                     safeMode = safeMode,
                     hideRecentStrip = hideRecentStrip,
+                    hideDock = hideDock,
                     onToggleEnabled = { next ->
                         moduleEnabled = next
                         prefs.edit().putBoolean("enabled", next).apply()
@@ -111,6 +113,17 @@ class MainActivity : ComponentActivity() {
                             Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
                                 setPackage("com.android.systemui")
                                 putExtra("cmd", "strip_hide")
+                                putExtra("hidden", next)
+                            },
+                        )
+                    },
+                    onToggleHideDock = { next ->
+                        hideDock = next
+                        prefs.edit().putBoolean("hide_dock", next).apply()
+                        sendBroadcast(
+                            Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
+                                setPackage("com.android.systemui")
+                                putExtra("cmd", "dock_hide")
                                 putExtra("hidden", next)
                             },
                         )
@@ -138,9 +151,11 @@ private fun SettingsScreen(
     moduleEnabled: Boolean,
     safeMode: Boolean,
     hideRecentStrip: Boolean,
+    hideDock: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
     onToggleSafeMode: (Boolean) -> Unit,
     onToggleHideStrip: (Boolean) -> Unit,
+    onToggleHideDock: (Boolean) -> Unit,
     onSyncLiveTasks: () -> Unit,
     onCleanReset: () -> Unit,
 ) {
@@ -233,6 +248,12 @@ private fun SettingsScreen(
                         subtitle = "隐藏后从屏幕最左侧边缘向右轻扫可临时呼出",
                         checked = hideRecentStrip,
                         onCheckedChange = onToggleHideStrip,
+                    )
+                    SettingSwitchRow(
+                        title = "隐藏底部 Dock 栏",
+                        subtitle = "隐藏后从屏幕底部向上轻扫可临时呼出，向上拖动图标可合并进当前 Stage",
+                        checked = hideDock,
+                        onCheckedChange = onToggleHideDock,
                     )
                     SettingSwitchRow(
                         title = "安全模式（Safe Mode）",

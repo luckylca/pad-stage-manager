@@ -22,6 +22,10 @@ class StageLabHookEntry : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         when (lpparam.packageName) {
             SELF_PKG -> markSelfActive(lpparam.classLoader)
+            ANDROID_PKG -> {
+                HookGuard.info("Loaded in $ANDROID_PKG — installing minimal FlexibleTaskController adjust pass-through")
+                SystemServerFlexibleHook.install(lpparam.classLoader)
+            }
             SYSTEMUI_PKG -> {
                 HookGuard.info("Loaded in $SYSTEMUI_PKG (process=${lpparam.processName}) — installing N6/N7 SystemUI hooks")
                 installShellTaskOrganizerHooks(lpparam.classLoader)
@@ -172,6 +176,7 @@ class StageLabHookEntry : IXposedHookLoadPackage {
 
     companion object {
         private const val SELF_PKG = "dev.stagelab.nativehook"
+        private const val ANDROID_PKG = "android"
         private const val SYSTEMUI_PKG = "com.android.systemui"
         private const val LAUNCHER_PKG = "com.android.launcher"
     }

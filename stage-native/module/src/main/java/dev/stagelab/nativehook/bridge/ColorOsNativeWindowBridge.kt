@@ -15,6 +15,7 @@ import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
 import dev.stagelab.nativehook.xposed.HookGuard
 import dev.stagelab.nativehook.xposed.LauncherBackdropHook
+import dev.stagelab.nativehook.xposed.SystemServerFlexibleHook
 
 /**
  * N4 NativeWindowBridge backed by ColorOS 17's real `ShellTaskOrganizer`,
@@ -67,23 +68,22 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             HookGuard.warn("setLaunchWindowingMode(100) reflection failed", it)
         }
 
-        if (preferredBounds != null && !preferredBounds.isEmpty) {
-            runCatching {
-                options.setLaunchBounds(
-                    Rect(
-                        preferredBounds.left,
-                        preferredBounds.top,
-                        preferredBounds.right,
-                        preferredBounds.bottom,
-                    ),
-                )
-            }
-        }
+        // Resolve memorized bounds/scale or official single-window primary stage bounds (full stage minus left strip & Dock).
+        val memorized = StageNativeRuntime.getMemorizedGeometry(-1, packageName)
+        val targetBounds = preferredBounds?.takeIf { !it.isEmpty }
+            ?: memorized?.bounds?.takeIf { !it.isEmpty }
+            ?: computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
+        val targetScale = memorized?.scale ?: 1.0f
+
+        applyColorOsLaunchBounds(options, targetBounds, targetScale)
 
         mainHandler.post {
             runCatching {
                 ctx.startActivity(intent, options.toBundle())
-                HookGuard.info("BRIDGE.LAUNCH pkg=$packageName mode=${StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE}")
+                HookGuard.info(
+                    "BRIDGE.LAUNCH pkg=$packageName mode=${StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE} " +
+                        "bounds=$targetBounds scale=$targetScale"
+                )
             }.onFailure {
                 HookGuard.warn("BRIDGE.LAUNCH failed for $packageName", it)
             }
@@ -180,10 +180,36 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         } else {
             (18f * density).toInt()
         }
-        val topPx = (34f * density).toInt()
+        val topPx = (32f * density).toInt()
         val rightPx = screenW - (18f * density).toInt()
-        val bottomPx = screenH - (82f * density).toInt()
+        val bottomPx = screenH - (96f * density).toInt()
         return WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
+    }
+
+    /**
+     * Injects ColorOS 17 Flexible Window launch bounds & scale directly into `ActivityOptions`
+     * via `FlexibleWindowManager.setExtraBundle`, so newly launched & restored windows immediately
+     * open at the exact target size and position without scale/handle desync.
+     */
+    private fun applyColorOsLaunchBounds(options: ActivityOptions, bounds: WindowBounds, scale: Float) {
+        if (bounds.isEmpty) return
+        val rect = Rect(bounds.left, bounds.top, bounds.right, bounds.bottom)
+        runCatching { options.setLaunchBounds(rect) }
+        runCatching {
+            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+            val extra = Bundle().apply {
+                putInt(KEY_LAUNCH_SCENARIO, 1)
+                putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
+                putParcelable(KEY_FLEXIBLE_LAUNCH_MAX_BOUNDS, rect)
+                putParcelable(KEY_FLEXIBLE_LAUNCH_FILLIN_BOUNDS, rect)
+                putParcelable(KEY_EXTRA_FLEXIBLE_WINDOW_RECT, rect)
+                putFloat(KEY_LAUNCH_SCALE, scale.coerceIn(0.45f, 1.0f))
+            }
+            XposedHelpers.callMethod(fwm, "setExtraBundle", options, extra)
+        }.onFailure {
+            HookGuard.warn("applyColorOsLaunchBounds setExtraBundle failed", it)
+        }
     }
 
     /**
@@ -197,6 +223,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
             val bundle = Bundle().apply {
+                putBoolean(SystemServerFlexibleHook.KEY_FORCE_ADJUST, true)
                 putInt(KEY_LAUNCH_FLEXIBLE_TASK_ID, taskId)
                 putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
                 putFloat(KEY_LAUNCH_SCALE, targetScale.coerceIn(0.45f, 1.0f))
@@ -296,6 +323,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     private fun restoreSingleFlexibleTask(organizer: Any, task: StageTask) {
+        val memorized = StageNativeRuntime.getMemorizedGeometry(task.taskId, task.packageName)
+        val targetBounds = memorized?.bounds?.takeIf { !it.isEmpty }
+            ?: task.bounds.takeIf { !it.isEmpty }
+            ?: computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
+        val targetScale = memorized?.scale ?: 1.0f
+
         val restored = runCatching {
             val options = ActivityOptions.makeBasic()
             runCatching {
@@ -305,13 +338,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                     StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE,
                 )
             }
-            if (!task.bounds.isEmpty) {
-                runCatching {
-                    options.setLaunchBounds(
-                        Rect(task.bounds.left, task.bounds.top, task.bounds.right, task.bounds.bottom),
-                    )
-                }
-            }
+            applyColorOsLaunchBounds(options, targetBounds, targetScale)
+
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             val service = XposedHelpers.callStaticMethod(atmClass, "getService")
             val rc = XposedHelpers.callMethod(
@@ -320,7 +348,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 task.taskId,
                 options.toBundle(),
             ) as? Int ?: -1
-            HookGuard.info("BRIDGE.RESTORE_RECENTS task=${task.taskId} bounds=${task.bounds} rc=$rc")
+            HookGuard.info("BRIDGE.RESTORE_RECENTS task=${task.taskId} bounds=$targetBounds scale=$targetScale rc=$rc")
             rc >= 0
         }.onFailure {
             HookGuard.warn("BRIDGE.RESTORE_RECENTS failed for task=${task.taskId}", it)
@@ -336,14 +364,11 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             }
         }
 
-        // Re-apply memorized bounds & scale once ColorOS restore transition settles.
-        val memorized = StageNativeRuntime.getMemorizedGeometry(task.taskId, task.packageName)
-        val targetBounds = memorized?.bounds?.takeIf { !it.isEmpty } ?: task.bounds
-        val targetScale = memorized?.scale ?: 1.0f
+        // Apply memorized (or primary-stage) bounds & scale via native FlexibleTaskController after restore settles.
         if (!targetBounds.isEmpty) {
             mainHandler.postDelayed({
                 adjustFlexibleTaskFrame(task.taskId, targetBounds, targetScale)
-            }, RESTORE_GEOMETRY_DELAY_MS)
+            }, 340L)
         }
     }
 
@@ -366,9 +391,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     companion object {
         private const val FLEXIBLE_STEP_DELAY_MS = 180L
         private const val FLEXIBLE_PHASE_GAP_MS = 120L
-        private const val RESTORE_GEOMETRY_DELAY_MS = 320L
+        private const val KEY_LAUNCH_SCENARIO = "androidx.activity.LaunchScenario"
         private const val KEY_LAUNCH_FLEXIBLE_TASK_ID = "androidx.activity.LaunchFlexibleTaskId"
         private const val KEY_FLEXIBLE_LAUNCH_BOUNDS = "androidx.flexible.LaunchBounds"
+        private const val KEY_FLEXIBLE_LAUNCH_MAX_BOUNDS = "androidx.flexible.LaunchMaxBounds"
+        private const val KEY_FLEXIBLE_LAUNCH_FILLIN_BOUNDS = "androidx.flexible.LaunchFillInBounds"
+        private const val KEY_EXTRA_FLEXIBLE_WINDOW_RECT = "androidx.flexible.extraWindowRect"
         private const val KEY_LAUNCH_SCALE = "androidx.activity.LaunchScale"
     }
 }

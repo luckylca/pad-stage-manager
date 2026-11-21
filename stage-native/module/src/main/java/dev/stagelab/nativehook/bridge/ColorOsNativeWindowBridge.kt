@@ -6,6 +6,7 @@ import android.app.AndroidAppHelper
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import de.robv.android.xposed.XposedHelpers
@@ -13,6 +14,7 @@ import dev.stagelab.nativecore.NativeWindowBridge
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
 import dev.stagelab.nativehook.xposed.HookGuard
+import dev.stagelab.nativehook.xposed.LauncherBackdropHook
 
 /**
  * N4 NativeWindowBridge backed by ColorOS 17's real `ShellTaskOrganizer`,
@@ -154,16 +156,66 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
     override fun updateTaskBounds(taskId: Int, bounds: WindowBounds) {
         if (bounds.isEmpty) return
-        val organizer = shellTaskOrganizer ?: return
+        adjustFlexibleTaskFrame(
+            taskId = taskId,
+            targetBounds = bounds,
+            targetScale = 1.0f,
+        )
+    }
+
+    /**
+     * Compute the official iPadOS-style single-window stage bounds:
+     * occupies the entire main stage excluding the left slanted Recent Strip, top status bar, and bottom Dock.
+     */
+    fun computePrimaryStageBounds(stripVisible: Boolean = true): WindowBounds {
+        val ctx = appContext()
+        val dm = ctx?.resources?.displayMetrics
+        val screenW = dm?.widthPixels ?: 2520
+        val screenH = dm?.heightPixels ?: 1680
+        val density = dm?.density ?: 2.625f
+        val isLandscape = screenW >= screenH
+
+        val leftPx = if (stripVisible) {
+            if (isLandscape) (168f * density).toInt() else (136f * density).toInt()
+        } else {
+            (18f * density).toInt()
+        }
+        val topPx = (34f * density).toInt()
+        val rightPx = screenW - (18f * density).toInt()
+        val bottomPx = screenH - (82f * density).toInt()
+        return WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
+    }
+
+    /**
+     * Adjust a ColorOS 17 Flexible Window's exact visible bounds & scale using verified native
+     * `FlexibleWindowManager.adjustFlexibleTask(Bundle)` keys.
+     */
+    fun adjustFlexibleTaskFrame(taskId: Int, targetBounds: WindowBounds, targetScale: Float = 1.0f) {
+        if (targetBounds.isEmpty) return
+        val rect = Rect(targetBounds.left, targetBounds.top, targetBounds.right, targetBounds.bottom)
         runCatching {
-            val token = resolveTaskToken(organizer, taskId) ?: return
-            val wct = newWindowContainerTransaction() ?: return
-            val rect = Rect(bounds.left, bounds.top, bounds.right, bounds.bottom)
-            XposedHelpers.callMethod(wct, "setBounds", token, rect)
-            applyTransaction(organizer, wct)
-            HookGuard.info("BRIDGE.SET_BOUNDS task=$taskId rect=$rect")
+            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+            val bundle = Bundle().apply {
+                putInt(KEY_LAUNCH_FLEXIBLE_TASK_ID, taskId)
+                putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
+                putFloat(KEY_LAUNCH_SCALE, targetScale.coerceIn(0.45f, 1.0f))
+            }
+            val result = XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle) as? Boolean ?: false
+            HookGuard.info("BRIDGE.ADJUST_FLEXIBLE task=$taskId rect=$rect scale=$targetScale ok=$result")
         }.onFailure {
-            HookGuard.warn("BRIDGE.SET_BOUNDS failed for task=$taskId", it)
+            HookGuard.warn("BRIDGE.ADJUST_FLEXIBLE failed for task=$taskId", it)
+        }
+    }
+
+    fun notifyLauncherBackdrop(visible: Boolean) {
+        val ctx = appContext() ?: return
+        runCatching {
+            val intent = Intent(LauncherBackdropHook.ACTION_STAGE_BACKDROP).apply {
+                setPackage("com.android.launcher")
+                putExtra("visible", visible)
+            }
+            ctx.sendBroadcast(intent)
         }
     }
 
@@ -283,6 +335,16 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 HookGuard.info("BRIDGE.RESTORE_FALLBACK_REORDER task=${task.taskId}")
             }
         }
+
+        // Re-apply memorized bounds & scale once ColorOS restore transition settles.
+        val memorized = StageNativeRuntime.getMemorizedGeometry(task.taskId, task.packageName)
+        val targetBounds = memorized?.bounds?.takeIf { !it.isEmpty } ?: task.bounds
+        val targetScale = memorized?.scale ?: 1.0f
+        if (!targetBounds.isEmpty) {
+            mainHandler.postDelayed({
+                adjustFlexibleTaskFrame(task.taskId, targetBounds, targetScale)
+            }, RESTORE_GEOMETRY_DELAY_MS)
+        }
     }
 
     private fun resolveHomeToken(organizer: Any): Any? = runCatching {
@@ -304,5 +366,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     companion object {
         private const val FLEXIBLE_STEP_DELAY_MS = 180L
         private const val FLEXIBLE_PHASE_GAP_MS = 120L
+        private const val RESTORE_GEOMETRY_DELAY_MS = 320L
+        private const val KEY_LAUNCH_FLEXIBLE_TASK_ID = "androidx.activity.LaunchFlexibleTaskId"
+        private const val KEY_FLEXIBLE_LAUNCH_BOUNDS = "androidx.flexible.LaunchBounds"
+        private const val KEY_LAUNCH_SCALE = "androidx.activity.LaunchScale"
     }
 }

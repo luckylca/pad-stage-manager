@@ -29,8 +29,9 @@ class StageLabHookEntry : IXposedHookLoadPackage {
                 FlexibleMenuHook.install(lpparam.classLoader)
             }
             LAUNCHER_PKG -> {
-                HookGuard.info("Loaded in $LAUNCHER_PKG (process=${lpparam.processName}) — installing N6 Dock hooks")
+                HookGuard.info("Loaded in $LAUNCHER_PKG (process=${lpparam.processName}) — installing N6 Dock & Blur Backdrop hooks")
                 LauncherDockHook.install(lpparam.classLoader)
+                LauncherBackdropHook.install(lpparam.classLoader)
             }
         }
     }

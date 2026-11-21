@@ -110,7 +110,7 @@ class RecentStripOverlayController(
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             clipChildren = false
             clipToPadding = false
-            setPadding(dp(context, 14), dp(context, 12), dp(context, 10), dp(context, 12))
+            setPadding(dp(context, 16), dp(context, 24), dp(context, 26), dp(context, 24))
         }
 
         val edgeHandle = createEdgeRevealHandle(context)
@@ -169,28 +169,41 @@ class RecentStripOverlayController(
 
         column.removeAllViews()
         val maxCards = recentStages.take(StageSession.MAX_VISIBLE_RECENT_STAGES)
+        val total = maxCards.size
         maxCards.forEachIndexed { index, stage ->
-            val card = buildStageThumbnailCard(context, stage)
-            val params = LinearLayout.LayoutParams(dp(context, 114), dp(context, 84)).apply {
-                if (index > 0) topMargin = dp(context, 16)
+            val card = buildStageThumbnailCard(context, stage, index, total)
+            val params = LinearLayout.LayoutParams(dp(context, 148), dp(context, 106)).apply {
+                if (index > 0) topMargin = dp(context, 18)
             }
             column.addView(card, params)
         }
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    private fun buildStageThumbnailCard(context: Context, stage: Stage): View {
-        val cardW = dp(context, 114)
-        val cardH = dp(context, 84)
-        val radiusPx = dp(context, 16).toFloat()
+    private fun buildStageThumbnailCard(
+        context: Context,
+        stage: Stage,
+        index: Int,
+        total: Int,
+    ): View {
+        val cardW = dp(context, 148)
+        val cardH = dp(context, 106)
+        val radiusPx = dp(context, 18).toFloat()
+
+        // Official iPadOS Stage Manager slanted 3D perspective:
+        // hinged on left edge (pivotX = 0), angled inward with strong 3D depth + vertical fan tilt.
+        val centerOffset = if (total <= 1) 0f else (index - (total - 1) / 2f) / ((total - 1) / 2f)
+        val tiltX = centerOffset * 4.5f
 
         val container = FrameLayout(context).apply {
             clipChildren = false
             clipToPadding = false
-            // Subtle iPad Stage Manager inward perspective
-            cameraDistance = 8000f * context.resources.displayMetrics.density
-            rotationY = 10f
-            elevation = dp(context, 8).toFloat()
+            pivotX = 0f
+            pivotY = cardH / 2f
+            cameraDistance = 2100f * context.resources.displayMetrics.density
+            rotationY = 28f
+            rotationX = tiltX
+            elevation = dp(context, 12).toFloat()
         }
 
         val orderedTasks = stage.tasksByZOrder

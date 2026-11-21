@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.DockIntegrationController
 import dev.stagelab.nativecore.RecentStageController
@@ -55,11 +57,25 @@ object StageNativeRuntime {
     @Volatile
     private var isDeviceLocked = false
 
+    data class SavedGeometry(
+        val bounds: WindowBounds,
+        val scale: Float = 1.0f,
+        val userCustomized: Boolean = false,
+    )
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val taskGeometryMemory = ConcurrentHashMap<Int, SavedGeometry>()
+    private val pkgGeometryMemory = ConcurrentHashMap<String, SavedGeometry>()
+    private val taskAppearedAtMs = ConcurrentHashMap<Int, Long>()
+
     /**
      * Tracks pending programmatic launches: packageName -> Pair(mergeIntoActive, timestampMs).
      * Expires after 8 seconds so unrelated manual launches are never misclassified.
      */
     private val pendingLaunches = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+
+    fun getMemorizedGeometry(taskId: Int, packageName: String): SavedGeometry? =
+        taskGeometryMemory[taskId] ?: pkgGeometryMemory[packageName]
 
     fun attachOrganizerIfNeeded(organizer: Any) {
         bridge.attachShellTaskOrganizer(organizer)
@@ -183,6 +199,7 @@ object StageNativeRuntime {
                 registry.clear()
                 pendingLaunches.clear()
                 stripOverlay.detach()
+                bridge.notifyLauncherBackdrop(false)
                 registry.snapshot()
             }
             else -> {
@@ -198,12 +215,27 @@ object StageNativeRuntime {
         val pkg = resolvePkg(taskInfo)
         if (!isManagedUserApp(pkg)) return
 
+        taskAppearedAtMs[taskInfo.taskId] = System.currentTimeMillis()
         val mergeFlag = consumePendingMergeFlag(pkg)
         val stageTask = toStageTask(taskInfo, pkg)
         val session = transitionController.onNativeTaskAppeared(stageTask, mergeIntoActive = mergeFlag)
         if (isTaskFocused(taskInfo)) {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
+
+        // Official Stage Manager layout: a single-window Stage occupies the main stage (excluding left strip & Dock),
+        // unless the user already memorized a custom size/position for this app.
+        if (!mergeFlag && session.activeStage?.tasks?.size == 1) {
+            val memorized = pkgGeometryMemory[pkg]?.takeIf { it.userCustomized && !it.bounds.isEmpty }
+            val targetBounds = memorized?.bounds
+                ?: bridge.computePrimaryStageBounds(stripVisible = !recentController.isHiddenByUserSetting)
+            val targetScale = memorized?.scale ?: 1.0f
+            taskGeometryMemory[taskInfo.taskId] = SavedGeometry(targetBounds, targetScale, memorized != null)
+            mainHandler.postDelayed({
+                bridge.adjustFlexibleTaskFrame(taskInfo.taskId, targetBounds, targetScale)
+            }, 360L)
+        }
+
         logSession("ON_APPEARED(t=${taskInfo.taskId},merge=$mergeFlag)", session)
         updateStripUi(session)
     }
@@ -213,6 +245,21 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         val stageTask = toStageTask(taskInfo, pkg)
+        // Only record user-customized window size/position after initial launch animation settles (>1200ms).
+        val appearedAt = taskAppearedAtMs[taskInfo.taskId] ?: 0L
+        val settled = System.currentTimeMillis() - appearedAt > 1_200L
+        if (settled && stageTask.isVisible && !stageTask.bounds.isEmpty && !isFullScreenBounds(stageTask.bounds)) {
+            val scale = extractFlexibleScale(taskInfo)
+            val visibleBounds = computeVisibleBounds(stageTask.bounds, scale)
+            val prev = taskGeometryMemory[taskInfo.taskId]
+            if (prev == null || prev.bounds != visibleBounds || kotlin.math.abs(prev.scale - scale) > 0.01f) {
+                val saved = SavedGeometry(visibleBounds, scale, userCustomized = true)
+                taskGeometryMemory[taskInfo.taskId] = saved
+                pkgGeometryMemory[pkg] = saved
+                HookGuard.info("MEMORY saved task=${taskInfo.taskId} pkg=$pkg bounds=$visibleBounds scale=$scale")
+            }
+        }
+
         var session = transitionController.onNativeTaskInfoChanged(stageTask)
         if (isTaskFocused(taskInfo)) {
             session = transitionController.onNativeTaskFocused(taskInfo.taskId)
@@ -224,6 +271,8 @@ object StageNativeRuntime {
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
         if (!isManagedUserApp(pkg)) return
+        taskGeometryMemory.remove(taskInfo.taskId)
+        taskAppearedAtMs.remove(taskInfo.taskId)
         val session = transitionController.onNativeTaskVanished(taskInfo.taskId)
         logSession("ON_VANISHED(t=${taskInfo.taskId})", session)
         updateStripUi(session)
@@ -238,8 +287,12 @@ object StageNativeRuntime {
     private fun updateStripUi(session: StageSession) {
         if (isDeviceLocked) {
             stripOverlay.detach()
+            bridge.notifyLauncherBackdrop(false)
             return
         }
+        val hasActiveStage = session.activeStage != null && session.activeStage!!.tasks.isNotEmpty()
+        bridge.notifyLauncherBackdrop(hasActiveStage)
+
         val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
         stripOverlay.update(
             context = ctx,
@@ -247,6 +300,31 @@ object StageNativeRuntime {
             hidden = recentController.isHiddenByUserSetting,
             tempRevealed = recentController.isTemporarilyRevealed,
         )
+    }
+
+    private fun isFullScreenBounds(b: WindowBounds): Boolean {
+        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
+        val sw = dm?.widthPixels ?: 2520
+        val sh = dm?.heightPixels ?: 1680
+        return b.left == 0 && b.top == 0 && b.right == sw && b.bottom == sh
+    }
+
+    private fun extractFlexibleScale(taskInfo: ActivityManager.RunningTaskInfo): Float {
+        return runCatching {
+            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+            val config = XposedHelpers.getObjectField(taskInfo, "configuration") as? Configuration ?: return 1.0f
+            val extra = XposedHelpers.callStaticMethod(fwmCls, "getExtraConfiguration", config) ?: return 1.0f
+            // Default to 1.0f if extra config does not expose scale directly
+            runCatching { XposedHelpers.getFloatField(extra, "mScale") }.getOrNull()
+                ?.takeIf { it in 0.35f..1.05f } ?: 1.0f
+        }.getOrDefault(1.0f)
+    }
+
+    private fun computeVisibleBounds(raw: WindowBounds, scale: Float): WindowBounds {
+        if (scale >= 0.99f) return raw
+        val w = (raw.width * scale).toInt().coerceAtLeast(300)
+        val h = (raw.height * scale).toInt().coerceAtLeast(300)
+        return WindowBounds(raw.left, raw.top, raw.left + w, raw.top + h)
     }
 
     fun syncFromLiveOrganizer(): StageSession {

@@ -440,16 +440,20 @@ object StageNativeRuntime {
 
     private fun maybeScheduleTwoWindowSideBySide(session: StageSession) {
         val active = session.activeStage ?: return
-        if (active.tasks.size != 2) return
-        val firstTaskId = active.tasks[0].taskId
-        val secondTaskId = active.tasks[1].taskId
-        val (leftBounds, rightBounds) = bridge.computeSideBySideBounds(
+        val count = active.tasks.size
+        if (count !in 2..3) return
+        val taskIds = active.tasks.map { it.taskId }
+        val columns = bridge.computeMultiColumnBounds(
+            count = count,
             stripVisible = !recentController.isHiddenByUserSetting,
         )
         mainHandler.postDelayed({
-            bridge.adjustFlexibleTaskFrame(firstTaskId, leftBounds, 1.0f)
-            bridge.adjustFlexibleTaskFrame(secondTaskId, rightBounds, 1.0f)
-            HookGuard.info("STAGE.SIDE_BY_SIDE left=$firstTaskId:$leftBounds right=$secondTaskId:$rightBounds")
+            taskIds.forEachIndexed { idx, tid ->
+                columns.getOrNull(idx)?.let { bounds ->
+                    bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)
+                }
+            }
+            HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$taskIds bounds=$columns")
         }, 220L)
     }
 

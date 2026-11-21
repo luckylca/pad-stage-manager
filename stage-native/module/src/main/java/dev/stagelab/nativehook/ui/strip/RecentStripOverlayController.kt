@@ -110,7 +110,7 @@ class RecentStripOverlayController(
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             clipChildren = false
             clipToPadding = false
-            setPadding(dp(context, 16), dp(context, 24), dp(context, 26), dp(context, 24))
+            setPadding(dp(context, 4), dp(context, 24), dp(context, 24), dp(context, 24))
         }
 
         val edgeHandle = createEdgeRevealHandle(context)
@@ -142,6 +142,8 @@ class RecentStripOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            // Leave the leftmost ~30dp (~79px) clear so ColorOS native left-edge Back gesture is never intercepted.
+            x = dp(context, 30)
             title = "StageLabRecentStrip"
         }
 

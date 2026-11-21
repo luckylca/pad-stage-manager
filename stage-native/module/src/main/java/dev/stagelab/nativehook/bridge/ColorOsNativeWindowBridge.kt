@@ -14,6 +14,7 @@ import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.NativeWindowBridge
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.strip.StageMagicTransitionOverlay
 import dev.stagelab.nativehook.xposed.HookGuard
 import dev.stagelab.nativehook.xposed.LauncherBackdropHook
 import dev.stagelab.nativehook.xposed.SystemServerFlexibleHook
@@ -141,7 +142,14 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 fallbackShow.addAll(orderedShow)
             }
 
-            mainHandler.post {
+            // Play Apple iPadOS-style 3D Magic Move transition overlay right over the 3ms atomic swap
+            appContext()?.let { ctx ->
+                val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                StageMagicTransitionOverlay.playStageSwitch(ctx, outPairs, inPairs)
+            }
+
+            mainHandler.postDelayed({
                 if (wct != null && atomicOps > 0) {
                     runCatching {
                         applyTransaction(organizer, wct)
@@ -156,7 +164,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 }
                 for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
                 for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
-            }
+            }, 35L)
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
         }
@@ -264,16 +272,35 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
-     * Compute equal-height side-by-side bounds (left + right) for a 2-window Active Stage,
-     * with a crisp 28px gap between the two windows and zero overlap.
+     * Compute equal-height multi-column non-overlapping bounds for 2 or 3 windows in an Active Stage.
      */
-    fun computeSideBySideBounds(stripVisible: Boolean = true): Pair<WindowBounds, WindowBounds> {
+    fun computeMultiColumnBounds(count: Int, stripVisible: Boolean = true): List<WindowBounds> {
         val stage = computePrimaryStageBounds(stripVisible)
-        val gap = 28
-        val halfW = ((stage.width - gap) / 2).coerceAtLeast(420)
-        val left = WindowBounds(stage.left, stage.top, stage.left + halfW, stage.bottom)
-        val right = WindowBounds(stage.left + halfW + gap, stage.top, stage.right, stage.bottom)
-        return left to right
+        val n = count.coerceIn(1, 3)
+        if (n == 1) return listOf(stage)
+        val gap = if (n == 2) 28 else 20
+        val colW = ((stage.width - gap * (n - 1)) / n).coerceAtLeast(360)
+        return List(n) { i ->
+            val l = stage.left + i * (colW + gap)
+            val r = if (i == n - 1) stage.right else l + colW
+            WindowBounds(l, stage.top, r, stage.bottom)
+        }
+    }
+
+    private fun resolveLiveOrFallbackBounds(organizer: Any, task: StageTask): WindowBounds {
+        val live = runCatching {
+            val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", task.taskId)
+                as? ActivityManager.RunningTaskInfo ?: return@runCatching null
+            val r = StageNativeRuntime.extractBounds(info)
+            if (!r.isEmpty && r.width() > 200 && r.height() > 200) {
+                WindowBounds(r.left, r.top, r.right, r.bottom)
+            } else {
+                null
+            }
+        }.getOrNull()
+        return live
+            ?: task.bounds.takeIf { !it.isEmpty }
+            ?: computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
     }
 
     /**

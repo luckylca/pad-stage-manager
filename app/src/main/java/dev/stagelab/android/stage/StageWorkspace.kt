@@ -95,6 +95,8 @@ data class WorkspaceState(
     val dockVisible: Boolean = true,
     val dockAutoHide: Boolean = false,
     val railAutoHide: Boolean = false,
+    val fullScreenWindowId: String? = null,
+    val fullScreenBounds: StageRect = StageRect(0, 0, 0, 0),
     val activePackages: Set<String> = emptySet(),
     val runningPackages: Set<String> = emptySet(),
     val dockRefreshVersion: Int = 0,
@@ -114,6 +116,8 @@ data class WorkspaceState(
 object StageWorkspace {
 
     private const val TAG = "StageWorkspace"
+    const val MAX_WINDOWS_PER_STAGE = 4
+    const val MAX_RECENT_STAGES = 4
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(WorkspaceState())
@@ -162,17 +166,31 @@ object StageWorkspace {
     private var dockRevealed = false
     private var railAutoHide = false
     private var railTempRevealed = false
+    private var fullScreenWindowId: String? = null
+    private var fullScreenSavedGeometry: WindowGeometry? = null
     private var dockRefreshVersion = 0
 
     fun isLandscape(): Boolean = landscape
 
+    fun isFullScreen(windowId: String? = null): Boolean =
+        if (windowId == null) fullScreenWindowId != null else fullScreenWindowId == windowId
+
     private fun railShouldShow(): Boolean = when {
+        fullScreenWindowId != null -> false
         landscape && railAutoHide -> railTempRevealed
         landscape -> !railHiddenByUser
         else -> railPinnedPortrait
     }
 
-    private fun dockShouldShow(): Boolean = !dockAutoHide || dockRevealed
+    private fun dockShouldShow(): Boolean = when {
+        fullScreenWindowId != null -> false
+        else -> !dockAutoHide || dockRevealed
+    }
+
+    fun fullScreenRect(): StageRect =
+        if (screenW > 0 && screenH > 0) {
+            StageRect(0, statusInset, screenW, screenH - navInset)
+        } else StageRect(0, 0, 0, 0)
 
     fun setRailAutoHide(enabled: Boolean) {
         if (railAutoHide == enabled) return
@@ -233,13 +251,17 @@ object StageWorkspace {
             right = railLeft + railWidthPx(),
             bottom = dockBottomEdge
         )
-        val workspaceLeft = if (railShouldShow()) rail.right + dp(14f) else dp(18f)
-        val workspace = StageRect(
-            left = workspaceLeft,
-            top = statusInset + dp(10f),
-            right = screenW - dp(18f),
-            bottom = dockBottomEdge
-        )
+        val workspace = if (fullScreenWindowId != null) {
+            fullScreenRect()
+        } else {
+            val workspaceLeft = if (railShouldShow()) rail.right + dp(14f) else dp(18f)
+            StageRect(
+                left = workspaceLeft,
+                top = statusInset + dp(10f),
+                right = screenW - dp(18f),
+                bottom = dockBottomEdge
+            )
+        }
         _layout = Layout(dock = dock, workspace = workspace, dockHeight = dockH, rail = rail)
     }
 
@@ -422,6 +444,78 @@ object StageWorkspace {
         return pxRectFor(window.geometry)
     }
 
+    /** Zero-recomposition live translation during finger drag (60-120fps). */
+    suspend fun moveWindowLive(windowId: String, rect: StageRect) {
+        val window = session.windows[windowId] ?: return
+        if (!window.alive) return
+        runCatching { applyBounds(window.taskId, rect) }
+    }
+
+    /** Toggles Full-Screen Retreat mode: hides Recent Strip & Dock and fills the screen; exiting restores both. */
+    suspend fun toggleFullScreen(windowId: String) {
+        val window = session.windows[windowId] ?: return
+        if (fullScreenWindowId == windowId) {
+            exitFullScreen()
+            return
+        }
+        if (fullScreenWindowId != null) {
+            exitFullScreen(syncNow = false)
+        }
+        fullScreenSavedGeometry = window.geometry.copyOf()
+        fullScreenWindowId = windowId
+        computeLayout()
+        window.geometry = WindowGeometry(0f, 0f, 1f, 1f)
+        session.bringToFront(windowId)
+        persist()
+        publishState()
+        val full = fullScreenRect()
+        if (window.alive && full.width > 0) {
+            runCatching { applyBounds(window.taskId, full) }
+            runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId)) }
+        }
+    }
+
+    suspend fun exitFullScreen(syncNow: Boolean = true) {
+        val id = fullScreenWindowId ?: return
+        val saved = fullScreenSavedGeometry
+        fullScreenWindowId = null
+        fullScreenSavedGeometry = null
+        computeLayout()
+        if (saved != null) {
+            session.windows[id]?.geometry = saved.copyOf()
+        }
+        persist()
+        publishState()
+        if (syncNow) syncGeometry("exit-fullscreen")
+    }
+
+    /**
+     * Enforces the Stage Manager 4-window-per-Stage cap: if the active Stage exceeds 4 windows,
+     * evicts the oldest/bottom-most window(s) into standalone Stage(s) at the top of Recent Strip.
+     */
+    private fun enforceActiveStageLimit(): List<Int> {
+        val activeId = session.activeGroupId
+        val evictedTaskIds = ArrayList<Int>()
+        while (true) {
+            val visible = session.visibleWindowsOf(activeId)
+            if (visible.size <= MAX_WINDOWS_PER_STAGE) break
+            val oldest = visible.first()
+            session.groups.forEach { it.windowIds.remove(oldest.id) }
+            val solo = session.newGroup(oldest.label)
+            solo.windowIds += oldest.id
+            solo.lastActiveAt = now() - 1
+            if (oldest.alive) evictedTaskIds += oldest.taskId
+        }
+        pruneEmptyGroups()
+        return evictedTaskIds
+    }
+
+    /** Removes any non-active Stage that has 0 remaining windows (dynamic Stage lifecycle). */
+    private fun pruneEmptyGroups() {
+        val activeId = session.activeGroupId
+        session.groups.removeAll { g -> g.id != activeId && g.windowIds.isEmpty() }
+    }
+
     /** Called by the drag/resize gestures: geometry already in pixels of the workspace. */
     fun updateGeometryPx(windowId: String, rect: StageRect) {
         val window = session.windows[windowId] ?: return
@@ -542,6 +636,7 @@ object StageWorkspace {
             session.groups.remove(sourceGroup)
         }
         session.bringToFront(frontId)
+        enforceActiveStageLimit()
         persist()
         publishState()
         ensureGroupAlive(activeId)
@@ -684,6 +779,9 @@ object StageWorkspace {
         extraName: String = "",
         extraValue: String = ""
     ): Result<StageWindow> {
+        if (fullScreenWindowId != null) {
+            exitFullScreen(syncNow = false)
+        }
         val group = session.activeGroup()
         val existing = session.visibleWindowsOf(group.id).size
         val geometry = WindowSizing.defaultGeometry(appContext, packageName, component, workspaceRect(), existing, at)
@@ -741,11 +839,8 @@ object StageWorkspace {
                 dockRevealed = false
                 computeLayout()
             }
+            enforceActiveStageLimit()
             persist()
-            // Animate the real task window from its launch offset into its final workspace rect.
-            StageWindowAnimator.animate(launchRect, rect, steps = 5, durationMs = 130L) { step ->
-                runCatching { applyBounds(window.taskId, step) }
-            }
             syncGeometry("open")
             publishState()
             Result.success(window)
@@ -874,6 +969,9 @@ object StageWorkspace {
      * into the left rail slot before settling (P4/P8).
      */
     suspend fun minimize(windowId: String) {
+        if (fullScreenWindowId == windowId) {
+            exitFullScreen(syncNow = false)
+        }
         val window = session.windows[windowId] ?: return
         val sourceGroupId = session.groupOf(windowId)?.id ?: return
         val fromRect = pxRectFor(window.geometry)
@@ -975,7 +1073,11 @@ object StageWorkspace {
             publishState()
             return
         }
+        if (fullScreenWindowId == windowId) {
+            exitFullScreen(syncNow = false)
+        }
         session.removeWindow(windowId)
+        pruneEmptyGroups()
         persist()
         publishState()
         syncGeometry("close")
@@ -1042,6 +1144,9 @@ object StageWorkspace {
 
     suspend fun activateGroup(groupId: String) {
         if (groupId == session.activeGroupId) return
+        if (fullScreenWindowId != null) {
+            exitFullScreen(syncNow = false)
+        }
         val previousGroupId = session.activeGroupId
         val outgoingWindows = session.visibleWindowsOf(previousGroupId).filter { it.alive }
         val otherGroups = session.sortedGroups().filter { it.id != previousGroupId }
@@ -1065,6 +1170,7 @@ object StageWorkspace {
         }
 
         session.makeActive(groupId)
+        pruneEmptyGroups()
         persist()
         publishState()
         ensureGroupAlive(groupId)
@@ -1397,8 +1503,10 @@ object StageWorkspace {
         val workspace = workspaceRect()
         val activeId = session.activeGroupId
         val groups = session.sortedGroups()
-        // Recent list: every non-active group (minimized windows live here as singleton groups).
-        val otherGroups = groups.filter { it.id != activeId && session.visibleWindowsOf(it.id).isNotEmpty() }
+        // Recent Strip: up to 4 most recently used non-active Stages (dynamic Stage model).
+        val otherGroups = groups
+            .filter { it.id != activeId && session.visibleWindowsOf(it.id).isNotEmpty() }
+            .take(MAX_RECENT_STAGES)
         val tiles = otherGroups.mapIndexedNotNull { otherIndex, group ->
             val rect = tileRect(otherIndex, otherGroups.size) ?: return@mapIndexedNotNull null
             val visibleWins = session.visibleWindowsOf(group.id)
@@ -1458,6 +1566,8 @@ object StageWorkspace {
             dockVisible = dockShouldShow(),
             dockAutoHide = dockAutoHide,
             railAutoHide = railAutoHide,
+            fullScreenWindowId = fullScreenWindowId,
+            fullScreenBounds = fullScreenRect(),
             activePackages = activePackages,
             runningPackages = runningPackages,
             dockRefreshVersion = dockRefreshVersion,

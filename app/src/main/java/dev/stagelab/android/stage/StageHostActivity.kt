@@ -56,8 +56,22 @@ class StageHostActivity : ComponentActivity() {
     private lateinit var transitionOverlay: StageTransitionOverlay
     private lateinit var wallpaperBackdrop: WallpaperBackdrop
 
-    /** Per-window conflated channels so committing window B never cancels window A (G14). */
+    /** Per-window conflated channels for live drag (zero Compose recomposition) and final commits. */
+    private val liveMoveQueues = ConcurrentHashMap<String, Channel<StageRect>>()
     private val geometryQueues = ConcurrentHashMap<String, Channel<GeometryCommit>>()
+
+    private fun enqueueLiveMove(id: String, rect: StageRect) {
+        val channel = liveMoveQueues.computeIfAbsent(id) {
+            val ch = Channel<StageRect>(Channel.CONFLATED)
+            lifecycleScope.launch {
+                for (r in ch) {
+                    StageWorkspace.moveWindowLive(id, r)
+                }
+            }
+            ch
+        }
+        channel.trySend(rect)
+    }
 
     private fun enqueueGeometry(id: String, rect: StageRect, final: Boolean, resized: Boolean) {
         val channel = geometryQueues.computeIfAbsent(id) {
@@ -123,7 +137,7 @@ class StageHostActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(state.windows, state.railVisible, state.workspace) {
+                LaunchedEffect(state.windows, state.railVisible, state.workspace, state.fullScreenBounds) {
                     chrome.update(
                         windows = state.windows.map { window ->
                             WindowChromeController.ChromeWindow(
@@ -132,13 +146,8 @@ class StageHostActivity : ComponentActivity() {
                                 title = window.title,
                                 focused = window.focused,
                                 minimized = window.minimized,
-                                cornerColors = intArrayOf(
-                                    deskColorAt(window.rect.left, window.rect.top),
-                                    deskColorAt(window.rect.right, window.rect.top),
-                                    deskColorAt(window.rect.left, window.rect.bottom),
-                                    deskColorAt(window.rect.right, window.rect.bottom)
-                                ),
-                                workspace = state.workspace
+                                workspace = state.workspace,
+                                fullScreenBounds = state.fullScreenBounds
                             )
                         },
                         visible = state.ready
@@ -285,8 +294,16 @@ class StageHostActivity : ComponentActivity() {
     }
 
     private val chromeCallbacks = object : WindowChromeController.Callbacks {
+        override fun onWindowMovedLive(id: String, rect: StageRect) {
+            enqueueLiveMove(id, rect)
+        }
+
         override fun onGeometryChanged(id: String, rect: StageRect, final: Boolean, resized: Boolean) {
             enqueueGeometry(id, rect, final, resized)
+        }
+
+        override fun onFullScreenToggleRequested(id: String) {
+            lifecycleScope.launch { StageWorkspace.toggleFullScreen(id) }
         }
 
         override fun onGestureStateChanged(id: String, active: Boolean) {
@@ -309,50 +326,41 @@ class StageHostActivity : ComponentActivity() {
             lifecycleScope.launch { StageWorkspace.minimize(id) }
         }
 
-        override fun onZoomToggled(id: String, maximized: Boolean) {
-            // Geometry is committed through onGeometryChanged; nothing else to do for now.
-        }
+        override fun onZoomToggled(id: String, maximized: Boolean) = Unit
 
         override fun onWindowMenuRequested(id: String, anchorX: Int, anchorY: Int) {
             val window = StageWorkspace.session.windows[id] ?: return
+            val isFull = StageWorkspace.isFullScreen(id)
             val items = ArrayList<WindowChromeController.MenuItem>()
-            items += WindowChromeController.MenuItem("最大化 / 还原") {
-                chrome.toggleZoom(id)
+            items += WindowChromeController.MenuItem(if (isFull) "退出全屏幕" else "全屏幕") {
+                lifecycleScope.launch { StageWorkspace.toggleFullScreen(id) }
             }
-            items += WindowChromeController.MenuItem("贴靠左侧半屏") {
-                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.LEFT_HALF) }
+            items += WindowChromeController.MenuItem("添加另一个窗口") {
+                openAppPicker()
             }
-            items += WindowChromeController.MenuItem("贴靠右侧半屏") {
-                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.RIGHT_HALF) }
-            }
-            items += WindowChromeController.MenuItem("居中排列") {
-                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.CENTER) }
-            }
-            items += WindowChromeController.MenuItem("移出当前工作台（最小化）") {
-                lifecycleScope.launch { StageWorkspace.minimize(id) }
-            }
-            items += WindowChromeController.MenuItem("移至新工作台") {
-                lifecycleScope.launch {
-                    val group = StageWorkspace.createGroup()
-                    StageWorkspace.moveWindowToGroup(id, group.id)
-                }
-            }
-            val activeId = StageWorkspace.session.activeGroupId
-            StageWorkspace.session.sortedGroups()
-                .filter { it.id != activeId }
-                .take(3)
-                .forEach { group ->
-                    items += WindowChromeController.MenuItem("移至「${group.title}」") {
-                        lifecycleScope.launch { StageWorkspace.moveWindowToGroup(id, group.id) }
+            if (dev.stagelab.android.ui.supportsMultiInstance(this@StageHostActivity, window.packageName, window.component)) {
+                items += WindowChromeController.MenuItem("新建窗口") {
+                    lifecycleScope.launch {
+                        StageWorkspace.openNewWindow(window.packageName, window.label, window.component)
                     }
                 }
+            }
+            items += WindowChromeController.MenuItem("贴靠左侧") {
+                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.LEFT_HALF) }
+            }
+            items += WindowChromeController.MenuItem("贴靠右侧") {
+                lifecycleScope.launch { StageWorkspace.arrangeWindow(id, WindowArrangePreset.RIGHT_HALF) }
+            }
+            items += WindowChromeController.MenuItem("最小化") {
+                lifecycleScope.launch { StageWorkspace.minimize(id) }
+            }
             val sameAppWindows = StageWorkspace.windowsForPackage(window.packageName)
             if (sameAppWindows.size > 1) {
                 items += WindowChromeController.MenuItem("显示所有窗口 (${sameAppWindows.size})") {
                     showAppExpose(window.packageName, window.label, window.component)
                 }
             }
-            items += WindowChromeController.MenuItem("关闭窗口", danger = true) {
+            items += WindowChromeController.MenuItem("关闭", danger = true) {
                 lifecycleScope.launch { StageWorkspace.closeWindow(id) }
             }
             chrome.showWindowMenu(window.label, anchorX, anchorY, items)
@@ -633,6 +641,8 @@ class StageHostActivity : ComponentActivity() {
 
     override fun onDestroy() {
         StageWorkspace.transitionPlayer = null
+        liveMoveQueues.values.forEach { it.close() }
+        liveMoveQueues.clear()
         geometryQueues.values.forEach { it.close() }
         geometryQueues.clear()
         runCatching { transitionOverlay.destroy() }

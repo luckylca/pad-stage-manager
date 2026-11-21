@@ -27,7 +27,9 @@ class WindowChromeController(
 ) {
 
     interface Callbacks {
+        fun onWindowMovedLive(id: String, rect: StageRect)
         fun onGeometryChanged(id: String, rect: StageRect, final: Boolean, resized: Boolean = false)
+        fun onFullScreenToggleRequested(id: String)
         fun onGestureStateChanged(id: String, active: Boolean)
         fun onWindowDragging(id: String, x: Int, y: Int)
         fun onWindowDropped(id: String, x: Int, y: Int)
@@ -45,7 +47,7 @@ class WindowChromeController(
         fun onChromeTapOutside()
     }
 
-    /** One item in the floating long-press window control menu. */
+    /** One item in the floating window control menu. */
     data class MenuItem(
         val label: String,
         val danger: Boolean = false,
@@ -58,24 +60,26 @@ class WindowChromeController(
         val title: String,
         val focused: Boolean,
         val minimized: Boolean,
-        val cornerColors: IntArray = intArrayOf(0xFF1A2236.toInt(), 0xFF1A2236.toInt(), 0xFF0E1320.toInt(), 0xFF0E1320.toInt()),
-        val workspace: StageRect = rect
+        val workspace: StageRect = rect,
+        val fullScreenBounds: StageRect = rect
     )
 
     private class Holder(
         val titleBar: ChromeOverlayView,
-        val decoration: ChromeOverlayView,
-        val handles: List<Pair<ChromeMode, ChromeOverlayView>>,
+        val bottomRight: ChromeOverlayView,
+        val bottomLeft: ChromeOverlayView,
         var rect: StageRect,
-        var workspace: StageRect
+        var workspace: StageRect,
+        var fullScreenBounds: StageRect
     ) {
         var gestureBase: StageRect = rect
         var restoredRect: StageRect? = null
         var inGesture: Boolean = false
         var lastCommitMs: Long = 0L
-        /** Raw pointer position at gesture start, for drop-point routing. */
+        var lastSnapId: String = ""
+        var lastSnapRect: StageRect? = null
+        var lastSnapFullScreen: Boolean = false
         var touchStart: Pair<Int, Int> = 0 to 0
-        /** Latest pointer position during the gesture. */
         var touchLast: Pair<Int, Int> = 0 to 0
     }
 
@@ -86,6 +90,7 @@ class WindowChromeController(
     private var menuBarPill: View? = null
     private var railOverlay: View? = null
     private var dropHighlightView: DropHighlightOverlayView? = null
+    private var resizePreviewView: ResizePreviewOverlayView? = null
     private var menuScrimView: View? = null
     private var menuPopupView: View? = null
 
@@ -120,14 +125,8 @@ class WindowChromeController(
         }
         val ids = windows.map { it.id }.toSet()
         holders.keys.filter { it !in ids }.forEach { remove(it) }
-        // A corner mask must be hidden when a window in front covers that corner; otherwise it
-        // would paint desk colour on top of the window in front.
         windows.forEachIndexed { index, window ->
             val above = windows.drop(index + 1)
-            val flags = BooleanArray(4) { corner ->
-                val square = cornerSquare(window.rect, corner)
-                above.none { candidate -> intersects(square, candidate.rect) }
-            }
             val pillCenterX = (window.rect.left + window.rect.right) / 2
             val pillBox = StageRect(
                 pillCenterX - px(24f),
@@ -136,7 +135,7 @@ class WindowChromeController(
                 window.rect.top + titleHeight
             )
             val showPill = above.none { candidate -> intersects(pillBox, candidate.rect) }
-            addOrUpdate(window, flags, showPill)
+            addOrUpdate(window, showPill)
         }
     }
 
@@ -492,23 +491,18 @@ class WindowChromeController(
         }
     }
 
-    // ------------------------------------------------------------------ window chrome
+    // ------------------------------------------------------------------ window chrome (3 lightweight overlays / window)
 
-    private fun addOrUpdate(
-        window: ChromeWindow,
-        maskFlags: BooleanArray = booleanArrayOf(true, true, true, true),
-        pillVisible: Boolean = true
-    ) {
+    private fun addOrUpdate(window: ChromeWindow, pillVisible: Boolean = true) {
         val existing = holders[window.id]
         if (existing != null) {
             existing.workspace = window.workspace
+            existing.fullScreenBounds = window.fullScreenBounds
             existing.titleBar.focused = window.focused
             existing.titleBar.pillVisible = pillVisible
             existing.titleBar.title = window.title
-            existing.decoration.focused = window.focused
-            existing.decoration.maskColors = window.cornerColors
-            existing.decoration.maskVisible = maskFlags
-            existing.handles.forEach { (_, view) -> view.focused = window.focused }
+            existing.bottomRight.focused = window.focused
+            existing.bottomLeft.focused = window.focused
             if (!existing.inGesture) {
                 existing.rect = window.rect
                 position(existing)
@@ -522,10 +516,7 @@ class WindowChromeController(
             onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.TITLE, phase, dx, dy) },
             onAction = { action ->
                 when (action) {
-                    ChromeOverlayView.ACTION_CLOSE -> callbacks.onCloseRequested(window.id)
-                    ChromeOverlayView.ACTION_MINIMIZE -> callbacks.onMinimizeRequested(window.id)
-                    ChromeOverlayView.ACTION_ZOOM -> toggleZoom(window.id)
-                    ChromeOverlayView.ACTION_DOUBLE_TAP -> toggleZoom(window.id)
+                    ChromeOverlayView.ACTION_DOUBLE_TAP -> callbacks.onFullScreenToggleRequested(window.id)
                     ChromeOverlayView.ACTION_MENU_TAP -> {
                         val h = holders[window.id]
                         val r = h?.rect ?: window.rect
@@ -545,131 +536,76 @@ class WindowChromeController(
             focused = window.focused
             this.pillVisible = pillVisible
             title = window.title
-            cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
         }
 
-        val decoration = ChromeOverlayView(
+        val bottomRight = ChromeOverlayView(
             activity,
-            ChromeMode.DECORATION,
-            onTouch = { _, _, _ -> }
-        ).apply {
-            focused = window.focused
-            cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
-            maskColors = window.cornerColors
-            maskVisible = maskFlags
-        }
-
-        val handleModes = listOf(
-            ChromeMode.RESIZE_TOP_LEFT,
-            ChromeMode.RESIZE_TOP_RIGHT,
-            ChromeMode.RESIZE_BOTTOM_LEFT,
             ChromeMode.RESIZE_CORNER,
-            ChromeMode.RESIZE_LEFT,
-            ChromeMode.RESIZE_RIGHT,
-            ChromeMode.RESIZE_TOP,
-            ChromeMode.RESIZE_BOTTOM
-        )
-        val handles = handleModes.map { mode ->
-            mode to ChromeOverlayView(
-                activity,
-                mode,
-                onTouch = { phase, dx, dy -> handleTouch(window.id, mode, phase, dx, dy) }
-            ).apply { focused = window.focused; cornerRadius = this@WindowChromeController.cornerRadius.toFloat() }
-        }
+            onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.RESIZE_CORNER, phase, dx, dy) }
+        ).apply { focused = window.focused }
 
-        val holder = Holder(titleBar, decoration, handles, window.rect, window.workspace)
+        val bottomLeft = ChromeOverlayView(
+            activity,
+            ChromeMode.RESIZE_BOTTOM_LEFT,
+            onTouch = { phase, dx, dy -> handleTouch(window.id, ChromeMode.RESIZE_BOTTOM_LEFT, phase, dx, dy) }
+        ).apply { focused = window.focused }
+
+        val holder = Holder(titleBar, bottomRight, bottomLeft, window.rect, window.workspace, window.fullScreenBounds)
         holders[window.id] = holder
 
-        runCatching { wm.addView(decoration, overlayParams(1, 1, 0, 0, touchable = false)) }
-            .onFailure { Log.w(TAG, "decoration add failed: ${it.message}") }
         runCatching { wm.addView(titleBar, overlayParams(1, 1, 0, 0, touchable = true)) }
             .onFailure { Log.w(TAG, "title add failed: ${it.message}") }
-        handles.forEach { (_, view) ->
-            runCatching { wm.addView(view, overlayParams(1, 1, 0, 0, touchable = true)) }
-                .onFailure { Log.w(TAG, "handle add failed: ${it.message}") }
-        }
+        runCatching { wm.addView(bottomRight, overlayParams(1, 1, 0, 0, touchable = true)) }
+            .onFailure { Log.w(TAG, "br handle add failed: ${it.message}") }
+        runCatching { wm.addView(bottomLeft, overlayParams(1, 1, 0, 0, touchable = true)) }
+            .onFailure { Log.w(TAG, "bl handle add failed: ${it.message}") }
         position(holder)
     }
 
     private fun remove(id: String) {
         val holder = holders.remove(id) ?: return
-        val views = ArrayList<View>(2 + holder.handles.size)
-        views += holder.titleBar
-        views += holder.decoration
-        holder.handles.forEach { views += it.second }
-        views.forEach { view -> runCatching { wm.removeView(view) } }
+        runCatching { wm.removeView(holder.titleBar) }
+        runCatching { wm.removeView(holder.bottomRight) }
+        runCatching { wm.removeView(holder.bottomLeft) }
     }
 
     private fun position(holder: Holder) {
         val rect = holder.rect
-        layout(holder.decoration, rect.left, rect.top, rect.width, rect.height)
         layout(holder.titleBar, rect.left, rect.top, rect.width, titleHeight)
-
         val half = gripSize / 2
-        layout(holder.handle(ChromeMode.RESIZE_TOP_LEFT), rect.left - half, rect.top - half, gripSize, gripSize)
-        layout(holder.handle(ChromeMode.RESIZE_TOP_RIGHT), rect.right - half, rect.top - half, gripSize, gripSize)
-        layout(holder.handle(ChromeMode.RESIZE_BOTTOM_LEFT), rect.left - half, rect.bottom - half, gripSize, gripSize)
-        layout(holder.handle(ChromeMode.RESIZE_CORNER), rect.right - half, rect.bottom - half, gripSize, gripSize)
-
-        layout(
-            holder.handle(ChromeMode.RESIZE_LEFT),
-            rect.left - edgeSize / 2,
-            rect.top + half,
-            edgeSize,
-            (rect.height - gripSize).coerceAtLeast(edgeSize)
-        )
-        layout(
-            holder.handle(ChromeMode.RESIZE_RIGHT),
-            rect.right - edgeSize / 2,
-            rect.top + half,
-            edgeSize,
-            (rect.height - gripSize).coerceAtLeast(edgeSize)
-        )
-        layout(
-            holder.handle(ChromeMode.RESIZE_TOP),
-            rect.left + half,
-            rect.top - edgeSize / 2,
-            (rect.width - gripSize).coerceAtLeast(edgeSize),
-            edgeSize
-        )
-        layout(
-            holder.handle(ChromeMode.RESIZE_BOTTOM),
-            rect.left + half,
-            rect.bottom - edgeSize / 2,
-            (rect.width - gripSize).coerceAtLeast(edgeSize),
-            edgeSize
-        )
+        layout(holder.bottomLeft, rect.left - half, rect.bottom - half, gripSize, gripSize)
+        layout(holder.bottomRight, rect.right - half, rect.bottom - half, gripSize, gripSize)
     }
 
-    /** Fast path during drag/resize: updates only decoration + titleBar (+ active grip) for 120Hz fluidity. */
-    private fun positionDuringGesture(holder: Holder, activeMode: ChromeMode) {
-        val rect = holder.rect
-        layout(holder.decoration, rect.left, rect.top, rect.width, rect.height)
-        layout(holder.titleBar, rect.left, rect.top, rect.width, titleHeight)
-        if (activeMode != ChromeMode.TITLE) {
-            val half = gripSize / 2
-            when (activeMode) {
-                ChromeMode.RESIZE_TOP_LEFT -> layout(holder.handle(activeMode), rect.left - half, rect.top - half, gripSize, gripSize)
-                ChromeMode.RESIZE_TOP_RIGHT -> layout(holder.handle(activeMode), rect.right - half, rect.top - half, gripSize, gripSize)
-                ChromeMode.RESIZE_BOTTOM_LEFT -> layout(holder.handle(activeMode), rect.left - half, rect.bottom - half, gripSize, gripSize)
-                ChromeMode.RESIZE_CORNER -> layout(holder.handle(activeMode), rect.right - half, rect.bottom - half, gripSize, gripSize)
-                ChromeMode.RESIZE_LEFT -> layout(holder.handle(activeMode), rect.left - edgeSize / 2, rect.top + half, edgeSize, (rect.height - gripSize).coerceAtLeast(edgeSize))
-                ChromeMode.RESIZE_RIGHT -> layout(holder.handle(activeMode), rect.right - edgeSize / 2, rect.top + half, edgeSize, (rect.height - gripSize).coerceAtLeast(edgeSize))
-                ChromeMode.RESIZE_TOP -> layout(holder.handle(activeMode), rect.left + half, rect.top - edgeSize / 2, (rect.width - gripSize).coerceAtLeast(edgeSize), edgeSize)
-                ChromeMode.RESIZE_BOTTOM -> layout(holder.handle(activeMode), rect.left + half, rect.bottom - edgeSize / 2, (rect.width - gripSize).coerceAtLeast(edgeSize), edgeSize)
-                else -> Unit
-            }
+    private fun ensureResizePreview(): ResizePreviewOverlayView? {
+        resizePreviewView?.let { return it }
+        val metrics = activity.resources.displayMetrics
+        val view = ResizePreviewOverlayView(activity).apply { visibility = View.GONE }
+        val params = overlayParams(metrics.widthPixels, metrics.heightPixels, 0, 0, touchable = false)
+        return runCatching { wm.addView(view, params) }.map {
+            resizePreviewView = view
+            view
+        }.getOrNull()
+    }
+
+    private fun showResizePreview(rect: StageRect?, label: String = "") {
+        val view = if (rect != null) ensureResizePreview() else resizePreviewView
+        view ?: return
+        if (rect == null) {
+            view.visibility = View.GONE
+            view.previewRect = null
+        } else {
+            view.previewRect = rect
+            view.previewLabel = label
+            view.visibility = View.VISIBLE
+            view.invalidate()
         }
     }
-
-    private fun Holder.handle(mode: ChromeMode): ChromeOverlayView =
-        handles.first { it.first == mode }.second
 
     private fun layout(view: View, x: Int, y: Int, width: Int, height: Int) {
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
         val w = max(1, width)
         val h = max(1, height)
-        // Skip redundant WindowManager IPCs when geometry is unchanged!
         if (params.x == x && params.y == y && params.width == w && params.height == h) return
         params.x = x
         params.y = y
@@ -678,7 +614,7 @@ class WindowChromeController(
         runCatching { wm.updateViewLayout(view, params) }
     }
 
-    // ------------------------------------------------------------------ gestures
+    // ------------------------------------------------------------------ gestures (120fps drag + preset-grid snap resize)
 
     private fun handleTouch(id: String, mode: ChromeMode, phase: Int, dx: Float, dy: Float) {
         val holder = holders[id] ?: return
@@ -686,6 +622,9 @@ class WindowChromeController(
             ChromeOverlayView.PHASE_START -> {
                 holder.inGesture = true
                 holder.gestureBase = holder.rect
+                holder.lastSnapId = ""
+                holder.lastSnapRect = null
+                holder.lastSnapFullScreen = false
                 holder.touchStart = holder.titleBar.lastRawPos
                 holder.touchLast = holder.touchStart
                 callbacks.onGestureStateChanged(id, true)
@@ -693,83 +632,99 @@ class WindowChromeController(
             }
             ChromeOverlayView.PHASE_MOVE -> {
                 val base = holder.gestureBase
-                val left: Int
-                val top: Int
-                val right: Int
-                val bottom: Int
-                when (mode) {
-                    ChromeMode.TITLE -> {
-                        left = base.left + dx.roundToInt()
-                        top = base.top + dy.roundToInt()
-                        right = base.right + dx.roundToInt()
-                        bottom = base.bottom + dy.roundToInt()
-                    }
-                    ChromeMode.RESIZE_LEFT, ChromeMode.RESIZE_TOP_LEFT, ChromeMode.RESIZE_BOTTOM_LEFT -> {
-                        left = min(base.right - minWidth, base.left + dx.roundToInt())
-                        right = base.right
-                        top = if (mode == ChromeMode.RESIZE_TOP_LEFT) {
-                            min(base.bottom - minHeight, base.top + dy.roundToInt())
-                        } else base.top
-                        bottom = if (mode == ChromeMode.RESIZE_BOTTOM_LEFT) {
-                            max(base.top + minHeight, base.bottom + dy.roundToInt())
-                        } else base.bottom
-                    }
-                    ChromeMode.RESIZE_RIGHT, ChromeMode.RESIZE_TOP_RIGHT, ChromeMode.RESIZE_CORNER -> {
-                        right = max(base.left + minWidth, base.right + dx.roundToInt())
-                        left = base.left
-                        top = if (mode == ChromeMode.RESIZE_TOP_RIGHT) {
-                            min(base.bottom - minHeight, base.top + dy.roundToInt())
-                        } else base.top
-                        bottom = if (mode == ChromeMode.RESIZE_CORNER) {
-                            max(base.top + minHeight, base.bottom + dy.roundToInt())
-                        } else base.bottom
-                    }
-                    ChromeMode.RESIZE_TOP -> {
-                        left = base.left
-                        right = base.right
-                        top = min(base.bottom - minHeight, base.top + dy.roundToInt())
-                        bottom = base.bottom
-                    }
-                    ChromeMode.RESIZE_BOTTOM -> {
-                        left = base.left
-                        right = base.right
-                        top = base.top
-                        bottom = max(base.top + minHeight, base.bottom + dy.roundToInt())
-                    }
-                    else -> return
-                }
-                val clamped = clampToScreen(StageRect(left, top, right, bottom))
-                holder.rect = clamped
-                holder.restoredRect = null
-                positionDuringGesture(holder, mode)
-                val nowMs = System.currentTimeMillis()
-                if (nowMs - holder.lastCommitMs >= 32L) {
-                    holder.lastCommitMs = nowMs
-                    callbacks.onGeometryChanged(id, clamped, false, resized = mode != ChromeMode.TITLE)
-                }
                 if (mode == ChromeMode.TITLE) {
+                    // Pure translation: 120fps overlay + direct 60Hz live task offset (zero Compose recomposition!).
+                    val moved = clampToScreen(
+                        StageRect(
+                            base.left + dx.roundToInt(),
+                            base.top + dy.roundToInt(),
+                            base.right + dx.roundToInt(),
+                            base.bottom + dy.roundToInt()
+                        )
+                    )
+                    holder.rect = moved
+                    holder.restoredRect = null
+                    position(holder)
+                    val nowMs = System.currentTimeMillis()
+                    if (nowMs - holder.lastCommitMs >= 16L) {
+                        holder.lastCommitMs = nowMs
+                        callbacks.onWindowMovedLive(id, moved)
+                    }
                     holder.touchLast = holder.titleBar.lastRawPos
                     callbacks.onWindowDragging(id, holder.touchLast.first, holder.touchLast.second)
+                } else {
+                    // Preset-tier / grid-snap resize: zero app relayout during drag, 120fps snap preview + haptic tick!
+                    val anchorRight = mode == ChromeMode.RESIZE_BOTTOM_LEFT
+                    val rawRect = if (anchorRight) {
+                        val left = min(base.right - minWidth, base.left + dx.roundToInt())
+                        val bottom = max(base.top + minHeight, base.bottom + dy.roundToInt())
+                        StageRect(left, base.top, base.right, bottom)
+                    } else {
+                        val right = max(base.left + minWidth, base.right + dx.roundToInt())
+                        val bottom = max(base.top + minHeight, base.bottom + dy.roundToInt())
+                        StageRect(base.left, base.top, right, bottom)
+                    }
+                    val snapped = dev.stagelab.android.stage.StageSnapGrid.snap(
+                        rawRect = rawRect,
+                        anchorRight = anchorRight,
+                        workspace = holder.workspace,
+                        fullScreenBounds = holder.fullScreenBounds,
+                        minWidthPx = minWidth,
+                        minHeightPx = minHeight
+                    )
+                    if (snapped.preset.id != holder.lastSnapId) {
+                        holder.lastSnapId = snapped.preset.id
+                        val handleView = if (anchorRight) holder.bottomLeft else holder.bottomRight
+                        handleView.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                    }
+                    holder.lastSnapRect = snapped.rect
+                    holder.lastSnapFullScreen = snapped.preset.fullScreen
+                    showResizePreview(
+                        snapped.rect,
+                        if (snapped.preset.fullScreen) "全屏幕" else ""
+                    )
                 }
             }
             ChromeOverlayView.PHASE_END -> {
                 holder.inGesture = false
                 holder.lastCommitMs = 0L
-                position(holder)
-                holder.touchLast = holder.titleBar.lastRawPos
-                callbacks.onGestureStateChanged(id, false)
-                callbacks.onGeometryChanged(id, holder.rect, true, resized = mode != ChromeMode.TITLE)
+                showResizePreview(null)
                 if (mode == ChromeMode.TITLE) {
+                    position(holder)
+                    holder.touchLast = holder.titleBar.lastRawPos
+                    callbacks.onGestureStateChanged(id, false)
+                    callbacks.onGeometryChanged(id, holder.rect, true, resized = false)
                     callbacks.onWindowDropped(id, holder.touchLast.first, holder.touchLast.second)
+                } else {
+                    val target = holder.lastSnapRect
+                    val goFull = holder.lastSnapFullScreen
+                    holder.lastSnapRect = null
+                    holder.lastSnapFullScreen = false
+                    callbacks.onGestureStateChanged(id, false)
+                    if (goFull) {
+                        callbacks.onFullScreenToggleRequested(id)
+                    } else if (target != null) {
+                        holder.rect = target
+                        holder.restoredRect = null
+                        position(holder)
+                        callbacks.onGeometryChanged(id, target, true, resized = true)
+                    } else {
+                        position(holder)
+                    }
                 }
             }
             ChromeOverlayView.PHASE_CANCEL -> {
                 holder.inGesture = false
                 holder.lastCommitMs = 0L
+                holder.lastSnapRect = null
+                holder.lastSnapFullScreen = false
+                showResizePreview(null)
                 holder.rect = holder.gestureBase
                 position(holder)
                 callbacks.onGestureStateChanged(id, false)
-                callbacks.onGeometryChanged(id, holder.gestureBase, true, resized = false)
+                if (mode == ChromeMode.TITLE) {
+                    callbacks.onGeometryChanged(id, holder.gestureBase, true, resized = false)
+                }
                 callbacks.onWindowDragCancelled(id)
             }
         }
@@ -941,6 +896,8 @@ class WindowChromeController(
         railOverlay = null
         dropHighlightView?.let { runCatching { wm.removeView(it) } }
         dropHighlightView = null
+        resizePreviewView?.let { runCatching { wm.removeView(it) } }
+        resizePreviewView = null
     }
 
     private companion object {
@@ -1003,6 +960,65 @@ private class DropHighlightOverlayView(context: android.content.Context) : View(
             canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, strokePaint)
             val textY = cy - (textPaint.descent() + textPaint.ascent()) / 2f
             canvas.drawText(label, cx - textW / 2f, textY, textPaint)
+        }
+    }
+}
+
+/**
+ * Translucent iPadOS-style snap-grid resize preview rendered at 120fps while dragging a corner
+ * resize handle, preventing choppy per-pixel Android app relayouts.
+ */
+@SuppressLint("ViewConstructor")
+private class ResizePreviewOverlayView(context: android.content.Context) : View(context) {
+
+    var previewRect: StageRect? = null
+    var previewLabel: String = ""
+
+    private val density = resources.displayMetrics.density
+
+    private val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(38, 255, 255, 255)
+        style = android.graphics.Paint.Style.FILL
+    }
+    private val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(215, 232, 240, 255)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 2.5f * density
+    }
+    private val pillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(215, 20, 26, 38)
+        style = android.graphics.Paint.Style.FILL
+    }
+    private val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(245, 242, 246, 255)
+        textSize = 13f * density
+        isFakeBoldText = true
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val rect = previewRect ?: return
+        val r = 16f * density
+        val box = android.graphics.RectF(
+            rect.left.toFloat(),
+            rect.top.toFloat(),
+            rect.right.toFloat(),
+            rect.bottom.toFloat()
+        )
+        canvas.drawRoundRect(box, r, r, fillPaint)
+        canvas.drawRoundRect(box, r, r, strokePaint)
+
+        if (previewLabel.isNotEmpty()) {
+            val textW = textPaint.measureText(previewLabel)
+            val padH = 14f * density
+            val pillH = 28f * density
+            val pillW = textW + padH * 2
+            val cx = box.centerX()
+            val cy = box.top + 38f * density
+            val pill = android.graphics.RectF(cx - pillW / 2f, cy - pillH / 2f, cx + pillW / 2f, cy + pillH / 2f)
+            canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, pillPaint)
+            canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, strokePaint)
+            val textY = cy - (textPaint.descent() + textPaint.ascent()) / 2f
+            canvas.drawText(previewLabel, cx - textW / 2f, textY, textPaint)
         }
     }
 }

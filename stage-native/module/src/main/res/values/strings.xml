@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StageLab Native</string>
+    <string name="xposed_description">ColorOS 17 iPad Stage Manager (N2 Read-Only Task &amp; FlexibleWindow Observer)</string>
+    <string-array name="xposed_scope">
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

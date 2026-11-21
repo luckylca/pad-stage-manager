@@ -19,15 +19,17 @@ class WallpaperBackdrop(
     val bitmap: Bitmap?,
     val imageBitmap: ImageBitmap?
 ) {
-    /** Samples the approximate background colour at normalized screen coordinates (0..1, 0..1). */
+    /** Samples the exact desktop pixel colour (including scrim / radial glows) at normalized (0..1, 0..1). */
     fun sampleColor(xNorm: Float, yNorm: Float): Int {
         val bmp = bitmap
         if (bmp != null && !bmp.isRecycled && bmp.width > 0 && bmp.height > 0) {
             val px = (xNorm.coerceIn(0f, 1f) * (bmp.width - 1)).roundToInt()
             val py = (yNorm.coerceIn(0f, 1f) * (bmp.height - 1)).roundToInt()
-            return runCatching { bmp.getPixel(px, py) }.getOrDefault(fallbackColorAt(yNorm))
+            val raw = runCatching { bmp.getPixel(px, py) }.getOrDefault(fallbackColorAt(xNorm, yNorm))
+            // Match the 0.14f black scrim drawn in WallpaperLayer.
+            return alphaOver(raw, Color.argb(36, 0, 0, 0))
         }
-        return fallbackColorAt(yNorm)
+        return fallbackColorAt(xNorm, yNorm)
     }
 
     companion object {
@@ -36,13 +38,31 @@ class WallpaperBackdrop(
         const val FALLBACK_MID = 0xFF141B2D.toInt()
         const val FALLBACK_BOTTOM = 0xFF0E1320.toInt()
 
-        fun fallbackColorAt(yNorm: Float): Int {
+        fun fallbackColorAt(xNorm: Float, yNorm: Float): Int {
             val t = yNorm.coerceIn(0f, 1f)
-            return if (t < 0.5f) {
+            var color = if (t < 0.5f) {
                 blendColor(FALLBACK_TOP, FALLBACK_MID, t * 2f)
             } else {
                 blendColor(FALLBACK_MID, FALLBACK_BOTTOM, (t - 0.5f) * 2f)
             }
+            // Match the two radial ambient glows in WallpaperLayer so corner masks are 100% seamless.
+            val d1 = kotlin.math.hypot((xNorm - 0.28f).toDouble(), (yNorm - 0.22f).toDouble()).toFloat()
+            val a1 = ((1f - d1 / 0.65f).coerceIn(0f, 1f) * 42f).roundToInt()
+            if (a1 > 0) color = alphaOver(color, Color.argb(a1, 0x4C, 0x66, 0xB8))
+
+            val d2 = kotlin.math.hypot((xNorm - 0.78f).toDouble(), (yNorm - 0.72f).toDouble()).toFloat()
+            val a2 = ((1f - d2 / 0.60f).coerceIn(0f, 1f) * 32f).roundToInt()
+            if (a2 > 0) color = alphaOver(color, Color.argb(a2, 0x68, 0x48, 0xA8))
+
+            return color
+        }
+
+        private fun alphaOver(dst: Int, src: Int): Int {
+            val a = Color.alpha(src) / 255f
+            val r = (Color.red(dst) * (1f - a) + Color.red(src) * a).roundToInt().coerceIn(0, 255)
+            val g = (Color.green(dst) * (1f - a) + Color.green(src) * a).roundToInt().coerceIn(0, 255)
+            val b = (Color.blue(dst) * (1f - a) + Color.blue(src) * a).roundToInt().coerceIn(0, 255)
+            return Color.rgb(r, g, b)
         }
 
         private fun blendColor(a: Int, b: Int, t: Float): Int {

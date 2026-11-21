@@ -86,7 +86,7 @@ class StageHostActivity : ComponentActivity() {
 
         chrome = WindowChromeController(this, chromeCallbacks)
         exposeOverlay = dev.stagelab.android.windows.StageExposeOverlay(this)
-        transitionOverlay = StageTransitionOverlay(this)
+        transitionOverlay = StageTransitionOverlay(this).also { it.attach() }
         wallpaperBackdrop = WallpaperBackdrop.load(this)
         StageWorkspace.transitionPlayer = { cards, durationMs ->
             transitionOverlay.play(cards, durationMs)
@@ -132,8 +132,12 @@ class StageHostActivity : ComponentActivity() {
                                 title = window.title,
                                 focused = window.focused,
                                 minimized = window.minimized,
-                                deskTopColor = deskColorAt(window.rect.left, window.rect.top),
-                                deskBottomColor = deskColorAt(window.rect.left, window.rect.bottom),
+                                cornerColors = intArrayOf(
+                                    deskColorAt(window.rect.left, window.rect.top),
+                                    deskColorAt(window.rect.right, window.rect.top),
+                                    deskColorAt(window.rect.left, window.rect.bottom),
+                                    deskColorAt(window.rect.right, window.rect.bottom)
+                                ),
                                 workspace = state.workspace
                             )
                         },
@@ -631,7 +635,7 @@ class StageHostActivity : ComponentActivity() {
         StageWorkspace.transitionPlayer = null
         geometryQueues.values.forEach { it.close() }
         geometryQueues.clear()
-        runCatching { transitionOverlay.cancelImmediate() }
+        runCatching { transitionOverlay.destroy() }
         runCatching { exposeOverlay.dismiss() }
         runCatching { chrome.destroy() }
         if (current === this) current = null

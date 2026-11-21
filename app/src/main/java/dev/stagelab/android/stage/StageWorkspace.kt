@@ -358,7 +358,7 @@ object StageWorkspace {
         pollJob = scope.launch {
             while (isActive) {
                 runCatching { reconcileTasks() }
-                delay(500)
+                delay(1000)
             }
         }
     }
@@ -792,7 +792,7 @@ object StageWorkspace {
         persist()
     }
 
-    /** Snaps a window to a standard iPad-style arrangement with eased real-task motion (P4/P8). */
+    /** Snaps a window to a standard iPad-style arrangement with 120fps spring transition. */
     suspend fun arrangeWindow(windowId: String, preset: WindowArrangePreset) {
         val window = session.windows[windowId] ?: return
         val fromRect = pxRectFor(window.geometry)
@@ -803,19 +803,35 @@ object StageWorkspace {
             WindowArrangePreset.FULL -> WindowGeometry(0.01f, 0.01f, 0.98f, 0.98f)
         }
         val toRect = pxRectFor(targetGeometry)
+        val snap = dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(window.taskId)
         session.bringToFront(windowId)
-        StageWindowAnimator.animate(fromRect, toRect) { step ->
-            window.geometry = geometryFor(step)
-            publishState()
-            if (window.alive) runCatching { applyBounds(window.taskId, step) }
-        }
         window.geometry = targetGeometry
         persist()
         publishState()
-        if (window.alive) {
-            runCatching { applyBounds(window.taskId, toRect) }
-            runCatching {
-                StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+
+        val player = transitionPlayer
+        kotlinx.coroutines.coroutineScope {
+            if (window.alive) {
+                launch {
+                    runCatching { applyBounds(window.taskId, toRect) }
+                    runCatching {
+                        StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId))
+                    }
+                }
+            }
+            if (player != null) {
+                player(
+                    listOf(
+                        dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
+                            bitmap = snap,
+                            fromRect = fromRect,
+                            toRect = toRect,
+                            fromTiltY = 0f,
+                            toTiltY = 0f
+                        )
+                    ),
+                    300L
+                )
             }
         }
     }
@@ -862,37 +878,14 @@ object StageWorkspace {
         val sourceGroupId = session.groupOf(windowId)?.id ?: return
         val fromRect = pxRectFor(window.geometry)
         val railSlot = tileRect(0, max(session.groups.size, 1))
+        // Read cached snapshot immediately (0ms delay; never block UI on capture!).
         val snap = if (window.alive) {
-            dev.stagelab.android.windows.TaskSnapshotStore.capture(window.taskId, force = true)
+            dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(window.taskId)
         } else null
         window.minimized = false
 
         // Detach from the current group.
         session.groups.forEach { it.windowIds.remove(windowId) }
-
-        // Park the task behind the stage host immediately (keeping its real workspace bounds intact!).
-        runCatching {
-            setFocusable(window.taskId, false)
-            StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId))
-            StageRuntime.command(JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity"))
-        }
-
-        // Play 60/120fps 3D spring glide from center stage into the left rail slot.
-        val player = transitionPlayer
-        if (window.alive && railShouldShow() && railSlot != null && player != null) {
-            player(
-                listOf(
-                    dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
-                        bitmap = snap,
-                        fromRect = fromRect,
-                        toRect = railSlot,
-                        fromTiltY = 0f,
-                        toTiltY = 14f
-                    )
-                ),
-                240L
-            )
-        }
 
         // Put it at the top of the recent list as its own group (or reuse the existing singleton).
         val existingGroup = session.groups.firstOrNull { group ->
@@ -905,13 +898,47 @@ object StageWorkspace {
             group.id
         }
         session.group(groupId)!!.windowIds += windowId
-        session.group(groupId)!!.lastActiveAt = now() - 1 // just below the active group
+        session.group(groupId)!!.lastActiveAt = now() - 1
         persist()
         publishState()
 
-        // Promote the next window in the source group.
-        session.visibleWindowsOf(sourceGroupId).lastOrNull()?.let { next ->
-            runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", next.taskId)) }
+        val remaining = session.visibleWindowsOf(sourceGroupId).filter { it.alive }
+        val player = transitionPlayer
+        kotlinx.coroutines.coroutineScope {
+            // Single-IPC hide + raise host + keep remaining windows in front, running IN PARALLEL with animation!
+            launch {
+                runCatching {
+                    val hideArr = org.json.JSONArray().put(window.taskId)
+                    val showArr = org.json.JSONArray()
+                    remaining.forEach { w ->
+                        val r = pxRectFor(w.geometry)
+                        showArr.put(
+                            JSONObject().put("taskId", w.taskId)
+                                .put("l", r.left).put("t", r.top).put("r", r.right).put("b", r.bottom)
+                        )
+                    }
+                    StageRuntime.command(
+                        JSONObject().put("cmd", "switchGroup")
+                            .put("hide", hideArr)
+                            .put("show", showArr)
+                            .put("hostComponent", "StageHostActivity")
+                    )
+                }
+            }
+            if (window.alive && railShouldShow() && railSlot != null && player != null) {
+                player(
+                    listOf(
+                        dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
+                            bitmap = snap,
+                            fromRect = fromRect,
+                            toRect = railSlot,
+                            fromTiltY = 0f,
+                            toTiltY = 16f
+                        )
+                    ),
+                    340L
+                )
+            }
         }
     }
 
@@ -1022,13 +1049,10 @@ object StageWorkspace {
         val incomingSlot = tileRect(incomingIndex, max(otherGroups.size, 1))
         val topRailSlot = tileRect(0, max(otherGroups.size, 1))
 
-        // Capture fresh snapshots of outgoing active windows before parking them toBack.
+        // Read cached snapshots immediately (0ms delay — NEVER block the switch on screencap!).
         val outgoingFront = outgoingWindows.lastOrNull()
         val outgoingSnap = outgoingFront?.let {
-            dev.stagelab.android.windows.TaskSnapshotStore.capture(it.taskId, force = true)
-        }
-        outgoingWindows.dropLast(1).forEach { w ->
-            scope.launch { dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false) }
+            dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(it.taskId)
         }
 
         // Portrait (or landscape auto-hide): selecting a group tucks the rail back.
@@ -1038,17 +1062,6 @@ object StageWorkspace {
         } else if (landscape && railAutoHide && railTempRevealed) {
             railTempRevealed = false
             computeLayout()
-        }
-
-        // Park outgoing windows toBack at their original bounds (no shrinking!) and raise host above them.
-        outgoingWindows.forEach { w ->
-            runCatching { setFocusable(w.taskId, false) }
-            runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", w.taskId)) }
-        }
-        if (outgoingWindows.isNotEmpty()) {
-            runCatching {
-                StageRuntime.command(JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity"))
-            }
         }
 
         session.makeActive(groupId)
@@ -1062,17 +1075,32 @@ object StageWorkspace {
             dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(it.taskId)
         }
 
-        // Play butter-smooth 60/120fps 3D spring transition (outgoing folds into rail, incoming unfolds from rail).
+        // Build batched single-IPC switchGroup payload: hide EVERY non-active group's alive tasks!
+        val hideArr = org.json.JSONArray()
+        session.groups.forEach { g ->
+            if (g.id == groupId) return@forEach
+            session.windowsOf(g.id).filter { it.alive }.forEach { hideArr.put(it.taskId) }
+        }
+        session.windows.values.filter { it.minimized && it.alive }.forEach { hideArr.put(it.taskId) }
+        val showArr = org.json.JSONArray()
+        incomingWindows.forEach { w ->
+            val r = pxRectFor(w.geometry)
+            showArr.put(
+                JSONObject().put("taskId", w.taskId)
+                    .put("l", r.left).put("t", r.top).put("r", r.right).put("b", r.bottom)
+            )
+        }
+
         val player = transitionPlayer
-        if (player != null && topRailSlot != null && incomingSlot != null) {
-            val cards = ArrayList<dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard>(2)
+        val cards = ArrayList<dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard>(2)
+        if (topRailSlot != null && incomingSlot != null) {
             if (outgoingFront != null) {
                 cards += dev.stagelab.android.windows.StageTransitionOverlay.TransitionCard(
                     bitmap = outgoingSnap,
                     fromRect = pxRectFor(outgoingFront.geometry),
                     toRect = topRailSlot,
                     fromTiltY = 0f,
-                    toTiltY = 14f
+                    toTiltY = 16f
                 )
             }
             if (incomingFront != null) {
@@ -1080,20 +1108,40 @@ object StageWorkspace {
                     bitmap = incomingSnap,
                     fromRect = incomingSlot,
                     toRect = pxRectFor(incomingFront.geometry),
-                    fromTiltY = 14f,
+                    fromTiltY = 16f,
                     toTiltY = 0f
                 )
             }
-            if (cards.isNotEmpty()) {
-                player(cards, 250L)
+        }
+
+        // Run single-IPC task switch IN PARALLEL with the 380ms 120fps spring animation!
+        kotlinx.coroutines.coroutineScope {
+            launch {
+                runCatching {
+                    StageRuntime.command(
+                        JSONObject().put("cmd", "switchGroup")
+                            .put("hide", hideArr)
+                            .put("show", showArr)
+                            .put("hostComponent", "StageHostActivity")
+                    )
+                }
+            }
+            if (player != null && cards.isNotEmpty()) {
+                player(cards, 380L)
             }
         }
 
-        syncGeometry("activate-group")
-        // Focus the front window of the newly active group.
-        session.visibleWindowsOf(groupId).lastOrNull()?.let { front ->
-            runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", front.taskId)) }
-            session.bringToFront(front.id)
+        incomingFront?.let { session.bringToFront(it.id) }
+        publishState()
+
+        // Capture fresh snapshot of the frontmost (unoccluded) window asynchronously after animation settles.
+        scope.launch {
+            delay(450L)
+            if (activeGestureWindows.isEmpty()) {
+                incomingFront?.let { w ->
+                    dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = true)
+                }
+            }
         }
     }
 
@@ -1195,50 +1243,45 @@ object StageWorkspace {
 
     // ------------------------------------------------------------------ sync
 
-    /** Applies session geometry to the real tasks: active group free, other groups parked toBack (with snapshot thumbnails in rail). */
+    /** Applies session geometry to the real tasks in a single batched IPC: active group free, other groups parked toBack. */
     suspend fun syncGeometry(reason: String) {
         if (applying) return
         applying = true
         try {
             val groups = session.groups
             val activeId = session.activeGroupId
-            var parkedAny = false
-            // 1. Park all non-active and minimized windows first.
+            val hideArr = org.json.JSONArray()
+            val showArr = org.json.JSONArray()
+
             groups.forEach { group ->
                 if (group.id == activeId) return@forEach
                 session.windowsOf(group.id).forEach { window ->
                     if (!window.alive) return@forEach
-                    if (dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(window.taskId) == null) {
-                        scope.launch {
-                            dev.stagelab.android.windows.TaskSnapshotStore.capture(window.taskId, force = false)
-                        }
-                    }
-                    runCatching { setFocusable(window.taskId, false) }
-                    runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
-                    parkedAny = true
+                    hideArr.put(window.taskId)
                 }
             }
             session.windows.values.filter { it.minimized && it.alive }.forEach { window ->
-                runCatching { setFocusable(window.taskId, false) }
-                runCatching { StageRuntime.command(JSONObject().put("cmd", "toBack").put("taskId", window.taskId)) }
-                parkedAny = true
+                hideArr.put(window.taskId)
             }
-            // 2. Ensure StageHostActivity sits above parked freeform tasks (required on Android 17 / ColorOS 17).
-            if (parkedAny) {
-                runCatching {
-                    StageRuntime.command(
-                        JSONObject().put("cmd", "hostFront").put("component", "StageHostActivity")
-                    )
-                }
-            }
-            // 3. Raise active group's visible windows above StageHostActivity in exact z-order.
             session.windowsOf(activeId).forEach { window ->
                 if (!window.alive || window.minimized) return@forEach
                 if (window.id in activeGestureWindows) return@forEach
                 val rect = pxRectFor(window.geometry)
-                runCatching { setFocusable(window.taskId, true) }
-                runCatching { applyBounds(window.taskId, rect) }
-                runCatching { StageRuntime.command(JSONObject().put("cmd", "focus").put("taskId", window.taskId)) }
+                showArr.put(
+                    JSONObject().put("taskId", window.taskId)
+                        .put("l", rect.left).put("t", rect.top).put("r", rect.right).put("b", rect.bottom)
+                )
+            }
+
+            if (hideArr.length() > 0 || showArr.length() > 0) {
+                runCatching {
+                    StageRuntime.command(
+                        JSONObject().put("cmd", "switchGroup")
+                            .put("hide", hideArr)
+                            .put("show", showArr)
+                            .put("hostComponent", "StageHostActivity")
+                    )
+                }
             }
             Log.d(TAG, "syncGeometry($reason) groups=${groups.size} rail=${railShouldShow()} landscape=$landscape")
         } finally {
@@ -1335,23 +1378,15 @@ object StageWorkspace {
                 publishState()
             }
         }
-        // Periodically refresh TaskSnapshots for active windows and any uncached background windows.
+        // Refresh TaskSnapshot for the frontmost (unoccluded) active window periodically.
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastSnapshotPollMs > 5000L && activeGestureWindows.isEmpty()) {
+        if (nowMs - lastSnapshotPollMs > 12000L && activeGestureWindows.isEmpty()) {
             lastSnapshotPollMs = nowMs
-            val activeWins = session.visibleWindowsOf(session.activeGroupId).filter { it.alive }
-            activeWins.forEach { w ->
+            session.visibleWindowsOf(session.activeGroupId).lastOrNull { it.alive }?.let { front ->
                 scope.launch {
-                    dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false)
+                    dev.stagelab.android.windows.TaskSnapshotStore.capture(front.taskId, force = false)
                 }
             }
-            session.windows.values.filter { it.alive && dev.stagelab.android.windows.TaskSnapshotStore.bitmapFor(it.taskId) == null }
-                .take(3)
-                .forEach { w ->
-                    scope.launch {
-                        dev.stagelab.android.windows.TaskSnapshotStore.capture(w.taskId, force = false)
-                    }
-                }
         }
     }
 

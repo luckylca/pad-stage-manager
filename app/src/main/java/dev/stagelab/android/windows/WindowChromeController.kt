@@ -58,8 +58,7 @@ class WindowChromeController(
         val title: String,
         val focused: Boolean,
         val minimized: Boolean,
-        val deskTopColor: Int = 0xFF141922.toInt(),
-        val deskBottomColor: Int = 0xFF0A0D13.toInt(),
+        val cornerColors: IntArray = intArrayOf(0xFF1A2236.toInt(), 0xFF1A2236.toInt(), 0xFF0E1320.toInt(), 0xFF0E1320.toInt()),
         val workspace: StageRect = rect
     )
 
@@ -73,6 +72,7 @@ class WindowChromeController(
         var gestureBase: StageRect = rect
         var restoredRect: StageRect? = null
         var inGesture: Boolean = false
+        var lastCommitMs: Long = 0L
         /** Raw pointer position at gesture start, for drop-point routing. */
         var touchStart: Pair<Int, Int> = 0 to 0
         /** Latest pointer position during the gesture. */
@@ -506,8 +506,7 @@ class WindowChromeController(
             existing.titleBar.pillVisible = pillVisible
             existing.titleBar.title = window.title
             existing.decoration.focused = window.focused
-            existing.decoration.maskColor = window.deskTopColor
-            existing.decoration.maskColorBottom = window.deskBottomColor
+            existing.decoration.maskColors = window.cornerColors
             existing.decoration.maskVisible = maskFlags
             existing.handles.forEach { (_, view) -> view.focused = window.focused }
             if (!existing.inGesture) {
@@ -556,8 +555,7 @@ class WindowChromeController(
         ).apply {
             focused = window.focused
             cornerRadius = this@WindowChromeController.cornerRadius.toFloat()
-            maskColor = window.deskTopColor
-            maskColorBottom = window.deskBottomColor
+            maskColors = window.cornerColors
             maskVisible = maskFlags
         }
 
@@ -643,15 +641,40 @@ class WindowChromeController(
         )
     }
 
+    /** Fast path during drag/resize: updates only decoration + titleBar (+ active grip) for 120Hz fluidity. */
+    private fun positionDuringGesture(holder: Holder, activeMode: ChromeMode) {
+        val rect = holder.rect
+        layout(holder.decoration, rect.left, rect.top, rect.width, rect.height)
+        layout(holder.titleBar, rect.left, rect.top, rect.width, titleHeight)
+        if (activeMode != ChromeMode.TITLE) {
+            val half = gripSize / 2
+            when (activeMode) {
+                ChromeMode.RESIZE_TOP_LEFT -> layout(holder.handle(activeMode), rect.left - half, rect.top - half, gripSize, gripSize)
+                ChromeMode.RESIZE_TOP_RIGHT -> layout(holder.handle(activeMode), rect.right - half, rect.top - half, gripSize, gripSize)
+                ChromeMode.RESIZE_BOTTOM_LEFT -> layout(holder.handle(activeMode), rect.left - half, rect.bottom - half, gripSize, gripSize)
+                ChromeMode.RESIZE_CORNER -> layout(holder.handle(activeMode), rect.right - half, rect.bottom - half, gripSize, gripSize)
+                ChromeMode.RESIZE_LEFT -> layout(holder.handle(activeMode), rect.left - edgeSize / 2, rect.top + half, edgeSize, (rect.height - gripSize).coerceAtLeast(edgeSize))
+                ChromeMode.RESIZE_RIGHT -> layout(holder.handle(activeMode), rect.right - edgeSize / 2, rect.top + half, edgeSize, (rect.height - gripSize).coerceAtLeast(edgeSize))
+                ChromeMode.RESIZE_TOP -> layout(holder.handle(activeMode), rect.left + half, rect.top - edgeSize / 2, (rect.width - gripSize).coerceAtLeast(edgeSize), edgeSize)
+                ChromeMode.RESIZE_BOTTOM -> layout(holder.handle(activeMode), rect.left + half, rect.bottom - edgeSize / 2, (rect.width - gripSize).coerceAtLeast(edgeSize), edgeSize)
+                else -> Unit
+            }
+        }
+    }
+
     private fun Holder.handle(mode: ChromeMode): ChromeOverlayView =
         handles.first { it.first == mode }.second
 
     private fun layout(view: View, x: Int, y: Int, width: Int, height: Int) {
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val w = max(1, width)
+        val h = max(1, height)
+        // Skip redundant WindowManager IPCs when geometry is unchanged!
+        if (params.x == x && params.y == y && params.width == w && params.height == h) return
         params.x = x
         params.y = y
-        params.width = max(1, width)
-        params.height = max(1, height)
+        params.width = w
+        params.height = h
         runCatching { wm.updateViewLayout(view, params) }
     }
 
@@ -718,8 +741,12 @@ class WindowChromeController(
                 val clamped = clampToScreen(StageRect(left, top, right, bottom))
                 holder.rect = clamped
                 holder.restoredRect = null
-                position(holder)
-                callbacks.onGeometryChanged(id, clamped, false, resized = mode != ChromeMode.TITLE)
+                positionDuringGesture(holder, mode)
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - holder.lastCommitMs >= 32L) {
+                    holder.lastCommitMs = nowMs
+                    callbacks.onGeometryChanged(id, clamped, false, resized = mode != ChromeMode.TITLE)
+                }
                 if (mode == ChromeMode.TITLE) {
                     holder.touchLast = holder.titleBar.lastRawPos
                     callbacks.onWindowDragging(id, holder.touchLast.first, holder.touchLast.second)
@@ -727,6 +754,8 @@ class WindowChromeController(
             }
             ChromeOverlayView.PHASE_END -> {
                 holder.inGesture = false
+                holder.lastCommitMs = 0L
+                position(holder)
                 holder.touchLast = holder.titleBar.lastRawPos
                 callbacks.onGestureStateChanged(id, false)
                 callbacks.onGeometryChanged(id, holder.rect, true, resized = mode != ChromeMode.TITLE)
@@ -736,6 +765,7 @@ class WindowChromeController(
             }
             ChromeOverlayView.PHASE_CANCEL -> {
                 holder.inGesture = false
+                holder.lastCommitMs = 0L
                 holder.rect = holder.gestureBase
                 position(holder)
                 callbacks.onGestureStateChanged(id, false)

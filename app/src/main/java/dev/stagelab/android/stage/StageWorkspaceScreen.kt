@@ -3,12 +3,15 @@
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntOffsetAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.runtime.key
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -289,56 +292,64 @@ private fun RecentGroupsRail(
 
     Box(Modifier.fillMaxSize()) {
         state.groups.forEach { group ->
-            val widthDp = with(density) { group.rect.width.toDp() }
-            val heightDp = with(density) { group.rect.height.toDp() }
-            val xDp = with(density) { group.rect.left.toDp() }
-            val yDp = with(density) { group.rect.top.toDp() }
+            key(group.id) {
+                val widthDp = with(density) { group.rect.width.toDp() }
+                val heightDp = with(density) { group.rect.height.toDp() }
+                val animOffset by animateIntOffsetAsState(
+                    targetValue = IntOffset(group.rect.left, group.rect.top),
+                    animationSpec = spring(
+                        dampingRatio = 0.86f,
+                        stiffness = Spring.StiffnessMediumLow
+                    ),
+                    label = "rail-tile-pos"
+                )
 
-            Box(
-                modifier = Modifier
-                    .offset(x = xDp, y = yDp)
-                    .width(widthDp)
-                    .height(heightDp)
-                    .graphicsLayer {
-                        rotationY = 14f
-                        cameraDistance = 12f * density.density
-                        transformOrigin = TransformOrigin(0.05f, 0.5f)
-                    }
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
-                    ) { onGroupClick(group.id) }
-            ) {
-                val previews = group.previews
-                if (previews.size <= 1) {
-                    val primary = previews.firstOrNull()
-                    RailWindowThumbnail(
-                        preview = primary,
-                        modifier = Modifier.fillMaxSize(),
-                        showIconBadge = true,
-                        context = context,
-                        snapshotVersion = _version
-                    )
-                } else {
-                    // Multi-window group: fan up to 3 windows subtly inside the thumbnail slot.
-                    val visible = previews.takeLast(3)
-                    val count = visible.size
-                    visible.forEachIndexed { idx, preview ->
-                        val frac = idx.toFloat() / (count - 1).coerceAtLeast(1)
-                        val offsetX = (widthDp.value * (0.04f + frac * 0.16f)).dp
-                        val offsetY = (heightDp.value * (0.10f - frac * 0.08f)).dp
-                        val cardW = (widthDp.value * 0.80f).dp
-                        val cardH = (heightDp.value * 0.86f).dp
+                Box(
+                    modifier = Modifier
+                        .offset { animOffset }
+                        .width(widthDp)
+                        .height(heightDp)
+                        .graphicsLayer {
+                            rotationY = 16f
+                            cameraDistance = 12f * density.density
+                            transformOrigin = TransformOrigin(0.05f, 0.5f)
+                        }
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() }
+                        ) { onGroupClick(group.id) }
+                ) {
+                    val previews = group.previews
+                    if (previews.size <= 1) {
+                        val primary = previews.firstOrNull()
                         RailWindowThumbnail(
-                            preview = preview,
-                            modifier = Modifier
-                                .offset(x = offsetX, y = offsetY)
-                                .width(cardW)
-                                .height(cardH),
-                            showIconBadge = idx == visible.lastIndex,
+                            preview = primary,
+                            modifier = Modifier.fillMaxSize(),
+                            showIconBadge = true,
                             context = context,
                             snapshotVersion = _version
                         )
+                    } else {
+                        // Multi-window group: fan up to 3 windows subtly inside the thumbnail slot.
+                        val visible = previews.takeLast(3)
+                        val count = visible.size
+                        visible.forEachIndexed { idx, preview ->
+                            val frac = idx.toFloat() / (count - 1).coerceAtLeast(1)
+                            val offsetX = (widthDp.value * (0.04f + frac * 0.16f)).dp
+                            val offsetY = (heightDp.value * (0.10f - frac * 0.08f)).dp
+                            val cardW = (widthDp.value * 0.80f).dp
+                            val cardH = (heightDp.value * 0.86f).dp
+                            RailWindowThumbnail(
+                                preview = preview,
+                                modifier = Modifier
+                                    .offset(x = offsetX, y = offsetY)
+                                    .width(cardW)
+                                    .height(cardH),
+                                showIconBadge = idx == visible.lastIndex,
+                                context = context,
+                                snapshotVersion = _version
+                            )
+                        }
                     }
                 }
             }

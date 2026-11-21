@@ -32,36 +32,42 @@ object StageEngine {
         var bounds: Rect
     )
 
-    @Synchronized
+    private val mutLock = Any()
+
     fun handle(raw: String): String {
         val reply = JSONObject()
         try {
             val command = JSONObject(raw)
             val name = command.optString("cmd")
-            val data = when (name) {
-                "hello" -> hello()
-                "state" -> state()
-                "diagnostics" -> JSONObject(tasks.diagnostics().toMap())
-                "settings" -> JSONObject().put("result", tasks.enableFreeformGlobally())
-                "open" -> open(command)
-                "bounds" -> bounds(command)
-                "focus" -> focus(command)
-                "close" -> close(command)
-                "hide" -> setHidden(command, true)
-                "show" -> setHidden(command, false)
-                "focusable" -> setFocusable(command)
-                "windowMode" -> setWindowMode(command)
-                "toBack" -> sendToBack(command)
-                "hostFront" -> JSONObject().put("result", tasks.bringHostAboveParked(command.optString("component", "StageHostActivity")))
-                "snapshot" -> snapshot(command)
-                "closeAll" -> closeAll()
-                "freeformOn" -> JSONObject().put("result", tasks.enableFreeformGlobally())
-                "organizerProbe" -> organizerProbe()
-                "organizerUnregister" -> organizerUnregister()
-                "events" -> JSONObject().put("events", JSONArray(events.toList()))
-                "shell" -> JSONObject().put("result", tasks.shell(command.optString("command")))
-                "ping" -> JSONObject().put("pong", System.currentTimeMillis())
-                else -> throw IllegalArgumentException("Unknown command: $name")
+            // Snapshot capture runs OFF mutLock so it NEVER blocks bounds/focus/switchGroup!
+            val data = if (name == "snapshot") {
+                snapshot(command)
+            } else synchronized(mutLock) {
+                when (name) {
+                    "hello" -> hello()
+                    "state" -> state()
+                    "diagnostics" -> JSONObject(tasks.diagnostics().toMap())
+                    "settings" -> JSONObject().put("result", tasks.enableFreeformGlobally())
+                    "open" -> open(command)
+                    "bounds" -> bounds(command)
+                    "focus" -> focus(command)
+                    "close" -> close(command)
+                    "hide" -> setHidden(command, true)
+                    "show" -> setHidden(command, false)
+                    "focusable" -> setFocusable(command)
+                    "windowMode" -> setWindowMode(command)
+                    "toBack" -> sendToBack(command)
+                    "hostFront" -> JSONObject().put("result", tasks.bringHostAboveParked(command.optString("component", "StageHostActivity")))
+                    "switchGroup" -> switchGroup(command)
+                    "closeAll" -> closeAll()
+                    "freeformOn" -> JSONObject().put("result", tasks.enableFreeformGlobally())
+                    "organizerProbe" -> organizerProbe()
+                    "organizerUnregister" -> organizerUnregister()
+                    "events" -> JSONObject().put("events", JSONArray(events.toList()))
+                    "shell" -> JSONObject().put("result", tasks.shell(command.optString("command")))
+                    "ping" -> JSONObject().put("pong", System.currentTimeMillis())
+                    else -> throw IllegalArgumentException("Unknown command: $name")
+                }
             }
             reply.put("ok", true).put("data", data)
         } catch (t: Throwable) {
@@ -220,6 +226,48 @@ object StageEngine {
         val taskId = resolveTaskId(command)
         tasks.sendToBack(taskId)
         return JSONObject().put("taskId", taskId)
+    }
+
+    /**
+     * Single-IPC batched group switch: parks all [hide] taskIds, raises StageHostActivity above
+     * parked tasks, then positions & focuses all [show] tasks in z-order. Eliminates 8-12 separate
+     * Binder round-trips during group switching.
+     */
+    private fun switchGroup(command: JSONObject): JSONObject {
+        val hide = command.optJSONArray("hide")
+        var parkedAny = false
+        if (hide != null) {
+            for (i in 0 until hide.length()) {
+                val tid = hide.optInt(i, -1)
+                if (tid <= 0) continue
+                runCatching { tasks.setTaskFocusable(tid, false) }
+                runCatching { tasks.sendToBack(tid) }
+                parkedAny = true
+            }
+        }
+        if (parkedAny) {
+            runCatching {
+                tasks.bringHostAboveParked(command.optString("hostComponent", "StageHostActivity"))
+            }
+        }
+        val show = command.optJSONArray("show")
+        if (show != null) {
+            for (i in 0 until show.length()) {
+                val item = show.optJSONObject(i) ?: continue
+                val tid = item.optInt("taskId", -1)
+                if (tid <= 0) continue
+                val rect = Rect(
+                    item.optInt("l"),
+                    item.optInt("t"),
+                    item.optInt("r"),
+                    item.optInt("b")
+                )
+                runCatching { tasks.setTaskFocusable(tid, true) }
+                runCatching { tasks.resizeTask(tid, rect) }
+                runCatching { tasks.focusTask(tid) }
+            }
+        }
+        return JSONObject().put("ok", true)
     }
 
     private fun snapshot(command: JSONObject): JSONObject {

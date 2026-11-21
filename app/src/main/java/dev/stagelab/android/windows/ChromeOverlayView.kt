@@ -80,18 +80,13 @@ class ChromeOverlayView(
             invalidate()
         }
 
-    /** Desk colour behind the window, used to paint the corner masks. */
-    var maskColor: Int = Color.BLACK
+    /** Per-corner desk colours sampled from the exact wallpaper behind each corner. */
+    var maskColors: IntArray = intArrayOf(Color.BLACK, Color.BLACK, Color.BLACK, Color.BLACK)
         set(value) {
-            field = value
-            invalidate()
-        }
-
-    /** Desk colour under the bottom corners (the desk has a vertical gradient). */
-    var maskColorBottom: Int = Color.BLACK
-        set(value) {
-            field = value
-            invalidate()
+            if (!field.contentEquals(value)) {
+                field = value
+                invalidate()
+            }
         }
 
     /** 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right (MASK only). */
@@ -166,10 +161,10 @@ class ChromeOverlayView(
     private fun drawDecoration(canvas: Canvas) {
         val r = cornerRadius
         if (r <= 0f) return
-        if (maskVisible.getOrElse(0) { true }) dragMask(canvas, 0, 0f, 0f, r, maskColor)
-        if (maskVisible.getOrElse(1) { true }) dragMask(canvas, 1, width - r, 0f, r, maskColor)
-        if (maskVisible.getOrElse(2) { true }) dragMask(canvas, 2, 0f, height - r, r, maskColorBottom)
-        if (maskVisible.getOrElse(3) { true }) dragMask(canvas, 3, width - r, height - r, r, maskColorBottom)
+        if (maskVisible.getOrElse(0) { true }) dragMask(canvas, 0, 0f, 0f, r, maskColors[0])
+        if (maskVisible.getOrElse(1) { true }) dragMask(canvas, 1, width - r, 0f, r, maskColors[1])
+        if (maskVisible.getOrElse(2) { true }) dragMask(canvas, 2, 0f, height - r, r, maskColors[2])
+        if (maskVisible.getOrElse(3) { true }) dragMask(canvas, 3, width - r, height - r, r, maskColors[3])
         drawRing(canvas)
     }
 
@@ -183,7 +178,7 @@ class ChromeOverlayView(
     ) = drawCornerMask(canvas, corner, offsetX, offsetY, radius, color)
 
     private fun drawCornerMask(canvas: Canvas, corner: Int, offsetX: Float, offsetY: Float) {
-        drawCornerMask(canvas, corner, offsetX, offsetY, cornerRadius, maskColor)
+        drawCornerMask(canvas, corner, offsetX, offsetY, cornerRadius, maskColors[0])
     }
 
     /**
@@ -251,37 +246,37 @@ class ChromeOverlayView(
             return
         }
         val d = density()
-        val pillW = (38f * d).coerceAtMost(width * 0.4f)
-        val pillH = 16f * d
+        val pillW = (32f * d).coerceAtMost(width * 0.36f)
+        val pillH = 12.5f * d
         val cx = width / 2f
-        val top = 5f * d
+        val top = 2.5f * d
         pillRect = RectF(cx - pillW / 2f, top, cx + pillW / 2f, top + pillH)
         // Generous invisible touch slop around the `•••` pill for reliable finger taps.
-        val hitPadX = 14f * d
-        val hitPadY = 8f * d
+        val hitPadX = 16f * d
+        val hitPadY = 9f * d
         pillHitRect = RectF(
             pillRect.left - hitPadX,
-            (pillRect.top - hitPadY).coerceAtLeast(0f),
+            0f,
             pillRect.right + hitPadX,
             (pillRect.bottom + hitPadY).coerceAtMost(height.toFloat())
         )
 
         pillFill.color = when {
-            pressedPill -> Color.argb(190, 42, 48, 62)
-            focused -> Color.argb(138, 26, 30, 40)
-            else -> Color.argb(72, 26, 30, 40)
+            pressedPill -> Color.argb(200, 38, 44, 58)
+            focused -> Color.argb(128, 24, 28, 38)
+            else -> Color.argb(64, 24, 28, 38)
         }
-        pillBorder.strokeWidth = 0.8f * d
-        pillBorder.color = if (focused) Color.argb(64, 255, 255, 255) else Color.argb(28, 255, 255, 255)
+        pillBorder.strokeWidth = 0.7f * d
+        pillBorder.color = if (focused) Color.argb(58, 255, 255, 255) else Color.argb(26, 255, 255, 255)
 
         val pr = pillH / 2f
         canvas.drawRoundRect(pillRect, pr, pr, pillFill)
         canvas.drawRoundRect(pillRect, pr, pr, pillBorder)
 
-        val dotR = 2.1f * d
-        val dotGap = 7.4f * d
+        val dotR = 1.75f * d
+        val dotGap = 6.2f * d
         val cy = pillRect.centerY()
-        dotPaint.color = if (focused) Color.argb(238, 244, 247, 255) else Color.argb(145, 232, 238, 248)
+        dotPaint.color = if (focused) Color.argb(240, 246, 249, 255) else Color.argb(145, 232, 238, 248)
         canvas.drawCircle(cx - dotGap, cy, dotR, dotPaint)
         canvas.drawCircle(cx, cy, dotR, dotPaint)
         canvas.drawCircle(cx + dotGap, cy, dotR, dotPaint)

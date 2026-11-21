@@ -55,7 +55,13 @@ class StageDockOverlayController(
     private var hiddenBySetting = false
     private var temporarilyRevealed = false
 
-    fun update(context: Context, session: StageSession, hidden: Boolean, tempRevealed: Boolean) {
+    fun update(
+        context: Context,
+        session: StageSession,
+        enabled: Boolean,
+        hidden: Boolean,
+        tempRevealed: Boolean,
+    ) {
         lastSession = session
         hiddenBySetting = hidden
         temporarilyRevealed = tempRevealed
@@ -81,16 +87,7 @@ class StageDockOverlayController(
         }
 
         mainHandler.post {
-            if (!HookGuard.isActive()) {
-                detach()
-                return@post
-            }
-            if (pinnedPackages.isEmpty()) {
-                pinnedPackages = resolveDefaultPinnedPackages(context)
-            }
-            // Show custom Dock whenever Stage Manager has an active or recent Stage
-            val shouldExist = session.activeStage != null || session.allRecentStages.isNotEmpty()
-            if (!shouldExist) {
+            if (!enabled || !HookGuard.isActive()) {
                 detach()
                 return@post
             }

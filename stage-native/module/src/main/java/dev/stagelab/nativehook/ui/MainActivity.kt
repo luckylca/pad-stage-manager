@@ -98,7 +98,7 @@ class MainActivity : ComponentActivity() {
                         if (!next) {
                             sendStageCmd("disable_module")
                         } else {
-                            sendStageCmd("sync_live")
+                            sendStageCmd("enable_module")
                         }
                     },
                     onToggleSafeMode = { next ->

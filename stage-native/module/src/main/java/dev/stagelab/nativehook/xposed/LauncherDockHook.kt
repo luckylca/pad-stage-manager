@@ -22,10 +22,58 @@ object LauncherDockHook {
 
     private const val TASKBAR_ACTIVITY_CONTEXT = "com.android.launcher3.taskbar.TaskbarActivityContext"
     private const val TASKBAR_DRAG_CONTROLLER = "com.android.launcher3.taskbar.TaskbarDragController"
+    private const val OPLUS_ITEM_CLICK_HANDLER = "com.android.launcher3.touch.OplusItemClickHandler"
 
     fun install(classLoader: ClassLoader) {
         hookTaskbarItemClick(classLoader)
+        hookWorkspaceIconClick(classLoader)
         hookTaskbarDragMergeHint(classLoader)
+    }
+
+    private fun hookWorkspaceIconClick(classLoader: ClassLoader) {
+        val cls = try {
+            XposedHelpers.findClass(OPLUS_ITEM_CLICK_HANDLER, classLoader)
+        } catch (t: Throwable) {
+            HookGuard.warn("LauncherDockHook: class not found: $OPLUS_ITEM_CLICK_HANDLER", t)
+            return
+        }
+
+        try {
+            XposedBridge.hookAllMethods(cls, "onClick", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    try {
+                        val view = param.args.firstOrNull() as? View ?: return
+                        val tag = view.tag ?: return
+                        // Only intercept real app icons (WorkspaceItemInfo / AppInfo), never folders or widgets.
+                        val tagClassName = tag.javaClass.name
+                        if (tagClassName.contains("Folder", ignoreCase = true) ||
+                            tagClassName.contains("Widget", ignoreCase = true)
+                        ) {
+                            return
+                        }
+                        val pkg = resolveItemPackage(tag) ?: return
+                        if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "dev.stagelab.nativehook") {
+                            return
+                        }
+
+                        val cmd = Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
+                            setPackage("com.android.systemui")
+                            putExtra("cmd", "launch")
+                            putExtra("pkg", pkg)
+                        }
+                        view.context.sendBroadcast(cmd)
+                        HookGuard.info("LAUNCHER.ICON_CLICK routed pkg=$pkg to StageNativeRuntime (S1 widescreen)")
+                        param.result = null
+                    } catch (t: Throwable) {
+                        HookGuard.warn("LauncherDockHook.OplusItemClickHandler isolated failure", t)
+                    }
+                }
+            })
+            HookGuard.info("LauncherDockHook: hooked $OPLUS_ITEM_CLICK_HANDLER#onClick")
+        } catch (t: Throwable) {
+            HookGuard.warn("LauncherDockHook: failed to hook $OPLUS_ITEM_CLICK_HANDLER#onClick", t)
+        }
     }
 
     private fun hookTaskbarItemClick(classLoader: ClassLoader) {

@@ -75,6 +75,9 @@ object StageNativeRuntime {
     @Volatile
     private var isDeviceLocked = false
 
+    @Volatile
+    private var stageManagerEnabled = true
+
     data class SavedGeometry(
         val bounds: WindowBounds,
         val scale: Float = 1.0f,
@@ -207,6 +210,10 @@ object StageNativeRuntime {
             "close" -> {
                 if (taskId > 0) dockController.onWindowMenuClose(taskId) else registry.snapshot()
             }
+            "enable_module" -> {
+                stageManagerEnabled = true
+                syncFromLiveOrganizer()
+            }
             "sync_live" -> syncFromLiveOrganizer()
             "strip_hide" -> {
                 val hidden = intent.getBooleanExtra("hidden", false)
@@ -218,12 +225,19 @@ object StageNativeRuntime {
                 dockController.setDockHiddenBySetting(hidden)
                 registry.snapshot()
             }
-            "disable_module", "reset" -> {
-                // Cleanly remove attached UI and clear logical Stage metadata while keeping user app tasks intact.
+            "disable_module" -> {
+                stageManagerEnabled = false
                 registry.clear()
                 pendingLaunches.clear()
                 stripOverlay.detach()
                 dockOverlay.detach()
+                bridge.notifyLauncherBackdrop(false)
+                registry.snapshot()
+            }
+            "reset" -> {
+                registry.clear()
+                pendingLaunches.clear()
+                stripOverlay.detach()
                 bridge.notifyLauncherBackdrop(false)
                 registry.snapshot()
             }
@@ -310,7 +324,7 @@ object StageNativeRuntime {
     }
 
     private fun updateStripUi(session: StageSession) {
-        if (isDeviceLocked) {
+        if (isDeviceLocked || !stageManagerEnabled) {
             stripOverlay.detach()
             dockOverlay.detach()
             bridge.notifyLauncherBackdrop(false)
@@ -329,6 +343,7 @@ object StageNativeRuntime {
         dockOverlay.update(
             context = ctx,
             session = session,
+            enabled = stageManagerEnabled,
             hidden = dockController.isDockHiddenBySetting,
             tempRevealed = dockController.isDockTemporarilyRevealed,
         )

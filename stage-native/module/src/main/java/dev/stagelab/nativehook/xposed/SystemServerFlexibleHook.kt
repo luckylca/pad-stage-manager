@@ -120,7 +120,16 @@ object SystemServerFlexibleHook {
                         if (isIgnoredSystemPkg(pkg)) return@safeRun
 
                         val (screenW, screenH) = extractDisplaySizeFromArgs(param.args)
-                        val memorized = memoryMap[pkg]
+                        val memorized = memoryMap[pkg]?.takeIf { frame ->
+                            if (isValidVisualGeometry(frame.toRect(), frame.scale, screenW, screenH)) {
+                                true
+                            } else {
+                                memoryMap.remove(pkg)
+                                saveMemoryToDisk()
+                                HookGuard.info("SYS.MEMORY_PURGED_INVALID pkg=$pkg rect=${frame.toRect()} scale=${frame.scale}")
+                                false
+                            }
+                        }
                         val targetRect: Rect
                         val targetScale: Float
 
@@ -199,19 +208,39 @@ object SystemServerFlexibleHook {
         }.getOrNull() ?: return
         if (bounds.isEmpty || bounds.right <= 0 || bounds.left < -100) return
 
-        val scale = runCatching {
+        val (scale, zoomState) = runCatching {
             val wrapper = XposedHelpers.callMethod(taskObj, "getWrapper")
             val ext = XposedHelpers.callMethod(wrapper, "getExtImpl")
-            (XposedHelpers.callMethod(ext, "getScale") as? Float)?.takeIf { it in 0.40f..1.05f }
-        }.getOrNull() ?: 1.0f
+            val s = (XposedHelpers.callMethod(ext, "getScale") as? Float) ?: 1.0f
+            val st = (XposedHelpers.callMethod(ext, "getFlexibleZoomState") as? Int) ?: 1
+            s to st
+        }.getOrDefault(1.0f to 1)
 
-        val frame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, scale)
+        // Never memorize ColorOS auto-minimized corner mini-windows (state=2 or scale < 0.45)
+        if (zoomState == 2 || scale < 0.45f) return
+
+        val clampedScale = scale.coerceIn(0.45f, 1.0f)
+        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+        if (!isValidVisualGeometry(bounds, clampedScale, screenW, screenH)) return
+
+        val frame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedScale)
         val prev = memoryMap[pkg]
         if (prev != frame) {
             memoryMap[pkg] = frame
             saveMemoryToDisk()
-            HookGuard.info("SYS.MEMORY_SAVED pkg=$pkg rect=${frame.toRect()} scale=$scale")
+            HookGuard.info("SYS.MEMORY_SAVED pkg=$pkg rect=${frame.toRect()} scale=$clampedScale")
         }
+    }
+
+    private fun isValidVisualGeometry(rect: Rect, scale: Float, screenW: Int, screenH: Int): Boolean {
+        if (rect.isEmpty || scale < 0.45f || scale > 1.05f) return false
+        val visW = (rect.width() * scale).toInt()
+        val visH = (rect.height() * scale).toInt()
+        if (visW < 360 || visH < 360) return false
+        val visRight = rect.left + visW
+        val visBottom = rect.top + visH
+        // Reject off-screen / corrupted virtual rects (e.g. from minimized state=2 windows)
+        return rect.left >= -160 && rect.top >= 0 && visRight <= screenW + 160 && visBottom <= screenH + 160
     }
 
     private fun computeWidePrimaryStageRect(screenW: Int, screenH: Int): Rect {

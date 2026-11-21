@@ -77,6 +77,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
         applyColorOsLaunchBounds(options, targetBounds, targetScale)
 
+        StageNativeRuntime.markProgrammaticTransition(1_400L)
         mainHandler.post {
             runCatching {
                 ctx.startActivity(intent, options.toBundle())
@@ -100,29 +101,27 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             HookGuard.warn("switchNativeStage: ShellTaskOrganizer not attached yet")
             return
         }
+        StageNativeRuntime.markProgrammaticTransition(1_200L)
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
-            var delayMs = 0L
 
-            // 1. Serially park outgoing Stage tasks so ColorOS FlexibleTaskController does not drop concurrent animations.
-            for (task in tasksToPark) {
-                val targetId = task.taskId
-                mainHandler.postDelayed({ parkSingleFlexibleTask(targetId) }, delayMs)
-                delayMs += FLEXIBLE_STEP_DELAY_MS
+            // 1. Park ALL outgoing Stage tasks simultaneously (0ms) so windows close together, not one by one.
+            mainHandler.post {
+                for (task in tasksToPark) {
+                    parkSingleFlexibleTask(task.taskId)
+                }
             }
 
-            // 2. Serially restore incoming Stage tasks in bottom-to-top Z-order preserving Task IDs & saved bounds.
-            if (tasksToPark.isNotEmpty() && orderedShow.isNotEmpty()) {
-                delayMs += FLEXIBLE_PHASE_GAP_MS
-            }
-            for (task in orderedShow) {
-                val snapshot = task
-                mainHandler.postDelayed({ restoreSingleFlexibleTask(organizer, snapshot) }, delayMs)
-                delayMs += FLEXIBLE_STEP_DELAY_MS
-            }
+            // 2. Restore ALL incoming Stage tasks simultaneously after a minimal 25ms handoff gap.
+            val showDelay = if (tasksToPark.isNotEmpty()) CONCURRENT_HANDOFF_MS else 0L
+            mainHandler.postDelayed({
+                for (task in orderedShow) {
+                    restoreSingleFlexibleTask(organizer, task)
+                }
+            }, showDelay)
 
             HookGuard.info(
-                "BRIDGE.SWITCH scheduled show=${orderedShow.map { it.taskId }} park=${tasksToPark.map { it.taskId }} totalMs=$delayMs"
+                "BRIDGE.SWITCH concurrent show=${orderedShow.map { it.taskId }} park=${tasksToPark.map { it.taskId }} gapMs=$showDelay"
             )
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
@@ -132,15 +131,33 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     override fun parkNativeTasks(tasks: List<StageTask>) {
         if (tasks.isEmpty()) return
         runCatching {
-            var delayMs = 0L
-            for (task in tasks) {
-                val targetId = task.taskId
-                mainHandler.postDelayed({ parkSingleFlexibleTask(targetId) }, delayMs)
-                delayMs += FLEXIBLE_STEP_DELAY_MS
+            // Park all tasks concurrently in one main-thread pass.
+            mainHandler.post {
+                for (task in tasks) {
+                    parkSingleFlexibleTask(task.taskId)
+                }
             }
-            HookGuard.info("BRIDGE.PARK scheduled tasks=${tasks.map { it.taskId }} totalMs=$delayMs")
+            HookGuard.info("BRIDGE.PARK concurrent tasks=${tasks.map { it.taskId }}")
         }.onFailure {
             HookGuard.warn("BRIDGE.PARK failed", it)
+        }
+    }
+
+    /**
+     * Promote an externally launched fullscreen task (e.g. opened from notification shade)
+     * directly into a widescreen Flexible Stage window.
+     */
+    fun promoteFullscreenTaskToStage(taskId: Int, packageName: String) {
+        val organizer = shellTaskOrganizer ?: return
+        val dummyTask = StageTask(
+            taskId = taskId,
+            packageName = packageName,
+            bounds = WindowBounds.EMPTY,
+            windowingMode = StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE,
+        )
+        mainHandler.post {
+            restoreSingleFlexibleTask(organizer, dummyTask)
+            HookGuard.info("BRIDGE.PROMOTE_TO_STAGE task=$taskId pkg=$packageName")
         }
     }
 
@@ -363,13 +380,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 HookGuard.info("BRIDGE.RESTORE_FALLBACK_REORDER task=${task.taskId}")
             }
         }
-
-        // Apply memorized (or primary-stage) bounds & scale via native FlexibleTaskController after restore settles.
-        if (!targetBounds.isEmpty) {
-            mainHandler.postDelayed({
-                adjustFlexibleTaskFrame(task.taskId, targetBounds, targetScale)
-            }, 340L)
-        }
+        // NOTE: Do NOT schedule a second delayed adjustFlexibleTaskFrame here — SystemServerFlexibleHook
+        // already applies memorized/widescreen bounds on frame 1 inside collectFlexibleTaskInfo, so a second
+        // adjust call only causes a visible flicker.
     }
 
     private fun resolveHomeToken(organizer: Any): Any? = runCatching {
@@ -389,8 +402,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     companion object {
-        private const val FLEXIBLE_STEP_DELAY_MS = 180L
-        private const val FLEXIBLE_PHASE_GAP_MS = 120L
+        private const val CONCURRENT_HANDOFF_MS = 25L
         private const val KEY_LAUNCH_SCENARIO = "androidx.activity.LaunchScenario"
         private const val KEY_LAUNCH_FLEXIBLE_TASK_ID = "androidx.activity.LaunchFlexibleTaskId"
         private const val KEY_FLEXIBLE_LAUNCH_BOUNDS = "androidx.flexible.LaunchBounds"

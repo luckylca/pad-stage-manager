@@ -88,6 +88,18 @@ object StageNativeRuntime {
     private val taskGeometryMemory = ConcurrentHashMap<Int, SavedGeometry>()
     private val pkgGeometryMemory = ConcurrentHashMap<String, SavedGeometry>()
     private val taskAppearedAtMs = ConcurrentHashMap<Int, Long>()
+    private val lastPromotedAtMs = ConcurrentHashMap<Int, Long>()
+    @Volatile
+    private var lastHomeGestureAtMs: Long = 0L
+    @Volatile
+    private var programmaticTransitionUntilMs: Long = 0L
+
+    fun markProgrammaticTransition(durationMs: Long = 1_200L) {
+        val until = System.currentTimeMillis() + durationMs
+        if (until > programmaticTransitionUntilMs) {
+            programmaticTransitionUntilMs = until
+        }
+    }
 
     /**
      * Tracks pending programmatic launches: packageName -> Pair(mergeIntoActive, timestampMs).
@@ -262,17 +274,10 @@ object StageNativeRuntime {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
 
-        // Official Stage Manager layout: a single-window Stage occupies the main stage (excluding left strip & Dock),
-        // unless the user already memorized a custom size/position for this app.
-        if (!mergeFlag && session.activeStage?.tasks?.size == 1) {
-            val memorized = pkgGeometryMemory[pkg]?.takeIf { it.userCustomized && !it.bounds.isEmpty }
-            val targetBounds = memorized?.bounds
-                ?: bridge.computePrimaryStageBounds(stripVisible = !recentController.isHiddenByUserSetting)
-            val targetScale = memorized?.scale ?: 1.0f
-            taskGeometryMemory[taskInfo.taskId] = SavedGeometry(targetBounds, targetScale, memorized != null)
-            mainHandler.postDelayed({
-                bridge.adjustFlexibleTaskFrame(taskInfo.taskId, targetBounds, targetScale)
-            }, 360L)
+        // If an app was launched fullscreen from outside (e.g. notification shade / deep link) while
+        // Stage Manager is enabled, seamlessly promote it into a widescreen Flexible Stage window.
+        if (stageManagerEnabled && isFullScreenBounds(stageTask.bounds) && isTaskFocused(taskInfo)) {
+            promoteIfNotDebounced(taskInfo.taskId, pkg)
         }
 
         logSession("ON_APPEARED(t=${taskInfo.taskId},merge=$mergeFlag)", session)
@@ -281,22 +286,28 @@ object StageNativeRuntime {
 
     fun onNativeTaskInfoChanged(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
+
+        // Handle swipe-up Home gesture cleanly: when native Launcher regains focus, park Active Stage
+        // cleanly into Recent Strip and dismiss the blurred backdrop (preventing state=2 mini-window clutter).
+        if (pkg == "com.android.launcher" && isTaskFocused(taskInfo) && isTaskVisible(taskInfo)) {
+            handleHomeGestureRetreat()
+            return
+        }
+
         if (!isManagedUserApp(pkg)) return
 
         val stageTask = toStageTask(taskInfo, pkg)
-        // Only record user-customized window size/position after initial launch animation settles (>1200ms).
-        val appearedAt = taskAppearedAtMs[taskInfo.taskId] ?: 0L
-        val settled = System.currentTimeMillis() - appearedAt > 1_200L
-        if (settled && stageTask.isVisible && !stageTask.bounds.isEmpty && !isFullScreenBounds(stageTask.bounds)) {
-            val scale = extractFlexibleScale(taskInfo)
-            val visibleBounds = computeVisibleBounds(stageTask.bounds, scale)
-            val prev = taskGeometryMemory[taskInfo.taskId]
-            if (prev == null || prev.bounds != visibleBounds || kotlin.math.abs(prev.scale - scale) > 0.01f) {
-                val saved = SavedGeometry(visibleBounds, scale, userCustomized = true)
-                taskGeometryMemory[taskInfo.taskId] = saved
-                pkgGeometryMemory[pkg] = saved
-                HookGuard.info("MEMORY saved task=${taskInfo.taskId} pkg=$pkg bounds=$visibleBounds scale=$scale")
+
+        // External notification / fullscreen launch detection
+        if (stageManagerEnabled && stageTask.isVisible && isTaskFocused(taskInfo) && isFullScreenBounds(stageTask.bounds)) {
+            // Park any lingering previous active stage tasks and promote this notification-launched app to Stage
+            val currentActive = registry.getActiveStage()
+            if (currentActive != null && !currentActive.containsTask(taskInfo.taskId)) {
+                val prevTasks = currentActive.tasks
+                registry.deactivateStageToRecentTop(currentActive.stageId)
+                bridge.parkNativeTasks(prevTasks)
             }
+            promoteIfNotDebounced(taskInfo.taskId, pkg)
         }
 
         var session = transitionController.onNativeTaskInfoChanged(stageTask)
@@ -305,6 +316,31 @@ object StageNativeRuntime {
         }
         logSession("ON_CHANGED(t=${taskInfo.taskId})", session)
         updateStripUi(session)
+    }
+
+    private fun handleHomeGestureRetreat() {
+        val now = System.currentTimeMillis()
+        if (now < programmaticTransitionUntilMs) return
+        if (now - lastHomeGestureAtMs < 600L) return
+        val active = registry.getActiveStage() ?: return
+        if (active.tasks.isEmpty()) return
+        lastHomeGestureAtMs = now
+
+        val tasksToPark = active.tasks
+        registry.deactivateStageToRecentTop(active.stageId)
+        bridge.parkNativeTasks(tasksToPark)
+        val session = registry.snapshot()
+        logSession("HOME_GESTURE_RETREAT parked=${tasksToPark.map { it.taskId }}", session)
+        updateStripUi(session)
+    }
+
+    private fun promoteIfNotDebounced(taskId: Int, pkg: String) {
+        val now = System.currentTimeMillis()
+        val last = lastPromotedAtMs[taskId] ?: 0L
+        if (now - last < 1_500L) return
+        lastPromotedAtMs[taskId] = now
+        markProgrammaticTransition(1_200L)
+        bridge.promoteFullscreenTaskToStage(taskId, pkg)
     }
 
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {

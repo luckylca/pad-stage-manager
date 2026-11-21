@@ -211,6 +211,19 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
+     * Compute equal-height side-by-side bounds (left + right) for a 2-window Active Stage,
+     * with a crisp 28px gap between the two windows and zero overlap.
+     */
+    fun computeSideBySideBounds(stripVisible: Boolean = true): Pair<WindowBounds, WindowBounds> {
+        val stage = computePrimaryStageBounds(stripVisible)
+        val gap = 28
+        val halfW = ((stage.width - gap) / 2).coerceAtLeast(420)
+        val left = WindowBounds(stage.left, stage.top, stage.left + halfW, stage.bottom)
+        val right = WindowBounds(stage.left + halfW + gap, stage.top, stage.right, stage.bottom)
+        return left to right
+    }
+
+    /**
      * Injects ColorOS 17 Flexible Window launch bounds & scale directly into `ActivityOptions`
      * via `FlexibleWindowManager.setExtraBundle`, so newly launched & restored windows immediately
      * open at the exact target size and position without scale/handle desync.

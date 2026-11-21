@@ -2,10 +2,6 @@ package dev.stagelab.nativehook.bridge
 
 import android.app.ActivityManager
 import android.app.AndroidAppHelper
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -22,6 +18,7 @@ import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.StageTransitionController
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.StageModeNotificationHelper
 import dev.stagelab.nativehook.ui.dock.StageDockOverlayController
 import dev.stagelab.nativehook.ui.strip.RecentStripOverlayController
 import dev.stagelab.nativehook.xposed.HookGuard
@@ -49,6 +46,7 @@ object StageNativeRuntime {
         },
         onStageDraggedToCenter = { stageId ->
             val session = recentController.onStageTaskDraggedToCenter(stageId)
+            maybeScheduleTwoWindowSideBySide(session)
             updateStripUi(session)
         },
         onLeftEdgeSwipeReveal = {
@@ -199,7 +197,11 @@ object StageNativeRuntime {
             }
             "merge" -> {
                 when {
-                    taskId > 0 -> transitionController.mergeExistingTaskIntoActiveStage(taskId)
+                    taskId > 0 -> {
+                        val s = transitionController.mergeExistingTaskIntoActiveStage(taskId)
+                        maybeScheduleTwoWindowSideBySide(s)
+                        s
+                    }
                     pkg.isNotBlank() -> {
                         pendingLaunches[pkg] = true to System.currentTimeMillis()
                         dockController.onDockAppDraggedToCenter(pkg)
@@ -252,7 +254,7 @@ object StageNativeRuntime {
                 bridge.notifyLauncherBackdrop(false)
                 runCatching {
                     AndroidAppHelper.currentApplication()?.applicationContext?.let {
-                        updateExitNotification(it, false)
+                        syncAppState(it, false)
                     }
                 }
                 registry.snapshot()
@@ -283,6 +285,12 @@ object StageNativeRuntime {
         val session = transitionController.onNativeTaskAppeared(stageTask, mergeIntoActive = mergeFlag)
         if (isTaskFocused(taskInfo)) {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
+        }
+
+        // If a 2nd window was merged into the Active Stage, arrange both windows side-by-side
+        // at equal height so they never overlap by default (user can freely resize afterward).
+        if (mergeFlag) {
+            maybeScheduleTwoWindowSideBySide(session)
         }
 
         // If an app was launched fullscreen from outside (e.g. notification shade / deep link) while
@@ -380,18 +388,18 @@ object StageNativeRuntime {
             bridge.setSystemNavigationLocked(false)
             bridge.notifyLauncherBackdrop(false)
             if (!stageManagerEnabled && ctx != null) {
-                updateExitNotification(ctx, false)
+                syncAppState(ctx, false)
             }
             return
         }
 
         // Desktop-replacement mode: keep blurred wallpaper backdrop always on, lock Home/Recents gestures,
-        // and show a persistent notification so the user can tap once to exit Stage Manager mode.
+        // and sync standalone notification + MainActivity state in dev.stagelab.nativehook.
         bridge.notifyLauncherBackdrop(true)
         bridge.setSystemNavigationLocked(true)
 
         if (ctx == null) return
-        updateExitNotification(ctx, true)
+        syncAppState(ctx, true)
         stripOverlay.update(
             context = ctx,
             session = session,
@@ -408,58 +416,42 @@ object StageNativeRuntime {
     }
 
     @Volatile
-    private var exitNotificationShown = false
+    private var lastSyncedAppEnabled: Boolean? = null
 
-    private fun updateExitNotification(context: Context, show: Boolean) {
-        if (show == exitNotificationShown) return
+    /**
+     * Broadcasts authoritative enabled state to `dev.stagelab.nativehook` so the app itself posts/cancels
+     * its standalone notification (never mixed into SystemUI notifications) and keeps MainActivity switch in sync.
+     */
+    private fun syncAppState(context: Context, enabled: Boolean) {
+        if (lastSyncedAppEnabled == enabled) return
+        lastSyncedAppEnabled = enabled
         runCatching {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            if (!show) {
-                nm.cancel(EXIT_NOTIFICATION_ID)
-                exitNotificationShown = false
-                HookGuard.info("NOTIFICATION exit notice cancelled")
-                return
+            val intent = Intent(StageModeNotificationHelper.ACTION_SYNC_STATE).apply {
+                setPackage("dev.stagelab.nativehook")
+                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                putExtra(StageModeNotificationHelper.KEY_ENABLED, enabled)
             }
-            val channel = NotificationChannel(
-                EXIT_CHANNEL_ID,
-                "台前调度模式",
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                description = "台前调度运行状态与一键退出入口"
-                setShowBadge(false)
-            }
-            nm.createNotificationChannel(channel)
-
-            val exitIntent = Intent(ACTION_STAGE_CMD).apply {
-                setPackage("com.android.systemui")
-                putExtra("cmd", "disable_module")
-            }
-            val pendingExit = PendingIntent.getBroadcast(
-                context,
-                EXIT_NOTIFICATION_ID,
-                exitIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-
-            val notification = Notification.Builder(context, EXIT_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("台前调度模式运行中")
-                .setContentText("已接管桌面与导航手势 · 点击此处退出台前调度模式")
-                .setOngoing(true)
-                .setAutoCancel(false)
-                .setContentIntent(pendingExit)
-                .build()
-
-            nm.notify(EXIT_NOTIFICATION_ID, notification)
-            exitNotificationShown = true
-            HookGuard.info("NOTIFICATION exit notice posted (id=$EXIT_NOTIFICATION_ID)")
+            context.sendBroadcast(intent)
+            HookGuard.info("APP_STATE_SYNC sent enabled=$enabled")
         }.onFailure {
-            HookGuard.warn("NOTIFICATION update failed (show=$show)", it)
+            HookGuard.warn("APP_STATE_SYNC failed (enabled=$enabled)", it)
         }
     }
 
-    private const val EXIT_CHANNEL_ID = "stagelab_stage_mode"
-    private const val EXIT_NOTIFICATION_ID = 20260418
+    private fun maybeScheduleTwoWindowSideBySide(session: StageSession) {
+        val active = session.activeStage ?: return
+        if (active.tasks.size != 2) return
+        val firstTaskId = active.tasks[0].taskId
+        val secondTaskId = active.tasks[1].taskId
+        val (leftBounds, rightBounds) = bridge.computeSideBySideBounds(
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+        mainHandler.postDelayed({
+            bridge.adjustFlexibleTaskFrame(firstTaskId, leftBounds, 1.0f)
+            bridge.adjustFlexibleTaskFrame(secondTaskId, rightBounds, 1.0f)
+            HookGuard.info("STAGE.SIDE_BY_SIDE left=$firstTaskId:$leftBounds right=$secondTaskId:$rightBounds")
+        }, 220L)
+    }
 
     private fun isFullScreenBounds(b: WindowBounds): Boolean {
         val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
@@ -572,6 +564,7 @@ object StageNativeRuntime {
         if (pkg.isBlank()) return false
         return pkg != "com.android.launcher" &&
             pkg != "com.android.systemui" &&
+            pkg != "dev.stagelab.nativehook" &&
             pkg != "com.android.permissioncontroller" &&
             pkg != "com.android.packageinstaller" &&
             pkg != "com.oplus.appdetail"

@@ -1,6 +1,12 @@
 package dev.stagelab.nativehook.ui
 
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -75,12 +81,36 @@ private val StageLabColorScheme = lightColorScheme(
 )
 
 class MainActivity : ComponentActivity() {
+    private val moduleEnabledState = mutableStateOf(false)
+
+    private val uiStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == StageModeNotificationHelper.ACTION_UI_STATE_CHANGED) {
+                moduleEnabledState.value = intent.getBooleanExtra(StageModeNotificationHelper.KEY_ENABLED, false)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("stagelab_native_prefs", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
+
+        val prefs = getSharedPreferences(StageModeNotificationHelper.PREFS_NAME, MODE_PRIVATE)
+        moduleEnabledState.value = prefs.getBoolean(StageModeNotificationHelper.KEY_ENABLED, false)
+
+        registerReceiver(
+            uiStateReceiver,
+            IntentFilter(StageModeNotificationHelper.ACTION_UI_STATE_CHANGED),
+            RECEIVER_NOT_EXPORTED,
+        )
+
         setContent {
             MaterialTheme(colorScheme = StageLabColorScheme) {
-                var moduleEnabled by remember { mutableStateOf(prefs.getBoolean("enabled", true)) }
+                val moduleEnabled by moduleEnabledState
                 var safeMode by remember { mutableStateOf(prefs.getBoolean("safe_mode", false)) }
                 var hideRecentStrip by remember { mutableStateOf(prefs.getBoolean("hide_strip", false)) }
                 var hideDock by remember { mutableStateOf(prefs.getBoolean("hide_dock", false)) }
@@ -93,18 +123,29 @@ class MainActivity : ComponentActivity() {
                     hideRecentStrip = hideRecentStrip,
                     hideDock = hideDock,
                     onToggleEnabled = { next ->
-                        moduleEnabled = next
-                        prefs.edit().putBoolean("enabled", next).apply()
+                        moduleEnabledState.value = next
+                        prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, next).apply()
                         if (!next) {
+                            StageModeNotificationHelper.cancelExitNotification(this@MainActivity)
                             sendStageCmd("disable_module")
                         } else {
+                            StageModeNotificationHelper.showExitNotification(this@MainActivity)
                             sendStageCmd("enable_module")
+                            // Immediately dismiss settings Activity so the user lands cleanly on the
+                            // blurred-wallpaper Stage canvas instead of being stuck on a fullscreen settings page.
+                            moveTaskToBack(true)
+                            finishAndRemoveTask()
                         }
                     },
                     onToggleSafeMode = { next ->
                         safeMode = next
                         prefs.edit().putBoolean("safe_mode", next).apply()
-                        if (next) sendStageCmd("disable_module")
+                        if (next) {
+                            moduleEnabledState.value = false
+                            prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, false).apply()
+                            StageModeNotificationHelper.cancelExitNotification(this@MainActivity)
+                            sendStageCmd("disable_module")
+                        }
                     },
                     onToggleHideStrip = { next ->
                         hideRecentStrip = next
@@ -129,10 +170,26 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onSyncLiveTasks = { sendStageCmd("sync_live") },
-                    onCleanReset = { sendStageCmd("disable_module") },
+                    onCleanReset = {
+                        moduleEnabledState.value = false
+                        prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, false).apply()
+                        StageModeNotificationHelper.cancelExitNotification(this@MainActivity)
+                        sendStageCmd("disable_module")
+                    },
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences(StageModeNotificationHelper.PREFS_NAME, MODE_PRIVATE)
+        moduleEnabledState.value = prefs.getBoolean(StageModeNotificationHelper.KEY_ENABLED, false)
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(uiStateReceiver) }
+        super.onDestroy()
     }
 
     private fun sendStageCmd(cmd: String) {

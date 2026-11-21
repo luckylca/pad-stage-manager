@@ -1,5 +1,6 @@
 package dev.stagelab.nativehook.ui
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.stagelab.nativehook.bridge.StageNativeRuntime
 
 object ModuleStatus {
     /** Hooked by StageLabHookEntry to return true when LSPosed/Vector is active. */
@@ -79,23 +82,53 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = StageLabColorScheme) {
                 var moduleEnabled by remember { mutableStateOf(prefs.getBoolean("enabled", true)) }
                 var safeMode by remember { mutableStateOf(prefs.getBoolean("safe_mode", false)) }
+                var hideRecentStrip by remember { mutableStateOf(prefs.getBoolean("hide_strip", false)) }
                 val active = remember { ModuleStatus.isXposedModuleActive() }
 
                 SettingsScreen(
                     isModuleActive = active,
                     moduleEnabled = moduleEnabled,
                     safeMode = safeMode,
+                    hideRecentStrip = hideRecentStrip,
                     onToggleEnabled = { next ->
                         moduleEnabled = next
                         prefs.edit().putBoolean("enabled", next).apply()
+                        if (!next) {
+                            sendStageCmd("disable_module")
+                        } else {
+                            sendStageCmd("sync_live")
+                        }
                     },
                     onToggleSafeMode = { next ->
                         safeMode = next
                         prefs.edit().putBoolean("safe_mode", next).apply()
+                        if (next) sendStageCmd("disable_module")
                     },
+                    onToggleHideStrip = { next ->
+                        hideRecentStrip = next
+                        prefs.edit().putBoolean("hide_strip", next).apply()
+                        sendBroadcast(
+                            Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
+                                setPackage("com.android.systemui")
+                                putExtra("cmd", "strip_hide")
+                                putExtra("hidden", next)
+                            },
+                        )
+                    },
+                    onSyncLiveTasks = { sendStageCmd("sync_live") },
+                    onCleanReset = { sendStageCmd("disable_module") },
                 )
             }
         }
+    }
+
+    private fun sendStageCmd(cmd: String) {
+        sendBroadcast(
+            Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
+                setPackage("com.android.systemui")
+                putExtra("cmd", cmd)
+            },
+        )
     }
 }
 
@@ -104,15 +137,18 @@ private fun SettingsScreen(
     isModuleActive: Boolean,
     moduleEnabled: Boolean,
     safeMode: Boolean,
+    hideRecentStrip: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
     onToggleSafeMode: (Boolean) -> Unit,
+    onToggleHideStrip: (Boolean) -> Unit,
+    onSyncLiveTasks: () -> Unit,
+    onCleanReset: () -> Unit,
 ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MdSurface),
     ) {
-        // Material You organic blurred atmospheric shapes
         Box(
             modifier = Modifier
                 .size(320.dp)
@@ -138,7 +174,6 @@ private fun SettingsScreen(
                 .padding(horizontal = 24.dp, vertical = 32.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            // Hero Header Card
             Surface(
                 shape = RoundedCornerShape(32.dp),
                 color = MdSurfaceContainer,
@@ -155,7 +190,7 @@ private fun SettingsScreen(
                         color = if (isModuleActive) MdSecondaryContainer else MdTertiary.copy(alpha = 0.16f),
                     ) {
                         Text(
-                            text = if (isModuleActive) "Vector / LSPosed 已激活 · N2 只读观察" else "等待在 Vector / LSPosed 中启用",
+                            text = if (isModuleActive) "Vector / LSPosed 已激活 · ColorOS 17 原生小窗模式" else "请在 Vector / LSPosed 中启用本模块",
                             color = if (isModuleActive) MdOnSecondaryContainer else MdTertiary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
@@ -169,7 +204,7 @@ private fun SettingsScreen(
                         color = MdOnSurface,
                     )
                     Text(
-                        text = "基于 ColorOS 17 原生 Flexible Window 与 ShellTaskOrganizer 的 iPad 台前调度模块。",
+                        text = "基于 ColorOS 17 原生 Flexible Window、ShellTaskOrganizer 与原生 Dock 的 iPad 台前调度模块。",
                         fontSize = 15.sp,
                         lineHeight = 22.sp,
                         color = MdOnSurfaceVariant,
@@ -177,7 +212,6 @@ private fun SettingsScreen(
                 }
             }
 
-            // Control Card
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = MdSurfaceContainer,
@@ -189,21 +223,26 @@ private fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
                     SettingSwitchRow(
-                        title = "启用模块观察器",
-                        subtitle = "仅 Hook com.android.systemui（N2 只读模式，不修改任何系统窗口行为）",
+                        title = "启用台前调度（Stage Manager）",
+                        subtitle = "关闭后立即移除左侧悬浮缩略图并保留全部用户任务，恢复 ColorOS 原生体验",
                         checked = moduleEnabled,
                         onCheckedChange = onToggleEnabled,
                     )
                     SettingSwitchRow(
+                        title = "隐藏左侧最近应用栏（Recent Strip）",
+                        subtitle = "隐藏后从屏幕最左侧边缘向右轻扫可临时呼出",
+                        checked = hideRecentStrip,
+                        onCheckedChange = onToggleHideStrip,
+                    )
+                    SettingSwitchRow(
                         title = "安全模式（Safe Mode）",
-                        subtitle = "开启后跳过全部 Hook 回调，保留 ColorOS 100% 原生行为",
+                        subtitle = "跳过全部 Hook 回调，保留 ColorOS 100% 原生行为",
                         checked = safeMode,
                         onCheckedChange = onToggleSafeMode,
                     )
                 }
             }
 
-            // Target Baseline & Recovery Card
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = MdSurfaceContainer,
@@ -212,14 +251,30 @@ private fun SettingsScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        text = "ADB 快速恢复与日志",
+                        text = "快捷操作与安全恢复",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Medium,
                         color = MdOnSurface,
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = onSyncLiveTasks,
+                            shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MdPrimary),
+                        ) {
+                            Text(text = "同步当前运行窗口", fontWeight = FontWeight.Medium)
+                        }
+                        OutlinedButton(
+                            onClick = onCleanReset,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(text = "清除逻辑状态", color = MdPrimary, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "紧急禁用：\nadb shell su -c \"/data/adb/lspd/cli modules disable dev.stagelab.nativehook\"\n\n实时日志：\nadb logcat -s StageLabNativeHook:V",
                         fontSize = 13.sp,
@@ -227,14 +282,6 @@ private fun SettingsScreen(
                         lineHeight = 20.sp,
                         color = MdOnSurfaceVariant,
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Button(
-                        onClick = { onToggleSafeMode(true) },
-                        shape = RoundedCornerShape(999.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MdPrimary),
-                    ) {
-                        Text(text = "一键切入安全模式", fontWeight = FontWeight.Medium)
-                    }
                 }
             }
         }

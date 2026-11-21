@@ -1,0 +1,71 @@
+package dev.stagelab.nativehook.xposed
+
+import android.app.ActivityManager
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
+import dev.stagelab.nativehook.bridge.StageNativeRuntime
+
+/**
+ * N6 ColorOS Native Window `···` Menu integration inside `com.android.systemui`.
+ *
+ * Hooks `com.oplus.flexibletask.menu.FlexibleMenuManager` so native window menu actions
+ * (Minimize / Split out to Recent Strip, Close, Add window) stay strictly synchronized
+ * with the frozen Stage state machine (S3 / S5 / S6) without replacing the native title bar.
+ */
+object FlexibleMenuHook {
+
+    private const val FLEXIBLE_MENU_MANAGER = "com.oplus.flexibletask.menu.FlexibleMenuManager"
+    private const val EVENT_MINI = 2002
+    private const val EVENT_CLOSE = 2003
+
+    fun install(classLoader: ClassLoader) {
+        val cls = try {
+            XposedHelpers.findClass(FLEXIBLE_MENU_MANAGER, classLoader)
+        } catch (t: Throwable) {
+            HookGuard.warn("FlexibleMenuHook: class not found: $FLEXIBLE_MENU_MANAGER", t)
+            return
+        }
+
+        try {
+            XposedBridge.hookAllMethods(cls, "notifySystemMenuEvent", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent") {
+                        val event = param.args.firstOrNull() as? Int ?: return@safeRun
+                        val taskInfo = resolveCurrentTaskInfo(param.thisObject) ?: return@safeRun
+                        val taskId = taskInfo.taskId
+                        HookGuard.info("NATIVE_MENU event=$event task=$taskId pkg=${StageNativeRuntime.resolvePkg(taskInfo)}")
+
+                        when (event) {
+                            EVENT_MINI -> {
+                                // S5: Minimize / split task into its own single-window Stage in Recent Strip
+                                StageNativeRuntime.onNativeMenuMinimize(taskId)
+                            }
+                            EVENT_CLOSE -> {
+                                // ColorOS menu close parks/exits the flexible window; reflect in S5 minimize/split
+                                StageNativeRuntime.onNativeMenuMinimize(taskId)
+                            }
+                        }
+                    }
+                }
+            })
+            HookGuard.info("FlexibleMenuHook: hooked $FLEXIBLE_MENU_MANAGER#notifySystemMenuEvent")
+        } catch (t: Throwable) {
+            HookGuard.warn("FlexibleMenuHook: failed to hook notifySystemMenuEvent", t)
+        }
+    }
+
+    private fun resolveCurrentTaskInfo(menuManager: Any): ActivityManager.RunningTaskInfo? {
+        return runCatching {
+            val fields = menuManager.javaClass.declaredFields
+            for (f in fields) {
+                if (ActivityManager.RunningTaskInfo::class.java.isAssignableFrom(f.type)) {
+                    f.isAccessible = true
+                    val v = f.get(menuManager) as? ActivityManager.RunningTaskInfo
+                    if (v != null) return v
+                }
+            }
+            null
+        }.getOrNull()
+    }
+}

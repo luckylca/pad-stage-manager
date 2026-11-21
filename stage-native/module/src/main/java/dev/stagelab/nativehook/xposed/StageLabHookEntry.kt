@@ -12,21 +12,27 @@ import dev.stagelab.nativehook.bridge.StageNativeRuntime
 /**
  * StageLab Native LSPosed Entry Point for ColorOS 17 (OPD2515 / Android 17 API 37).
  *
- * Scope: `com.android.systemui` ONLY (zero system_server injection).
- * Connects `ShellTaskOrganizer` & `FullscreenTaskListener` live events into `StageNativeRuntime`.
+ * Scope:
+ * - `com.android.systemui`: ShellTaskOrganizer, FullscreenTaskListener, FlexibleMenuManager, Recent Strip.
+ * - `com.android.launcher`: Native ColorOS Taskbar/Dock click (S1) and drag-merge hint (S3).
+ * Zero `system_server` injection.
  */
 class StageLabHookEntry : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName == "dev.stagelab.nativehook") {
-            markSelfActive(lpparam.classLoader)
-            return
+        when (lpparam.packageName) {
+            SELF_PKG -> markSelfActive(lpparam.classLoader)
+            SYSTEMUI_PKG -> {
+                HookGuard.info("Loaded in $SYSTEMUI_PKG (process=${lpparam.processName}) — installing N6/N7 SystemUI hooks")
+                installShellTaskOrganizerHooks(lpparam.classLoader)
+                installFullscreenTaskListenerObserver(lpparam.classLoader)
+                FlexibleMenuHook.install(lpparam.classLoader)
+            }
+            LAUNCHER_PKG -> {
+                HookGuard.info("Loaded in $LAUNCHER_PKG (process=${lpparam.processName}) — installing N6 Dock hooks")
+                LauncherDockHook.install(lpparam.classLoader)
+            }
         }
-        if (lpparam.packageName != SYSTEMUI_PKG) return
-
-        HookGuard.info("Loaded in $SYSTEMUI_PKG (process=${lpparam.processName}) — installing N4 SystemUI hooks")
-        installShellTaskOrganizerHooks(lpparam.classLoader)
-        installFullscreenTaskListenerObserver(lpparam.classLoader)
     }
 
     private fun markSelfActive(classLoader: ClassLoader) {
@@ -55,7 +61,6 @@ class StageLabHookEntry : IXposedHookLoadPackage {
             return
         }
 
-        // Exact single-overload hook: onTaskAppeared(android.window.TaskAppearedInfo)
         try {
             val taskAppearedInfoCls = XposedHelpers.findClass("android.window.TaskAppearedInfo", classLoader)
             XposedHelpers.findAndHookMethod(
@@ -77,7 +82,6 @@ class StageLabHookEntry : IXposedHookLoadPackage {
             HookGuard.warn("Failed to hook $clsName#onTaskAppeared(TaskAppearedInfo)", t)
         }
 
-        // onTaskInfoChanged(android.app.ActivityManager$RunningTaskInfo)
         try {
             XposedHelpers.findAndHookMethod(
                 organizerClass,
@@ -98,7 +102,6 @@ class StageLabHookEntry : IXposedHookLoadPackage {
             HookGuard.warn("Failed to hook $clsName#onTaskInfoChanged", t)
         }
 
-        // onTaskVanished(android.app.ActivityManager$RunningTaskInfo)
         try {
             XposedHelpers.findAndHookMethod(
                 organizerClass,
@@ -167,6 +170,8 @@ class StageLabHookEntry : IXposedHookLoadPackage {
     }
 
     companion object {
+        private const val SELF_PKG = "dev.stagelab.nativehook"
         private const val SYSTEMUI_PKG = "com.android.systemui"
+        private const val LAUNCHER_PKG = "com.android.launcher"
     }
 }

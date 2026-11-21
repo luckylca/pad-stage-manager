@@ -52,6 +52,9 @@ object StageNativeRuntime {
 
     private val receiverRegistered = AtomicBoolean(false)
 
+    @Volatile
+    private var isDeviceLocked = false
+
     /**
      * Tracks pending programmatic launches: packageName -> Pair(mergeIntoActive, timestampMs).
      * Expires after 8 seconds so unrelated manual launches are never misclassified.
@@ -73,10 +76,43 @@ object StageNativeRuntime {
         try {
             val filter = IntentFilter(ACTION_STAGE_CMD)
             ctx.registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
-            HookGuard.info("Registered N4 command receiver: $ACTION_STAGE_CMD")
+
+            // N7 System lifecycle awareness: hide strip on lockscreen, restore on unlock, adapt on rotation.
+            val sysFilter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_CONFIGURATION_CHANGED)
+            }
+            ctx.registerReceiver(systemLifecycleReceiver, sysFilter, Context.RECEIVER_EXPORTED)
+            HookGuard.info("Registered N6/N7 command & system lifecycle receivers")
         } catch (t: Throwable) {
             receiverRegistered.set(false)
-            HookGuard.warn("Failed to register command receiver", t)
+            HookGuard.warn("Failed to register receivers", t)
+        }
+    }
+
+    private val systemLifecycleReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            HookGuard.safeRun("SystemLifecycleReceiver.onReceive") {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        isDeviceLocked = true
+                        stripOverlay.detach()
+                        HookGuard.info("LIFECYCLE screen off -> Recent Strip hidden")
+                    }
+                    Intent.ACTION_USER_PRESENT -> {
+                        isDeviceLocked = false
+                        updateStripUi(registry.snapshot())
+                        HookGuard.info("LIFECYCLE unlocked -> Recent Strip restored")
+                    }
+                    Intent.ACTION_CONFIGURATION_CHANGED -> {
+                        if (!isDeviceLocked) {
+                            updateStripUi(registry.snapshot())
+                            HookGuard.info("LIFECYCLE config/rotation changed -> Recent Strip re-laid out")
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -116,6 +152,12 @@ object StageNativeRuntime {
                     else -> registry.snapshot()
                 }
             }
+            "merge_hint" -> {
+                if (pkg.isNotBlank()) {
+                    pendingLaunches[pkg] = true to System.currentTimeMillis()
+                }
+                registry.snapshot()
+            }
             "switch" -> {
                 if (stageId.isNotBlank()) {
                     recentController.onStageThumbnailClicked(stageId)
@@ -136,7 +178,8 @@ object StageNativeRuntime {
                 recentController.setHiddenByUserSetting(hidden)
                 registry.snapshot()
             }
-            "reset" -> {
+            "disable_module", "reset" -> {
+                // Cleanly remove attached UI and clear logical Stage metadata while keeping user app tasks intact.
                 registry.clear()
                 pendingLaunches.clear()
                 stripOverlay.detach()
@@ -186,7 +229,17 @@ object StageNativeRuntime {
         updateStripUi(session)
     }
 
+    fun onNativeMenuMinimize(taskId: Int) {
+        val session = dockController.onWindowMenuMinimize(taskId)
+        logSession("ON_NATIVE_MENU_MINIMIZE(t=$taskId)", session)
+        updateStripUi(session)
+    }
+
     private fun updateStripUi(session: StageSession) {
+        if (isDeviceLocked) {
+            stripOverlay.detach()
+            return
+        }
         val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
         stripOverlay.update(
             context = ctx,

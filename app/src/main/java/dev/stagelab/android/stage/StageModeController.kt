@@ -117,6 +117,12 @@ object StageModeController {
         // 2b. ColorOS freezes the Shizuku manager aggressively, which kills the UserService binding.
         ensureBatteryWhitelist(context)
 
+        // 2c. Register non-reparenting TaskOrganizer for real hardware SurfaceFlinger rounded corners & shadows.
+        runCatching {
+            val res = StageRuntime.command(org.json.JSONObject().put("cmd", "organizerProbe"))
+            Log.i(TAG, "organizerProbe: ${res.optString("result")}")
+        }
+
         // 3. Restore / create the workspace.
         StageWorkspace.attach(context)
         StageWorkspace.reloadSession()
@@ -145,8 +151,9 @@ object StageModeController {
         StageHostActivity.requestFinish()
         StageWorkspace.stopPolling()
 
-        // 2. Give every staged task back to the system: full screen, focusable, visible.
+        // 2. Unregister TaskOrganizer and give every staged task back to the system: full screen, focusable, visible.
         if (StageRuntime.isConnected) {
+            runCatching { StageRuntime.command(org.json.JSONObject().put("cmd", "organizerUnregister")) }
             runCatching { restoreTasksToFullscreen() }
         }
 

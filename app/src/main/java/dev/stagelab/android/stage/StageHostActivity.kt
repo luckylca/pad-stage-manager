@@ -48,7 +48,8 @@ class StageHostActivity : ComponentActivity() {
     private data class GeometryCommit(
         val rect: StageRect,
         val final: Boolean,
-        val resized: Boolean
+        val resized: Boolean,
+        val liveMoveOnly: Boolean = false
     )
 
     private lateinit var chrome: WindowChromeController
@@ -56,39 +57,40 @@ class StageHostActivity : ComponentActivity() {
     private lateinit var transitionOverlay: StageTransitionOverlay
     private lateinit var wallpaperBackdrop: WallpaperBackdrop
 
-    /** Per-window conflated channels for live drag (zero Compose recomposition) and final commits. */
-    private val liveMoveQueues = ConcurrentHashMap<String, Channel<StageRect>>()
+    /**
+     * Single per-window conflated channel for BOTH live drag and final commits so a late liveMove
+     * can NEVER overtake PHASE_END and snap the window backward on release.
+     */
     private val geometryQueues = ConcurrentHashMap<String, Channel<GeometryCommit>>()
 
     private fun enqueueLiveMove(id: String, rect: StageRect) {
-        val channel = liveMoveQueues.computeIfAbsent(id) {
-            val ch = Channel<StageRect>(Channel.CONFLATED)
-            lifecycleScope.launch {
-                for (r in ch) {
-                    StageWorkspace.moveWindowLive(id, r)
-                }
-            }
-            ch
-        }
-        channel.trySend(rect)
+        enqueueCommit(id, GeometryCommit(rect, final = false, resized = false, liveMoveOnly = true))
     }
 
     private fun enqueueGeometry(id: String, rect: StageRect, final: Boolean, resized: Boolean) {
+        enqueueCommit(id, GeometryCommit(rect, final = final, resized = resized, liveMoveOnly = false))
+    }
+
+    private fun enqueueCommit(id: String, commit: GeometryCommit) {
         val channel = geometryQueues.computeIfAbsent(id) {
             val ch = Channel<GeometryCommit>(Channel.CONFLATED)
             lifecycleScope.launch {
                 for (update in ch) {
-                    StageWorkspace.updateGeometryPx(id, update.rect)
-                    StageWorkspace.commitGeometry(id)
-                    if (update.final) {
-                        if (update.resized) StageWorkspace.rememberWindowSize(id)
-                        StageWorkspace.persist()
+                    if (update.liveMoveOnly) {
+                        StageWorkspace.moveWindowLive(id, update.rect)
+                    } else {
+                        StageWorkspace.updateGeometryPx(id, update.rect)
+                        StageWorkspace.commitGeometry(id)
+                        if (update.final) {
+                            if (update.resized) StageWorkspace.rememberWindowSize(id)
+                            StageWorkspace.persist()
+                        }
                     }
                 }
             }
             ch
         }
-        channel.trySend(GeometryCommit(rect, final, resized))
+        channel.trySend(commit)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -641,8 +643,6 @@ class StageHostActivity : ComponentActivity() {
 
     override fun onDestroy() {
         StageWorkspace.transitionPlayer = null
-        liveMoveQueues.values.forEach { it.close() }
-        liveMoveQueues.clear()
         geometryQueues.values.forEach { it.close() }
         geometryQueues.clear()
         runCatching { transitionOverlay.destroy() }

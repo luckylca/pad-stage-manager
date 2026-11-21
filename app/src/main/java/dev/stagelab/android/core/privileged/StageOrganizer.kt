@@ -50,10 +50,29 @@ class StageOrganizer : TaskOrganizer() {
         }
     }
 
+    @Volatile
+    var cornerRadiusPx: Float = 42f
+
+    @Volatile
+    var shadowRadiusPx: Float = 24f
+
+    @Volatile
+    var lastDecorError: String? = null
+
     fun register(): String = try {
         val result = registerOrganizer()
         initialTaskCount = result.size
-        "REGISTERED initialTasks=$initialTaskCount"
+        result.forEach { item ->
+            if (item == null) return@forEach
+            runCatching {
+                val info = HiddenApi.invoke(item, "getTaskInfo") as? android.app.ActivityManager.RunningTaskInfo
+                val leash = HiddenApi.invoke(item, "getLeash") as? SurfaceControl
+                if (info != null && leash != null) {
+                    applyDecorIfFreeform(info, leash)
+                }
+            }
+        }
+        "REGISTERED initialTasks=$initialTaskCount decorErr=${lastDecorError ?: "none"}"
     } catch (t: Throwable) {
         "REGISTRATION_FAILED " + TaskMutations().describeError(t)
     }
@@ -67,6 +86,7 @@ class StageOrganizer : TaskOrganizer() {
 
     override fun onTaskAppeared(taskInfo: android.app.ActivityManager.RunningTaskInfo, leash: SurfaceControl) {
         appearedCount += 1
+        applyDecorIfFreeform(taskInfo, leash)
         record("APPEARED " + describe(taskInfo))
     }
 
@@ -76,6 +96,33 @@ class StageOrganizer : TaskOrganizer() {
 
     override fun onTaskInfoChanged(taskInfo: android.app.ActivityManager.RunningTaskInfo) {
         record("CHANGED " + describe(taskInfo))
+    }
+
+    /**
+     * Applies native SurfaceFlinger hardware rounded corners + elevation shadow to FREEFORM tasks
+     * WITHOUT reparenting the leash (preserves 100% native touch, IME, Back, and accessibility).
+     */
+    private fun applyDecorIfFreeform(
+        taskInfo: android.app.ActivityManager.RunningTaskInfo,
+        leash: SurfaceControl
+    ) {
+        val mode = taskWindowingMode(taskInfo)
+        if (mode != TaskMutations.WINDOWING_MODE_FREEFORM) return
+        try {
+            val tx = SurfaceControl.Transaction()
+            HiddenApi.invoke(tx, "setCornerRadius", leash, cornerRadiusPx)
+            runCatching { HiddenApi.invoke(tx, "setShadowRadius", leash, shadowRadiusPx) }
+            tx.apply()
+            tx.close()
+        } catch (t: Throwable) {
+            lastDecorError = TaskMutations().describeError(t)
+        }
+    }
+
+    private fun taskWindowingMode(taskInfo: android.app.ActivityManager.RunningTaskInfo): Int {
+        val config = HiddenApi.fieldOrNull(taskInfo.javaClass, "configuration")?.get(taskInfo) ?: return 0
+        val wc = HiddenApi.fieldOrNull(config.javaClass, "windowConfiguration")?.get(config) ?: return 0
+        return (HiddenApi.invoke(wc, "getWindowingMode") as? Int) ?: 0
     }
 
     private fun describe(taskInfo: android.app.ActivityManager.RunningTaskInfo): String {

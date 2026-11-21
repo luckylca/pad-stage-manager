@@ -159,11 +159,20 @@ object SystemServerFlexibleHook {
             HookGuard.warn("SystemServerFlexibleHook: failed to hook collectFlexibleTaskInfo", t)
         }
 
-        // 2. Allow wide stage bounds during stagelab.force_adjust
+        // 2. Allow wide stage bounds during stagelab.force_adjust and persist the adjusted bounds
         try {
             XposedBridge.hookAllMethods(cls, "adjustFlexibleTask", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    val wasForced = allowWideStageRect.get() == true
                     allowWideStageRect.remove()
+                    if (wasForced) {
+                        HookGuard.safeRun("FlexibleTaskController.adjustFlexibleTask.persist") {
+                            val taskObj = param.args.firstOrNull { it != null && it.javaClass.name.endsWith(".Task") }
+                            if (taskObj != null) {
+                                recordTaskGeometry(taskObj)
+                            }
+                        }
+                    }
                 }
             })
             XposedBridge.hookAllMethods(cls, "isValidAdjustEndRect", object : XC_MethodHook() {

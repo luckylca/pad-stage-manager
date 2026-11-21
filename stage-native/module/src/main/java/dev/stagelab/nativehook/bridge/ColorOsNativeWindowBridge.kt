@@ -108,25 +108,55 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         StageNativeRuntime.markProgrammaticTransition(1_200L)
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
+            val wct = newWindowContainerTransaction()
+            var atomicOps = 0
+            val fallbackPark = mutableListOf<StageTask>()
+            val fallbackShow = mutableListOf<StageTask>()
 
-            // 1. Park ALL outgoing Stage tasks simultaneously (0ms) so windows close together, not one by one.
-            mainHandler.post {
+            if (wct != null) {
+                // 1. Atomically hide + reorder ALL outgoing tasks in ONE single WCT (zero transition queueing!)
                 for (task in tasksToPark) {
-                    parkSingleFlexibleTask(task.taskId)
+                    val token = resolveTaskToken(organizer, task.taskId)
+                    if (token != null) {
+                        runCatching { XposedHelpers.callMethod(wct, "setHidden", token, true) }
+                        XposedHelpers.callMethod(wct, "reorder", token, false)
+                        atomicOps++
+                    } else {
+                        fallbackPark.add(task)
+                    }
                 }
+                // 2. Atomically unhide + raise ALL incoming Stage tasks in the EXACT SAME WCT!
+                for (task in orderedShow) {
+                    val token = resolveTaskToken(organizer, task.taskId)
+                    if (token != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
+                        runCatching { XposedHelpers.callMethod(wct, "setHidden", token, false) }
+                        XposedHelpers.callMethod(wct, "reorder", token, true)
+                        atomicOps++
+                    } else {
+                        fallbackShow.add(task)
+                    }
+                }
+            } else {
+                fallbackPark.addAll(tasksToPark)
+                fallbackShow.addAll(orderedShow)
             }
 
-            // 2. Restore ALL incoming Stage tasks simultaneously after a minimal 25ms handoff gap.
-            val showDelay = if (tasksToPark.isNotEmpty()) CONCURRENT_HANDOFF_MS else 0L
-            mainHandler.postDelayed({
-                for (task in orderedShow) {
-                    restoreSingleFlexibleTask(organizer, task)
+            mainHandler.post {
+                if (wct != null && atomicOps > 0) {
+                    runCatching {
+                        applyTransaction(organizer, wct)
+                        HookGuard.info(
+                            "BRIDGE.SWITCH_ATOMIC ops=$atomicOps show=${orderedShow.map { it.taskId }} park=${tasksToPark.map { it.taskId }}"
+                        )
+                    }.onFailure {
+                        HookGuard.warn("BRIDGE.SWITCH_ATOMIC failed, falling back", it)
+                        for (t in tasksToPark) parkSingleFlexibleTask(t.taskId)
+                        for (t in orderedShow) restoreSingleFlexibleTask(organizer, t)
+                    }
                 }
-            }, showDelay)
-
-            HookGuard.info(
-                "BRIDGE.SWITCH concurrent show=${orderedShow.map { it.taskId }} park=${tasksToPark.map { it.taskId }} gapMs=$showDelay"
-            )
+                for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
+                for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
+            }
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
         }
@@ -134,14 +164,37 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
     override fun parkNativeTasks(tasks: List<StageTask>) {
         if (tasks.isEmpty()) return
+        val organizer = shellTaskOrganizer
         runCatching {
-            // Park all tasks concurrently in one main-thread pass.
-            mainHandler.post {
+            val wct = if (organizer != null) newWindowContainerTransaction() else null
+            var atomicOps = 0
+            val fallbackPark = mutableListOf<StageTask>()
+            if (organizer != null && wct != null) {
                 for (task in tasks) {
-                    parkSingleFlexibleTask(task.taskId)
+                    val token = resolveTaskToken(organizer, task.taskId)
+                    if (token != null) {
+                        runCatching { XposedHelpers.callMethod(wct, "setHidden", token, true) }
+                        XposedHelpers.callMethod(wct, "reorder", token, false)
+                        atomicOps++
+                    } else {
+                        fallbackPark.add(task)
+                    }
                 }
+            } else {
+                fallbackPark.addAll(tasks)
             }
-            HookGuard.info("BRIDGE.PARK concurrent tasks=${tasks.map { it.taskId }}")
+            mainHandler.post {
+                if (organizer != null && wct != null && atomicOps > 0) {
+                    runCatching {
+                        applyTransaction(organizer, wct)
+                        HookGuard.info("BRIDGE.PARK_ATOMIC ops=$atomicOps tasks=${tasks.map { it.taskId }}")
+                    }.onFailure {
+                        HookGuard.warn("BRIDGE.PARK_ATOMIC failed, falling back", it)
+                        for (t in tasks) parkSingleFlexibleTask(t.taskId)
+                    }
+                }
+                for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
+            }
         }.onFailure {
             HookGuard.warn("BRIDGE.PARK failed", it)
         }
@@ -434,6 +487,18 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             as? ActivityManager.RunningTaskInfo ?: return null
         XposedHelpers.getObjectField(homeInfo, "token")
     }.getOrNull()
+
+    private fun isTaskCurrentlyFlexibleBounds(organizer: Any, taskId: Int): Boolean = runCatching {
+        val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", taskId)
+            as? ActivityManager.RunningTaskInfo ?: return false
+        val bounds = StageNativeRuntime.extractBounds(info)
+        if (bounds.isEmpty) return false
+        val dm = appContext()?.resources?.displayMetrics
+        val sw = dm?.widthPixels ?: 2520
+        val sh = dm?.heightPixels ?: 1680
+        // Flexible tasks have non-fullscreen window bounds (not 0,0..sw,sh)
+        !(bounds.left == 0 && bounds.top == 0 && bounds.right == sw && bounds.bottom == sh)
+    }.getOrDefault(false)
 
     private fun resolveTaskToken(organizer: Any, taskId: Int): Any? = runCatching {
         val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", taskId)

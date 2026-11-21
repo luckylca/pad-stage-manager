@@ -72,8 +72,8 @@ class StageDockOverlayController(
 
         // Collect recent app packages from active & recent stages (excluding pinned apps to prevent duplicates)
         val latestPkgs = buildList {
-            session.activeStage?.tasks?.forEach { add(it.packageName) }
-            session.allRecentStages.forEach { st -> st.tasks.forEach { add(it.packageName) } }
+            session.activeStage?.tasks?.forEach { add(normalizePackageName(it.packageName)) }
+            session.allRecentStages.forEach { st -> st.tasks.forEach { add(normalizePackageName(it.packageName)) } }
         }.distinct()
         for (pkg in latestPkgs) {
             if (!pinnedPackages.contains(pkg)) {
@@ -438,6 +438,11 @@ class StageDockOverlayController(
         return candidates.filter { pkg ->
             runCatching { pm.getLaunchIntentForPackage(pkg) != null }.getOrDefault(false)
         }.take(MAX_PINNED_ICONS)
+    }
+
+    private fun normalizePackageName(pkg: String): String = when (pkg) {
+        "com.oplus.wirelesssettings", "com.oplus.settings" -> "com.android.settings"
+        else -> pkg
     }
 
     private fun dp(context: Context, value: Int): Int =

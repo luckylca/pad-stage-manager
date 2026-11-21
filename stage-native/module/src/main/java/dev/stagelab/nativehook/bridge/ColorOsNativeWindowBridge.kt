@@ -6,6 +6,7 @@ import android.app.AndroidAppHelper
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
+import android.os.Binder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -30,6 +31,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     private var shellTaskOrganizer: Any? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val navLockToken = Binder()
+    @Volatile
+    private var lastNavLocked: Boolean? = null
 
     fun attachShellTaskOrganizer(organizer: Any) {
         if (shellTaskOrganizer !== organizer) {
@@ -189,18 +193,21 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val dm = ctx?.resources?.displayMetrics
         val screenW = dm?.widthPixels ?: 2520
         val screenH = dm?.heightPixels ?: 1680
-        val density = dm?.density ?: 2.625f
         val isLandscape = screenW >= screenH
 
-        val leftPx = if (stripVisible) {
-            if (isLandscape) (168f * density).toInt() else (136f * density).toInt()
+        return if (isLandscape) {
+            val leftPx = if (stripVisible) (screenW * 0.185f).toInt() else (screenW * 0.032f).toInt()
+            val topPx = (screenH * 0.058f).toInt()
+            val rightPx = screenW - (screenW * 0.032f).toInt()
+            val bottomPx = screenH - (screenH * 0.195f).toInt()
+            WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
         } else {
-            (18f * density).toInt()
+            val leftPx = if (stripVisible) (screenW * 0.21f).toInt() else (screenW * 0.03f).toInt()
+            val topPx = (screenH * 0.045f).toInt()
+            val rightPx = screenW - (screenW * 0.03f).toInt()
+            val bottomPx = screenH - (screenH * 0.145f).toInt()
+            WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
         }
-        val topPx = (32f * density).toInt()
-        val rightPx = screenW - (18f * density).toInt()
-        val bottomPx = screenH - (96f * density).toInt()
-        return WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
     }
 
     /**
@@ -260,6 +267,30 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 putExtra("visible", visible)
             }
             ctx.sendBroadcast(intent)
+        }
+    }
+
+    /**
+     * Locks or unlocks system Home & Recents/Overview navigation gestures natively via
+     * `IStatusBarService.disable(DISABLE_HOME | DISABLE_RECENT, token, pkg)`.
+     * Because the lock is bound to `navLockToken`, if SystemUI ever restarts, Android
+     * automatically unlinks and restores normal navigation.
+     */
+    fun setSystemNavigationLocked(locked: Boolean) {
+        if (lastNavLocked == locked) return
+        runCatching {
+            val smCls = Class.forName("android.os.ServiceManager")
+            val binder = XposedHelpers.callStaticMethod(smCls, "getService", "statusbar")
+                ?: return@runCatching
+            val stubCls = Class.forName("com.android.internal.statusbar.IStatusBarService\$Stub")
+            val service = XposedHelpers.callStaticMethod(stubCls, "asInterface", binder)
+                ?: return@runCatching
+            val flags = if (locked) (DISABLE_HOME or DISABLE_RECENT) else 0
+            XposedHelpers.callMethod(service, "disable", flags, navLockToken, "com.android.systemui")
+            lastNavLocked = locked
+            HookGuard.info("BRIDGE.NAV_LOCK locked=$locked flags=0x${flags.toString(16)}")
+        }.onFailure {
+            HookGuard.warn("BRIDGE.NAV_LOCK failed (locked=$locked)", it)
         }
     }
 
@@ -403,6 +434,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
     companion object {
         private const val CONCURRENT_HANDOFF_MS = 25L
+        private const val DISABLE_HOME = 0x00200000
+        private const val DISABLE_RECENT = 0x01000000
         private const val KEY_LAUNCH_SCENARIO = "androidx.activity.LaunchScenario"
         private const val KEY_LAUNCH_FLEXIBLE_TASK_ID = "androidx.activity.LaunchFlexibleTaskId"
         private const val KEY_FLEXIBLE_LAUNCH_BOUNDS = "androidx.flexible.LaunchBounds"

@@ -246,17 +246,17 @@ object SystemServerFlexibleHook {
     private fun computeWidePrimaryStageRect(screenW: Int, screenH: Int): Rect {
         val isLandscape = screenW >= screenH
         return if (isLandscape) {
-            // OPPO Pad mini landscape 2520x1680: leave ~440px on left for slanted strip, ~84px top, ~236px bottom for Dock
-            val left = (screenW * 0.175f).toInt()
-            val top = (screenH * 0.052f).toInt()
-            val right = screenW - (screenW * 0.018f).toInt()
-            val bottom = screenH - (screenH * 0.145f).toInt()
+            // OPPO Pad mini landscape 2520x1680: clean margins from slanted strip, status bar, and bottom Dock (no overlap)
+            val left = (screenW * 0.185f).toInt()
+            val top = (screenH * 0.058f).toInt()
+            val right = screenW - (screenW * 0.032f).toInt()
+            val bottom = screenH - (screenH * 0.195f).toInt()
             Rect(left, top, right, bottom)
         } else {
             val left = (screenW * 0.21f).toInt()
-            val top = (screenH * 0.04f).toInt()
-            val right = screenW - (screenW * 0.025f).toInt()
-            val bottom = screenH - (screenH * 0.11f).toInt()
+            val top = (screenH * 0.045f).toInt()
+            val right = screenW - (screenW * 0.03f).toInt()
+            val bottom = screenH - (screenH * 0.145f).toInt()
             Rect(left, top, right, bottom)
         }
     }

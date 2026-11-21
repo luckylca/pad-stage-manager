@@ -49,19 +49,21 @@ object LauncherBackdropHook {
         }
 
         try {
-            XposedBridge.hookAllMethods(cls, "onResume", object : XC_MethodHook() {
+            val resumeHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    HookGuard.safeRun("LauncherBackdropHook.onResume") {
+                    HookGuard.safeRun("LauncherBackdropHook.lifecycle") {
                         val activity = param.thisObject as? Activity ?: return@safeRun
                         launcherRef = WeakReference(activity)
                         registerReceiverIfNeeded(activity.applicationContext)
                         applyBackdropState(activity, backdropActive)
                     }
                 }
-            })
-            HookGuard.info("LauncherBackdropHook: hooked $LAUNCHER_CLASS#onResume")
+            }
+            XposedBridge.hookAllMethods(cls, "onStart", resumeHook)
+            XposedBridge.hookAllMethods(cls, "onResume", resumeHook)
+            HookGuard.info("LauncherBackdropHook: hooked $LAUNCHER_CLASS#onStart & onResume")
         } catch (t: Throwable) {
-            HookGuard.warn("LauncherBackdropHook: failed to hook onResume", t)
+            HookGuard.warn("LauncherBackdropHook: failed to hook lifecycle", t)
         }
     }
 
@@ -132,7 +134,8 @@ object LauncherBackdropHook {
         val container = FrameLayout(context).apply {
             tag = BACKDROP_TAG
             alpha = 0f
-            isClickable = false
+            // Absorb stray taps on the empty Stage canvas so hidden desktop icons underneath can never be clicked.
+            isClickable = true
             isFocusable = false
             setBackgroundColor(Color.argb(190, 22, 20, 32))
         }

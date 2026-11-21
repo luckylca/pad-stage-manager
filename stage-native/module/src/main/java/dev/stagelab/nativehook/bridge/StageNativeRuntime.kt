@@ -2,6 +2,10 @@ package dev.stagelab.nativehook.bridge
 
 import android.app.ActivityManager
 import android.app.AndroidAppHelper
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -148,6 +152,7 @@ object StageNativeRuntime {
                         isDeviceLocked = true
                         stripOverlay.detach()
                         dockOverlay.detach()
+                        bridge.setSystemNavigationLocked(false)
                         HookGuard.info("LIFECYCLE screen off -> Recent Strip & Dock hidden")
                     }
                     Intent.ACTION_USER_PRESENT -> {
@@ -243,7 +248,13 @@ object StageNativeRuntime {
                 pendingLaunches.clear()
                 stripOverlay.detach()
                 dockOverlay.detach()
+                bridge.setSystemNavigationLocked(false)
                 bridge.notifyLauncherBackdrop(false)
+                runCatching {
+                    AndroidAppHelper.currentApplication()?.applicationContext?.let {
+                        updateExitNotification(it, false)
+                    }
+                }
                 registry.snapshot()
             }
             "reset" -> {
@@ -287,10 +298,12 @@ object StageNativeRuntime {
     fun onNativeTaskInfoChanged(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
 
-        // Handle swipe-up Home gesture cleanly: when native Launcher regains focus, park Active Stage
-        // cleanly into Recent Strip and dismiss the blurred backdrop (preventing state=2 mini-window clutter).
-        if (pkg == "com.android.launcher" && isTaskFocused(taskInfo) && isTaskVisible(taskInfo)) {
-            handleHomeGestureRetreat()
+        // In desktop-replacement mode (stageManagerEnabled == true), Launcher is our blurred Stage canvas
+        // and Home/Recents gestures are locked natively — do not auto-retreat active Stage on Launcher focus.
+        if (pkg == "com.android.launcher") {
+            if (!stageManagerEnabled && isTaskFocused(taskInfo) && isTaskVisible(taskInfo)) {
+                handleHomeGestureRetreat()
+            }
             return
         }
 
@@ -360,16 +373,25 @@ object StageNativeRuntime {
     }
 
     private fun updateStripUi(session: StageSession) {
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
         if (isDeviceLocked || !stageManagerEnabled) {
             stripOverlay.detach()
             dockOverlay.detach()
+            bridge.setSystemNavigationLocked(false)
             bridge.notifyLauncherBackdrop(false)
+            if (!stageManagerEnabled && ctx != null) {
+                updateExitNotification(ctx, false)
+            }
             return
         }
-        val hasActiveStage = session.activeStage != null && session.activeStage!!.tasks.isNotEmpty()
-        bridge.notifyLauncherBackdrop(hasActiveStage)
 
-        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
+        // Desktop-replacement mode: keep blurred wallpaper backdrop always on, lock Home/Recents gestures,
+        // and show a persistent notification so the user can tap once to exit Stage Manager mode.
+        bridge.notifyLauncherBackdrop(true)
+        bridge.setSystemNavigationLocked(true)
+
+        if (ctx == null) return
+        updateExitNotification(ctx, true)
         stripOverlay.update(
             context = ctx,
             session = session,
@@ -384,6 +406,60 @@ object StageNativeRuntime {
             tempRevealed = dockController.isDockTemporarilyRevealed,
         )
     }
+
+    @Volatile
+    private var exitNotificationShown = false
+
+    private fun updateExitNotification(context: Context, show: Boolean) {
+        if (show == exitNotificationShown) return
+        runCatching {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            if (!show) {
+                nm.cancel(EXIT_NOTIFICATION_ID)
+                exitNotificationShown = false
+                HookGuard.info("NOTIFICATION exit notice cancelled")
+                return
+            }
+            val channel = NotificationChannel(
+                EXIT_CHANNEL_ID,
+                "台前调度模式",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "台前调度运行状态与一键退出入口"
+                setShowBadge(false)
+            }
+            nm.createNotificationChannel(channel)
+
+            val exitIntent = Intent(ACTION_STAGE_CMD).apply {
+                setPackage("com.android.systemui")
+                putExtra("cmd", "disable_module")
+            }
+            val pendingExit = PendingIntent.getBroadcast(
+                context,
+                EXIT_NOTIFICATION_ID,
+                exitIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+
+            val notification = Notification.Builder(context, EXIT_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle("台前调度模式运行中")
+                .setContentText("已接管桌面与导航手势 · 点击此处退出台前调度模式")
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setContentIntent(pendingExit)
+                .build()
+
+            nm.notify(EXIT_NOTIFICATION_ID, notification)
+            exitNotificationShown = true
+            HookGuard.info("NOTIFICATION exit notice posted (id=$EXIT_NOTIFICATION_ID)")
+        }.onFailure {
+            HookGuard.warn("NOTIFICATION update failed (show=$show)", it)
+        }
+    }
+
+    private const val EXIT_CHANNEL_ID = "stagelab_stage_mode"
+    private const val EXIT_NOTIFICATION_ID = 20260418
 
     private fun isFullScreenBounds(b: WindowBounds): Boolean {
         val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()

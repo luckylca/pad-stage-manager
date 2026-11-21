@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativehook.xposed.HookGuard
 import kotlin.math.abs
@@ -37,6 +38,10 @@ class StageDockOverlayController(
     private val onBottomSwipeReveal: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val appSearchOverlay = AppSearchOverlayController(
+        onAppSelectedLaunch = onDockAppClicked,
+        onAppSelectedMerge = onDockAppDraggedToCenter,
+    )
 
     private var windowManager: WindowManager? = null
     private var rootContainer: FrameLayout? = null
@@ -55,7 +60,11 @@ class StageDockOverlayController(
         hiddenBySetting = hidden
         temporarilyRevealed = tempRevealed
 
-        // Collect recent app packages from active & recent stages
+        if (pinnedPackages.isEmpty()) {
+            pinnedPackages = resolveDefaultPinnedPackages(context)
+        }
+
+        // Collect recent app packages from active & recent stages (excluding pinned apps to prevent duplicates)
         val latestPkgs = buildList {
             session.activeStage?.tasks?.forEach { add(it.packageName) }
             session.allRecentStages.forEach { st -> st.tasks.forEach { add(it.packageName) } }
@@ -66,6 +75,7 @@ class StageDockOverlayController(
                 recentPackages.add(0, pkg)
             }
         }
+        recentPackages.removeAll { pinnedPackages.contains(it) }
         while (recentPackages.size > MAX_RECENT_ICONS) {
             recentPackages.removeAt(recentPackages.lastIndex)
         }
@@ -90,6 +100,7 @@ class StageDockOverlayController(
     }
 
     fun detach() {
+        appSearchOverlay.dismiss()
         mainHandler.post {
             val wm = windowManager
             val root = rootContainer
@@ -197,6 +208,20 @@ class StageDockOverlayController(
 
         capsule.removeAllViews()
 
+        // 0. App Search / App Library button on the left of the Dock
+        val searchButton = buildAppSearchButton(context)
+        capsule.addView(searchButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        val leftDivider = View(context).apply {
+            setBackgroundColor(Color.argb(72, 28, 27, 31))
+        }
+        capsule.addView(
+            leftDivider,
+            LinearLayout.LayoutParams(dp(context, 1), dp(context, 34)).apply {
+                leftMargin = dp(context, 10)
+                rightMargin = dp(context, 10)
+            },
+        )
+
         // 1. Pinned apps
         pinnedPackages.forEachIndexed { idx, pkg ->
             val item = buildDockIconItem(
@@ -248,6 +273,37 @@ class StageDockOverlayController(
                 )
             }
         }
+    }
+
+    private fun buildAppSearchButton(context: Context): View {
+        val btnSize = dp(context, 48)
+        val col = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setOnClickListener {
+                HookGuard.info("STAGE_DOCK app search button tapped")
+                appSearchOverlay.toggle(context)
+            }
+        }
+        val circle = TextView(context).apply {
+            text = "⌕"
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(103, 80, 164))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(232, 222, 248))
+            }
+        }
+        col.addView(circle, LinearLayout.LayoutParams(btnSize, btnSize))
+        // Spacer matching the 5dp indicator dot under app icons for vertical alignment
+        col.addView(
+            View(context),
+            LinearLayout.LayoutParams(dp(context, 5), dp(context, 5)).apply {
+                topMargin = dp(context, 4)
+            },
+        )
+        return col
     }
 
     @SuppressLint("ClickableViewAccessibility")

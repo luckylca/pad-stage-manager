@@ -16,6 +16,7 @@ import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.StageTransitionController
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.strip.RecentStripOverlayController
 import dev.stagelab.nativehook.xposed.HookGuard
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,6 +34,21 @@ object StageNativeRuntime {
     val transitionController = StageTransitionController(registry, bridge)
     val recentController = RecentStageController(transitionController)
     val dockController = DockIntegrationController(transitionController, bridge)
+
+    val stripOverlay = RecentStripOverlayController(
+        onStageClicked = { stageId ->
+            val session = recentController.onStageThumbnailClicked(stageId)
+            updateStripUi(session)
+        },
+        onStageDraggedToCenter = { stageId ->
+            val session = recentController.onStageTaskDraggedToCenter(stageId)
+            updateStripUi(session)
+        },
+        onLeftEdgeSwipeReveal = {
+            recentController.onLeftEdgeSwipeReveal()
+            updateStripUi(registry.snapshot())
+        },
+    )
 
     private val receiverRegistered = AtomicBoolean(false)
 
@@ -115,9 +131,15 @@ object StageNativeRuntime {
                 if (taskId > 0) dockController.onWindowMenuClose(taskId) else registry.snapshot()
             }
             "sync_live" -> syncFromLiveOrganizer()
+            "strip_hide" -> {
+                val hidden = intent.getBooleanExtra("hidden", false)
+                recentController.setHiddenByUserSetting(hidden)
+                registry.snapshot()
+            }
             "reset" -> {
                 registry.clear()
                 pendingLaunches.clear()
+                stripOverlay.detach()
                 registry.snapshot()
             }
             else -> {
@@ -126,6 +148,7 @@ object StageNativeRuntime {
             }
         }
         logSession("CMD_RESULT($cmd)", session)
+        updateStripUi(session)
     }
 
     fun onNativeTaskAppeared(taskInfo: ActivityManager.RunningTaskInfo) {
@@ -139,6 +162,7 @@ object StageNativeRuntime {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
         logSession("ON_APPEARED(t=${taskInfo.taskId},merge=$mergeFlag)", session)
+        updateStripUi(session)
     }
 
     fun onNativeTaskInfoChanged(taskInfo: ActivityManager.RunningTaskInfo) {
@@ -151,6 +175,7 @@ object StageNativeRuntime {
             session = transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
         logSession("ON_CHANGED(t=${taskInfo.taskId})", session)
+        updateStripUi(session)
     }
 
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {
@@ -158,6 +183,17 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
         val session = transitionController.onNativeTaskVanished(taskInfo.taskId)
         logSession("ON_VANISHED(t=${taskInfo.taskId})", session)
+        updateStripUi(session)
+    }
+
+    private fun updateStripUi(session: StageSession) {
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
+        stripOverlay.update(
+            context = ctx,
+            session = session,
+            hidden = recentController.isHiddenByUserSetting,
+            tempRevealed = recentController.isTemporarilyRevealed,
+        )
     }
 
     fun syncFromLiveOrganizer(): StageSession {

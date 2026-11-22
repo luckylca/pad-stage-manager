@@ -216,11 +216,12 @@ object StageMagicTransitionOverlay {
             val incomingViews = mutableListOf<Triple<FrameLayout, PreparedCard, Int>>()
             var addedNewViews = false
 
-            // 1. Prepare outgoing cards (reuse in-place if already flying!)
+            // 1. Prepare outgoing cards (reuse in-place if already flying; sync bounds if user resized!)
             outgoing.forEachIndexed { idx, item ->
                 val existing = activeCards[item.task.taskId]
                 val card = if (existing != null) {
                     existing.animate().cancel()
+                    syncCardBoundsIfChanged(existing, item.bounds)
                     existing
                 } else {
                     addedNewViews = true
@@ -240,6 +241,7 @@ object StageMagicTransitionOverlay {
                 val existing = activeCards[item.task.taskId]
                 val card = if (existing != null) {
                     existing.animate().cancel()
+                    syncCardBoundsIfChanged(existing, b)
                     existing.bringToFront()
                     existing
                 } else {
@@ -342,6 +344,20 @@ object StageMagicTransitionOverlay {
             HookGuard.warn("MAGIC_TRANSITION failed", it)
             hideNow()
             onOverlayReadyForAtomicSwap()
+        }
+    }
+
+    private fun syncCardBoundsIfChanged(card: FrameLayout, bounds: WindowBounds) {
+        val lp = card.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (lp.width != bounds.width || lp.height != bounds.height ||
+            lp.leftMargin != bounds.left || lp.topMargin != bounds.top
+        ) {
+            lp.width = bounds.width
+            lp.height = bounds.height
+            lp.leftMargin = bounds.left
+            lp.topMargin = bounds.top
+            card.layoutParams = lp
+            card.pivotY = bounds.height * 0.5f
         }
     }
 

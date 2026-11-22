@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.Rect
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import de.robv.android.xposed.XposedHelpers
@@ -505,13 +506,54 @@ object StageNativeRuntime {
 
     fun extractFlexibleScale(taskInfo: ActivityManager.RunningTaskInfo): Float {
         return runCatching {
+            val extra = extractOplusExtraBundle(taskInfo)
+            val bundleScale = extra?.getFloat("androidx.activity.LaunchScale", -1f) ?: -1f
+            if (bundleScale in 0.35f..1.05f) return bundleScale
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val config = XposedHelpers.getObjectField(taskInfo, "configuration") as? Configuration ?: return 1.0f
-            val extra = XposedHelpers.callStaticMethod(fwmCls, "getExtraConfiguration", config) ?: return 1.0f
-            // Default to 1.0f if extra config does not expose scale directly
-            runCatching { XposedHelpers.getFloatField(extra, "mScale") }.getOrNull()
+            val cfgExtra = XposedHelpers.callStaticMethod(fwmCls, "getExtraConfiguration", config) ?: return 1.0f
+            runCatching { XposedHelpers.getFloatField(cfgExtra, "mScale") }.getOrNull()
                 ?.takeIf { it in 0.35f..1.05f } ?: 1.0f
         }.getOrDefault(1.0f)
+    }
+
+    /**
+     * Extracts ColorOS 17's exact on-screen visual rect (`androidx.flexible.VisualBounds`)
+     * from `TaskInfo.mOplusExtraBundle`, which already reflects real-time user drag, resize, and scale.
+     */
+    fun extractVisualBounds(taskInfo: ActivityManager.RunningTaskInfo): Rect {
+        val extra = extractOplusExtraBundle(taskInfo)
+        if (extra != null) {
+            @Suppress("DEPRECATION")
+            val vis = runCatching { extra.getParcelable("androidx.flexible.VisualBounds") as? Rect }.getOrNull()
+            if (vis != null && !vis.isEmpty && vis.width() > 120 && vis.height() > 120) {
+                return Rect(vis)
+            }
+            @Suppress("DEPRECATION")
+            val real = runCatching { extra.getParcelable("androidx.flexible.RealBounds") as? Rect }.getOrNull()
+            if (real != null && !real.isEmpty && real.width() > 120 && real.height() > 120) {
+                val scale = extra.getFloat("androidx.activity.LaunchScale", 1.0f).takeIf { it in 0.35f..1.05f } ?: 1.0f
+                val w = (real.width() * scale).toInt().coerceAtLeast(200)
+                val h = (real.height() * scale).toInt().coerceAtLeast(200)
+                return Rect(real.left, real.top, real.left + w, real.top + h)
+            }
+        }
+        val raw = extractBounds(taskInfo)
+        if (raw.isEmpty) return raw
+        val scale = extractFlexibleScale(taskInfo)
+        if (scale >= 0.99f) return raw
+        return Rect(raw.left, raw.top, raw.left + (raw.width() * scale).toInt(), raw.top + (raw.height() * scale).toInt())
+    }
+
+    private fun extractOplusExtraBundle(taskInfo: ActivityManager.RunningTaskInfo): Bundle? {
+        return runCatching {
+            XposedHelpers.getObjectField(taskInfo, "mOplusExtraBundle") as? Bundle
+        }.getOrNull() ?: runCatching {
+            XposedHelpers.callMethod(taskInfo, "getOplusExtraBundle") as? Bundle
+        }.getOrNull() ?: runCatching {
+            val ext = XposedHelpers.getObjectField(taskInfo, "mTaskInfoExt")
+            XposedHelpers.callMethod(ext, "getOplusExtraBundle") as? Bundle
+        }.getOrNull()
     }
 
     private fun computeVisibleBounds(raw: WindowBounds, scale: Float): WindowBounds {

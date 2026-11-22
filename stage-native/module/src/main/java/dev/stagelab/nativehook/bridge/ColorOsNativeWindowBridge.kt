@@ -311,12 +311,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val live = runCatching {
             val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", task.taskId)
                 as? ActivityManager.RunningTaskInfo ?: return@runCatching null
-            val r = StageNativeRuntime.extractBounds(info)
-            if (!r.isEmpty && r.width() > 200 && r.height() > 200) {
-                val scale = StageNativeRuntime.extractFlexibleScale(info)
-                val visW = (r.width() * scale).toInt().coerceAtLeast(240)
-                val visH = (r.height() * scale).toInt().coerceAtLeast(240)
-                WindowBounds(r.left, r.top, r.left + visW, r.top + visH)
+            val vis = StageNativeRuntime.extractVisualBounds(info)
+            if (!vis.isEmpty && vis.width() > 200 && vis.height() > 200) {
+                WindowBounds(vis.left, vis.top, vis.right, vis.bottom)
             } else {
                 null
             }

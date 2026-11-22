@@ -42,7 +42,9 @@ object StageNativeRuntime {
     val stripOverlay = RecentStripOverlayController(
         onStageClicked = { stageId ->
             val session = recentController.onStageThumbnailClicked(stageId)
-            updateStripUi(session)
+            // Defer strip snapshot refresh until the 580ms Magic Move finishes so the SystemUI main
+            // thread has ZERO Binder/bitmap work during the 120fps transition animation!
+            mainHandler.postDelayed({ updateStripUi(registry.snapshot()) }, 650L)
         },
         onStageDraggedToCenter = { stageId ->
             val session = recentController.onStageTaskDraggedToCenter(stageId)
@@ -95,6 +97,16 @@ object StageNativeRuntime {
     private var lastHomeGestureAtMs: Long = 0L
     @Volatile
     private var programmaticTransitionUntilMs: Long = 0L
+    @Volatile
+    private var magicAnimationBusyUntilMs: Long = 0L
+
+    fun markMagicAnimationBusy(durationMs: Long = 640L) {
+        val until = System.currentTimeMillis() + durationMs
+        if (until > magicAnimationBusyUntilMs) {
+            magicAnimationBusyUntilMs = until
+        }
+        mainHandler.postDelayed({ updateStripUi(registry.snapshot()) }, durationMs + 30L)
+    }
 
     fun markProgrammaticTransition(durationMs: Long = 1_200L) {
         val until = System.currentTimeMillis() + durationMs
@@ -408,6 +420,8 @@ object StageNativeRuntime {
 
         if (ctx == null) return
         syncAppState(ctx, true)
+        // Skip Strip/Dock view rebuilds & snapshot IPC while 580ms Magic Move is animating at 120fps
+        if (System.currentTimeMillis() < magicAnimationBusyUntilMs) return
         stripOverlay.update(
             context = ctx,
             session = session,

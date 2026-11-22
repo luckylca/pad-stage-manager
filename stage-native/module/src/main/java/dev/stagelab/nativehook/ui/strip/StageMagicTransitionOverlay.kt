@@ -39,8 +39,9 @@ object StageMagicTransitionOverlay {
     private val bgExecutor = Executors.newSingleThreadExecutor()
     private val snapshotLoader = NativeTaskSnapshotLoader()
 
-    private val outgoingInterpolator = PathInterpolator(0.28f, 0.88f, 0.30f, 1.0f)
-    private val incomingInterpolator = PathInterpolator(0.22f, 0.94f, 0.26f, 1.0f)
+    // True smooth Apple Ease-In-Out curves (no abrupt 92%-in-100ms snap!)
+    private val outgoingInterpolator = PathInterpolator(0.36f, 0.0f, 0.20f, 1.0f)
+    private val incomingInterpolator = PathInterpolator(0.32f, 0.0f, 0.16f, 1.0f)
 
     private var persistentRoot: FrameLayout? = null
     private var attachedWm: WindowManager? = null
@@ -95,7 +96,8 @@ object StageMagicTransitionOverlay {
             clipChildren = false
             clipToPadding = false
             setBackgroundColor(Color.TRANSPARENT)
-            visibility = View.GONE
+            // Use INVISIBLE (not GONE) so SurfaceFlinger keeps the GPU surface warm with zero destroySurface hitch!
+            visibility = View.INVISIBLE
         }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -233,7 +235,7 @@ object StageMagicTransitionOverlay {
                             .withEndAction {
                                 if (seq == animationSeq) {
                                     root.removeAllViews()
-                                    root.visibility = View.GONE
+                                    root.visibility = View.INVISIBLE
                                     root.alpha = 1f
                                 }
                             }
@@ -310,7 +312,7 @@ object StageMagicTransitionOverlay {
         persistentRoot?.let { root ->
             root.animate().cancel()
             root.removeAllViews()
-            root.visibility = View.GONE
+            root.visibility = View.INVISIBLE
             root.alpha = 1f
         }
     }
@@ -322,7 +324,7 @@ object StageMagicTransitionOverlay {
             context.resources.displayMetrics,
         ).toInt()
 
-    private const val OUTGOING_DURATION_MS = 480L
-    private const val INCOMING_DURATION_MS = 520L
-    private const val FADE_OUT_MS = 90L
+    private const val OUTGOING_DURATION_MS = 520L
+    private const val INCOMING_DURATION_MS = 580L
+    private const val FADE_OUT_MS = 95L
 }

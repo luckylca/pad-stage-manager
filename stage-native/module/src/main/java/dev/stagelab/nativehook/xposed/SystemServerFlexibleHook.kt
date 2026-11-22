@@ -203,30 +203,65 @@ object SystemServerFlexibleHook {
                     HookGuard.safeRun("FlexibleTaskController.stopScaleAndToFullScreen") {
                         param.result = false
                         val taskObj = param.args.firstOrNull() ?: return@safeRun
-                        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
-                        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
-                        val mainStage = computeWidePrimaryStageRect(screenW, screenH)
-                        if (taskId > 0) {
-                            val bundle = Bundle().apply {
-                                putBoolean(KEY_FORCE_ADJUST, true)
-                                putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
-                                putParcelable("androidx.flexible.LaunchBounds", mainStage)
-                                putFloat("androidx.activity.LaunchScale", 1.0f)
+                        snapTaskObjToMainStage(taskObj, "stopScaleAndToFullScreen")
+                    }
+                }
+            })
+            XposedBridge.hookAllMethods(cls, "exitFlexibleTaskWindowInnerLocked", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    HookGuard.safeRun("FlexibleTaskController.exitFlexibleTaskWindowInnerLocked") {
+                        val strategy = param.args.firstOrNull() ?: return@safeRun
+                        val exitTo = runCatching {
+                            XposedHelpers.callMethod(strategy, "getExitTo") as? Int
+                        }.getOrNull() ?: runCatching {
+                            XposedHelpers.getIntField(strategy, "mExitTo")
+                        }.getOrDefault(-1)
+                        // exitTo == 4 is ColorOS fullscreen exit (from corner drag maximize, top-edge drag, or ··· maximize)
+                        if (exitTo == 4) {
+                            param.result = null
+                            val taskObj = runCatching {
+                                XposedHelpers.callMethod(strategy, "getTask")
+                            }.getOrNull() ?: runCatching {
+                                XposedHelpers.getObjectField(strategy, "mTask")
+                            }.getOrNull()
+                            if (taskObj != null) {
+                                snapTaskObjToMainStage(taskObj, "exitToFullscreen")
                             }
-                            allowWideStageRect.set(true)
-                            runCatching {
-                                val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
-                                val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
-                                XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
-                            }
-                            HookGuard.info("SYS.SNAP_TO_MAIN_STAGE task=$taskId rect=$mainStage")
                         }
                     }
                 }
             })
-            HookGuard.info("SystemServerFlexibleHook: hooked canFullscreenTask & stopScaleAndToFullScreen")
+            HookGuard.info("SystemServerFlexibleHook: hooked canFullscreenTask, stopScaleAndToFullScreen & exitFlexibleTaskWindowInnerLocked")
         } catch (t: Throwable) {
             HookGuard.warn("SystemServerFlexibleHook: failed to hook fullscreen guards", t)
+        }
+
+        // 3b. Block FlexibleTaskScaleManager#fullScreenByScaleRatios (corner-drag maximize to fullscreen)
+        try {
+            val scaleMgrCls = XposedHelpers.findClass("com.android.server.wm.FlexibleTaskScaleManager", classLoader)
+            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScaleRatios", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    HookGuard.safeRun("FlexibleTaskScaleManager.fullScreenByScaleRatios") {
+                        param.result = null
+                        val taskId = (param.args.getOrNull(2) as? Int) ?: -1
+                        val taskObj = runCatching {
+                            XposedHelpers.getObjectField(param.thisObject, "mScaleTask")
+                        }.getOrNull() ?: runCatching {
+                            XposedHelpers.getObjectField(param.thisObject, "mTask")
+                        }.getOrNull()
+                        if (taskObj != null) {
+                            snapTaskObjToMainStage(taskObj, "fullScreenByScaleRatios")
+                        } else if (taskId > 0) {
+                            snapTaskIdToMainStage(taskId, 2520, 1680, "fullScreenByScaleRatios")
+                        }
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked FlexibleTaskScaleManager#fullScreenByScaleRatios")
+        } catch (t: Throwable) {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook FlexibleTaskScaleManager", t)
         }
 
         // 4. Persist real user drag/resize bounds & scale directly inside system_server
@@ -246,6 +281,30 @@ object SystemServerFlexibleHook {
                 HookGuard.warn("SystemServerFlexibleHook: optional hook $methodName unavailable", t)
             }
         }
+    }
+
+    private fun snapTaskObjToMainStage(taskObj: Any, reason: String) {
+        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+        if (taskId <= 0) return
+        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+        snapTaskIdToMainStage(taskId, screenW, screenH, reason)
+    }
+
+    private fun snapTaskIdToMainStage(taskId: Int, screenW: Int, screenH: Int, reason: String) {
+        val mainStage = computeWidePrimaryStageRect(screenW, screenH)
+        val bundle = Bundle().apply {
+            putBoolean(KEY_FORCE_ADJUST, true)
+            putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
+            putParcelable("androidx.flexible.LaunchBounds", mainStage)
+            putFloat("androidx.activity.LaunchScale", 1.0f)
+        }
+        allowWideStageRect.set(true)
+        runCatching {
+            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+            XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
+        }
+        HookGuard.info("SYS.SNAP_TO_MAIN_STAGE($reason) task=$taskId rect=$mainStage")
     }
 
     private fun recordTaskGeometry(taskObj: Any) {

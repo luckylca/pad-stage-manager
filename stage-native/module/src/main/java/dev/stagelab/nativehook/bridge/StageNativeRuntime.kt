@@ -3,6 +3,7 @@ package dev.stagelab.nativehook.bridge
 import android.app.ActivityManager
 import android.app.AndroidAppHelper
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -167,8 +168,10 @@ object StageNativeRuntime {
                     }
                     Intent.ACTION_USER_PRESENT -> {
                         isDeviceLocked = false
+                        // Reset sync cache on unlock so standalone notification is always posted after boot/unlock!
+                        lastSyncedAppEnabled = null
                         updateStripUi(registry.snapshot())
-                        HookGuard.info("LIFECYCLE unlocked -> Recent Strip restored")
+                        HookGuard.info("LIFECYCLE unlocked -> Recent Strip & standalone notification restored")
                     }
                     Intent.ACTION_CONFIGURATION_CHANGED -> {
                         if (!isDeviceLocked) {
@@ -460,8 +463,11 @@ object StageNativeRuntime {
         lastSyncedAppEnabled = enabled
         runCatching {
             val intent = Intent(StageModeNotificationHelper.ACTION_SYNC_STATE).apply {
-                setPackage("dev.stagelab.nativehook")
-                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                component = ComponentName(
+                    "dev.stagelab.nativehook",
+                    "dev.stagelab.nativehook.ui.StageModeStateReceiver",
+                )
+                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
                 putExtra(StageModeNotificationHelper.KEY_ENABLED, enabled)
             }
             context.sendBroadcast(intent)

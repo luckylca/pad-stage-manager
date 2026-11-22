@@ -125,7 +125,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 for (task in tasksToPark) {
                     val token = resolveTaskToken(organizer, task.taskId)
                     val leash = StageNativeRuntime.getTaskLeash(task.taskId)
-                    if (liveMode && token != null && leash != null && leash.isValid && wctPark != null) {
+                    // Mini floating windows MUST be parked via setHidden(true), not offscreen leash move,
+                    // because ColorOS's adjustMiniFinishRectIfOffScreen pulls offscreen mini-windows back on-screen!
+                    if (liveMode && !task.isMiniFloating && token != null && leash != null && leash.isValid && wctPark != null) {
                         val b = resolveLiveOrFallbackBounds(organizer, task)
                         offscreenParkedOrigins[task.taskId] = b.left.toFloat() to b.top.toFloat()
                         scTx.setPosition(leash, -6000f, 0f)

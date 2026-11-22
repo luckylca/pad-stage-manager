@@ -2,12 +2,15 @@ package dev.stagelab.nativehook.ui
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -50,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.stagelab.nativehook.bridge.StageNativeRuntime
+import dev.stagelab.nativehook.compat.OplusCompatAdapter
 
 object ModuleStatus {
     /** Hooked by StageLabHookEntry to return true when LSPosed/Vector is active. */
@@ -82,11 +86,34 @@ private val StageLabColorScheme = lightColorScheme(
 
 class MainActivity : ComponentActivity() {
     private val moduleEnabledState = mutableStateOf(false)
+    private val uiDiagProbesState = mutableStateOf<List<OplusCompatAdapter.ProbeRecord>>(emptyList())
+    private val sysDiagProbesState = mutableStateOf<List<OplusCompatAdapter.ProbeRecord>>(emptyList())
+    private val sysColorOsVersionState = mutableStateOf("")
 
     private val uiStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == StageModeNotificationHelper.ACTION_UI_STATE_CHANGED) {
-                moduleEnabledState.value = intent.getBooleanExtra(StageModeNotificationHelper.KEY_ENABLED, false)
+            when (intent?.action) {
+                StageModeNotificationHelper.ACTION_UI_STATE_CHANGED -> {
+                    moduleEnabledState.value = intent.getBooleanExtra(StageModeNotificationHelper.KEY_ENABLED, false)
+                }
+                "dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE" -> {
+                    uiDiagProbesState.value = parseProbeLines(intent.getStringArrayListExtra("probes").orEmpty())
+                }
+                "dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE" -> {
+                    sysColorOsVersionState.value = intent.getStringExtra("coloros").orEmpty()
+                    sysDiagProbesState.value = parseProbeLines(intent.getStringArrayListExtra("probes").orEmpty())
+                }
+            }
+        }
+    }
+
+    private fun parseProbeLines(raw: List<String>): List<OplusCompatAdapter.ProbeRecord> {
+        return raw.mapNotNull { line ->
+            val parts = line.split("|", limit = 3)
+            if (parts.size < 3) null else {
+                val st = runCatching { OplusCompatAdapter.Status.valueOf(parts[1]) }
+                    .getOrDefault(OplusCompatAdapter.Status.MISSING)
+                OplusCompatAdapter.ProbeRecord(parts[0], st, parts[2])
             }
         }
     }
@@ -104,9 +131,15 @@ class MainActivity : ComponentActivity() {
 
         registerReceiver(
             uiStateReceiver,
-            IntentFilter(StageModeNotificationHelper.ACTION_UI_STATE_CHANGED),
-            RECEIVER_NOT_EXPORTED,
+            IntentFilter().apply {
+                addAction(StageModeNotificationHelper.ACTION_UI_STATE_CHANGED)
+                addAction("dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE")
+                addAction("dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE")
+            },
+            RECEIVER_EXPORTED,
         )
+        sendStageCmd("diag")
+        sendBroadcast(Intent("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG"))
 
         setContent {
             MaterialTheme(colorScheme = StageLabColorScheme) {
@@ -116,6 +149,25 @@ class MainActivity : ComponentActivity() {
                 var hideDock by remember { mutableStateOf(prefs.getBoolean("hide_dock", false)) }
                 var livePreview by remember { mutableStateOf(prefs.getBoolean("live_preview", true)) }
                 val active = remember { ModuleStatus.isXposedModuleActive() }
+                val uiProbes by uiDiagProbesState
+                val sysProbes by sysDiagProbesState
+                val sysColorOs by sysColorOsVersionState
+                var sysDiagSnapshot by remember { mutableStateOf(loadDiagnosticsReport()) }
+                val diagHeaderText = remember(sysDiagSnapshot, sysColorOs) {
+                    if (sysColorOs.isNotBlank()) {
+                        val dm = resources.displayMetrics
+                        "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\nColorOS: $sysColorOs\n屏幕: ${dm.widthPixels}×${dm.heightPixels} @ ${dm.densityDpi}dpi"
+                    } else {
+                        sysDiagSnapshot.first
+                    }
+                }
+                val mergedDiagProbes = remember(sysDiagSnapshot, sysProbes, uiProbes) {
+                    val map = LinkedHashMap<String, OplusCompatAdapter.ProbeRecord>()
+                    sysDiagSnapshot.second.forEach { map[it.key] = it }
+                    sysProbes.forEach { map[it.key] = it }
+                    uiProbes.forEach { map[it.key] = it }
+                    map.values.sortedBy { it.key }
+                }
 
                 SettingsScreen(
                     isModuleActive = active,
@@ -124,6 +176,20 @@ class MainActivity : ComponentActivity() {
                     hideRecentStrip = hideRecentStrip,
                     hideDock = hideDock,
                     livePreview = livePreview,
+                    diagHeader = diagHeaderText,
+                    diagProbes = mergedDiagProbes,
+                    onRefreshDiag = {
+                        sysDiagSnapshot = loadDiagnosticsReport()
+                        sendStageCmd("diag")
+                        sendBroadcast(Intent("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG"))
+                        Toast.makeText(this@MainActivity, "已刷新本机 ColorOS 兼容性诊断", Toast.LENGTH_SHORT).show()
+                    },
+                    onCopyDiag = {
+                        val fullReport = buildPlainTextDiagReport(diagHeaderText, mergedDiagProbes)
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager
+                        cm?.setPrimaryClip(ClipData.newPlainText("StageLab Diagnostics", fullReport))
+                        Toast.makeText(this@MainActivity, "诊断报告已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                    },
                     onToggleLivePreview = { next ->
                         livePreview = next
                         prefs.edit().putBoolean("live_preview", next).apply()
@@ -213,6 +279,37 @@ class MainActivity : ComponentActivity() {
             },
         )
     }
+
+    private fun loadDiagnosticsReport(): Pair<String, List<OplusCompatAdapter.ProbeRecord>> {
+        val dm = resources.displayMetrics
+        val colorOs = OplusCompatAdapter.getColorOsVersion()
+        val header = buildString {
+            append("${Build.MANUFACTURER} ${Build.MODEL}")
+            append(" · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+            append("ColorOS: $colorOs\n")
+            append("屏幕: ${dm.widthPixels}×${dm.heightPixels} @ ${dm.densityDpi}dpi")
+        }
+        val merged = LinkedHashMap<String, OplusCompatAdapter.ProbeRecord>()
+        merged.putAll(OplusCompatAdapter.readProbesFromFile(OplusCompatAdapter.SYS_DIAG_PATH))
+        merged.putAll(OplusCompatAdapter.readProbesFromFile(OplusCompatAdapter.UI_DIAG_PATH))
+        return header to merged.values.toList()
+    }
+
+    private fun buildPlainTextDiagReport(
+        header: String,
+        probes: List<OplusCompatAdapter.ProbeRecord>,
+    ): String = buildString {
+        appendLine("=== StageLab Native ColorOS Diagnostics ===")
+        appendLine(header)
+        appendLine("ModuleActive: ${ModuleStatus.isXposedModuleActive()}")
+        if (probes.isEmpty()) {
+            appendLine("(尚未读取到 Hook 探针记录，请确认已在 LSPosed/Vector 勾选系统框架与系统界面并软重启)")
+        } else {
+            for (p in probes) {
+                appendLine("[${p.status.name}] ${p.key} -> ${p.detail}")
+            }
+        }
+    }
 }
 
 @Composable
@@ -223,6 +320,10 @@ private fun SettingsScreen(
     hideRecentStrip: Boolean,
     hideDock: Boolean,
     livePreview: Boolean,
+    diagHeader: String,
+    diagProbes: List<OplusCompatAdapter.ProbeRecord>,
+    onRefreshDiag: () -> Unit,
+    onCopyDiag: () -> Unit,
     onToggleLivePreview: (Boolean) -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
     onToggleSafeMode: (Boolean) -> Unit,
@@ -383,6 +484,85 @@ private fun SettingsScreen(
                     )
                 }
             }
+
+            // Built-in ColorOS Multi-Version Environment Diagnostics Card
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp),
+                color = MdSurfaceContainer,
+                tonalElevation = 1.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "ColorOS 环境兼容性诊断",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MdOnSurface,
+                    )
+                    Text(
+                        text = diagHeader,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp,
+                        color = MdOnSurfaceVariant,
+                    )
+                    if (diagProbes.isEmpty()) {
+                        Text(
+                            text = "暂无 Hook 探针数据（请确认已在 LSPosed/Vector 启用模块并勾选系统框架、系统界面后软重启）。",
+                            fontSize = 13.sp,
+                            color = MdTertiary,
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (probe in diagProbes) {
+                                val (badgeText, badgeColor) = when (probe.status) {
+                                    OplusCompatAdapter.Status.HIT -> "✓ 命中" to Color(0xFF1B6E3A)
+                                    OplusCompatAdapter.Status.FALLBACK -> "△ 回退" to Color(0xFF9A5B00)
+                                    OplusCompatAdapter.Status.MISSING -> "✕ 缺失" to Color(0xFFB3261E)
+                                    OplusCompatAdapter.Status.ERROR -> "! 异常" to Color(0xFFB3261E)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "${probe.key} (${probe.detail})",
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MdOnSurface,
+                                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                    )
+                                    Text(
+                                        text = badgeText,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = badgeColor,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = onCopyDiag,
+                            shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MdPrimary),
+                        ) {
+                            Text(text = "一键复制诊断报告", fontWeight = FontWeight.Medium)
+                        }
+                        OutlinedButton(
+                            onClick = onRefreshDiag,
+                            shape = RoundedCornerShape(999.dp),
+                        ) {
+                            Text(text = "刷新诊断", color = MdPrimary, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(110.dp))
         }
     }
 }

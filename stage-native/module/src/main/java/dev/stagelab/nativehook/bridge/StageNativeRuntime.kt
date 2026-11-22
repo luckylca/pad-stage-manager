@@ -184,6 +184,18 @@ object StageNativeRuntime {
     fun attachOrganizerIfNeeded(organizer: Any) {
         bridge.attachShellTaskOrganizer(organizer)
         ensureCommandReceiverRegistered()
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
+            "ui.shellTaskOrganizer",
+            dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT,
+            organizer.javaClass.simpleName,
+        )
+        val fwmOk = runCatching { Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager") }.isSuccess
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
+            "ui.flexibleWindowManager",
+            if (fwmOk) dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT
+            else dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.MISSING,
+            if (fwmOk) "FlexibleWindowManager" else "unavailable",
+        )
     }
 
     private fun ensureCommandReceiverRegistered() {
@@ -334,6 +346,25 @@ object StageNativeRuntime {
                     bridge.flushOffscreenParkedTasksToHidden(registry.snapshot().allRecentStages.flatMap { it.tasks })
                 }
                 HookGuard.info("LIVE_PREVIEW toggled enabled=$enabled")
+                registry.snapshot()
+            }
+            "diag" -> {
+                val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+                if (ctx != null) {
+                    val lines = ArrayList(
+                        dev.stagelab.nativehook.compat.OplusCompatAdapter.getAllProbes().values.map {
+                            "${it.key}|${it.status.name}|${it.detail}"
+                        },
+                    )
+                    runCatching {
+                        ctx.sendBroadcast(
+                            Intent("dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE").apply {
+                                setPackage("dev.stagelab.nativehook")
+                                putStringArrayListExtra("probes", lines)
+                            },
+                        )
+                    }
+                }
                 registry.snapshot()
             }
             "disable_module" -> {
@@ -530,9 +561,25 @@ object StageNativeRuntime {
         }
     }
 
+    @Volatile
+    private var lastNotifiedActiveStageId: String? = null
+
+    private fun notifySystemServerActiveStage(context: Context, stageId: String?) {
+        val normalized = stageId ?: "stage-desktop"
+        if (lastNotifiedActiveStageId == normalized) return
+        lastNotifiedActiveStageId = normalized
+        runCatching {
+            val intent = Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_ACTIVE_STAGE_CHANGED).apply {
+                putExtra("stageId", normalized)
+            }
+            context.sendBroadcast(intent)
+        }
+    }
+
     private fun updateStripUiImmediate(session: StageSession) {
         if (isDeviceLocked || !stageManagerEnabled) return
         val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
+        notifySystemServerActiveStage(ctx, session.activeStageId)
         stripOverlay.update(
             context = ctx,
             session = session,
@@ -561,6 +608,7 @@ object StageNativeRuntime {
 
         if (ctx == null) return
         syncAppState(ctx, true)
+        notifySystemServerActiveStage(ctx, session.activeStageId)
         // Skip Strip/Dock view rebuilds & snapshot IPC while 580ms Magic Move is animating at 120fps
         if (System.currentTimeMillis() < magicAnimationBusyUntilMs) return
         stripOverlay.update(
@@ -656,8 +704,15 @@ object StageNativeRuntime {
     fun extractFlexibleScale(taskInfo: ActivityManager.RunningTaskInfo): Float {
         return runCatching {
             val extra = extractOplusExtraBundle(taskInfo)
-            val bundleScale = extra?.getFloat("androidx.activity.LaunchScale", -1f) ?: -1f
-            if (bundleScale in 0.20f..1.05f) return bundleScale
+            val bundleScale = dev.stagelab.nativehook.compat.OplusCompatAdapter.extractBundleFloat(
+                extra,
+                0.20f,
+                1.05f,
+                "androidx.activity.LaunchScale",
+                "oplus_flexible_scale",
+                "flexible_scale",
+            )
+            if (bundleScale != null) return bundleScale
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val config = XposedHelpers.getObjectField(taskInfo, "configuration") as? Configuration ?: return 1.0f
             val cfgExtra = XposedHelpers.callStaticMethod(fwmCls, "getExtraConfiguration", config) ?: return 1.0f
@@ -688,17 +743,29 @@ object StageNativeRuntime {
     fun extractVisualBounds(taskInfo: ActivityManager.RunningTaskInfo): Rect {
         val extra = extractOplusExtraBundle(taskInfo)
         if (extra != null) {
-            @Suppress("DEPRECATION")
-            val vis = runCatching { extra.getParcelable("androidx.flexible.VisualBounds") as? Rect }.getOrNull()
-            if (vis != null && !vis.isEmpty && vis.width() > 120 && vis.height() > 120) {
-                return Rect(vis)
+            val vis = dev.stagelab.nativehook.compat.OplusCompatAdapter.extractBundleRect(
+                extra,
+                "androidx.flexible.VisualBounds",
+                "oplus_flexible_visual_bounds",
+            )
+            if (vis != null && vis.width() > 120 && vis.height() > 120) {
+                return vis
             }
-            @Suppress("DEPRECATION")
-            val real = runCatching { extra.getParcelable("androidx.flexible.RealBounds") as? Rect }.getOrNull()
-            if (real != null && !real.isEmpty && real.width() > 120 && real.height() > 120) {
-                val scale = extra.getFloat("androidx.activity.LaunchScale", 1.0f).takeIf { it in 0.35f..1.05f } ?: 1.0f
-                val w = (real.width() * scale).toInt().coerceAtLeast(200)
-                val h = (real.height() * scale).toInt().coerceAtLeast(200)
+            val real = dev.stagelab.nativehook.compat.OplusCompatAdapter.extractBundleRect(
+                extra,
+                "androidx.flexible.RealBounds",
+                "oplus_flexible_real_bounds",
+            )
+            if (real != null && real.width() > 120 && real.height() > 120) {
+                val scale = dev.stagelab.nativehook.compat.OplusCompatAdapter.extractBundleFloat(
+                    extra,
+                    0.20f,
+                    1.05f,
+                    "androidx.activity.LaunchScale",
+                    "oplus_flexible_scale",
+                ) ?: 1.0f
+                val w = (real.width() * scale).toInt().coerceAtLeast(180)
+                val h = (real.height() * scale).toInt().coerceAtLeast(180)
                 return Rect(real.left, real.top, real.left + w, real.top + h)
             }
         }

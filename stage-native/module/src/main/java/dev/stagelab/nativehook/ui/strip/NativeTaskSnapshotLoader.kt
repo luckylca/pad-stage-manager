@@ -105,16 +105,38 @@ class NativeTaskSnapshotLoader {
         }.getOrNull() ?: return null
 
         // Android 17 (API 37): RESOLUTION_HIGH = 1, RESOLUTION_LOW = 2 (0 is invalid and throws!)
-        return runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 2) }.getOrNull()
+        val snap = runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 2) }.getOrNull()
             ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 1) }.getOrNull()
             ?: runCatching { XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        if (snap != null) {
+            dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
+                "ui.snapshot",
+                dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT,
+                "TaskSnapshotManager(API37)",
+            )
+        }
+        return snap
     }
 
     private fun fetchViaActivityTaskManagerFallback(taskId: Int): Any? {
-        return runCatching {
+        val service = runCatching {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
-            val service = XposedHelpers.callStaticMethod(atmClass, "getService")
-            XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, true)
-        }.getOrNull()
+            XposedHelpers.callStaticMethod(atmClass, "getService")
+        }.getOrNull() ?: return null
+
+        // Android 14 / 15 / 16 multi-signature fallback chain
+        val snap = runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, true) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, false) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, true, true) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, false) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        if (snap != null) {
+            dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
+                "ui.snapshot",
+                dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.FALLBACK,
+                "ActivityTaskManager(API34-36)",
+            )
+        }
+        return snap
     }
 }

@@ -21,15 +21,19 @@ object FlexibleMenuHook {
     private const val EVENT_SPLIT = 2100
 
     fun install(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(FLEXIBLE_MENU_MANAGER, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("FlexibleMenuHook: class not found: $FLEXIBLE_MENU_MANAGER", t)
-            return
-        }
+        val cls = dev.stagelab.nativehook.compat.OplusCompatAdapter.findClassAny(
+            "ui.class.FlexibleMenuManager",
+            classLoader,
+            FLEXIBLE_MENU_MANAGER,
+            "com.android.wm.shell.flexibletask.menu.FlexibleMenuManager",
+        ) ?: return
 
-        try {
-            XposedBridge.hookAllMethods(cls, "notifySystemMenuEvent", object : XC_MethodHook() {
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(
+            probeKey = "ui.menu.notifyEvent",
+            cls = cls,
+            nameCandidates = listOf("notifySystemMenuEvent", "onMenuEvent", "handleMenuEvent"),
+            fuzzyKeyword = "MenuEvent",
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!HookGuard.isActive()) return
                     HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent.before") {
@@ -64,11 +68,8 @@ object FlexibleMenuHook {
                         }
                     }
                 }
-            })
-            HookGuard.info("FlexibleMenuHook: hooked $FLEXIBLE_MENU_MANAGER#notifySystemMenuEvent")
-        } catch (t: Throwable) {
-            HookGuard.warn("FlexibleMenuHook: failed to hook notifySystemMenuEvent", t)
-        }
+            },
+        )
     }
 
     private fun resolveCurrentTaskInfo(menuManager: Any): ActivityManager.RunningTaskInfo? {

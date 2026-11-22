@@ -1,18 +1,24 @@
 package dev.stagelab.nativehook.xposed
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import dev.stagelab.nativehook.compat.OplusCompatAdapter
 import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import java.io.File
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * ColorOS 17 `system_server` (`system/0` -> `lpparam.packageName == "android"`) hook.
@@ -32,6 +38,7 @@ object SystemServerFlexibleHook {
 
     const val KEY_FORCE_ADJUST = "stagelab.force_adjust"
     const val ACTION_SIDEBAR_MINI_HINT = "dev.stagelab.nativehook.ACTION_SIDEBAR_MINI_HINT"
+    const val ACTION_ACTIVE_STAGE_CHANGED = "dev.stagelab.nativehook.ACTION_ACTIVE_STAGE_CHANGED"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
     private const val MINI_MEMORY_PREFIX = "mini:"
 
@@ -46,6 +53,12 @@ object SystemServerFlexibleHook {
     private val memoryMap = ConcurrentHashMap<String, MemorizedFrame>()
     private val lastAutoSnapMs = ConcurrentHashMap<Int, Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val stageReceiverRegistered = AtomicBoolean(false)
+    private val stageFloatHandles = ConcurrentHashMap<String, MutableList<Any>>()
+    @Volatile
+    private var currentActiveStageId: String = "stage-default"
+    @Volatile
+    private var cachedClassLoader: ClassLoader? = null
 
     data class MemorizedFrame(
         val left: Int,
@@ -73,60 +86,185 @@ object SystemServerFlexibleHook {
     }
 
     fun install(classLoader: ClassLoader) {
+        cachedClassLoader = classLoader
         loadMemoryFromDisk()
         hookPanoramaBypass(classLoader)
         hookUnlimitedWindowLimits(classLoader)
         hookFlexibleTaskController(classLoader)
+        OplusCompatAdapter.persistProbesToFile(OplusCompatAdapter.SYS_DIAG_PATH)
+        mainHandler.postDelayed({ ensureStageReceiverRegistered(null) }, 4_000L)
     }
 
     /**
-     * Lifts ColorOS 17's hardcoded caps on both Flexible Stage windows and Mini / Float-Handle
-     * windows so every workspace can host unlimited regular windows AND unlimited mini windows.
+     * Lifts ColorOS 15–17's hardcoded caps on both Flexible Stage windows and Mini / Float-Handle
+     * windows using [OplusCompatAdapter] multi-candidate matching so every workspace can host
+     * unlimited regular windows AND unlimited mini windows.
      */
     private fun hookUnlimitedWindowLimits(classLoader: ClassLoader) {
-        // 1. FlexibleWindowUtils#getMaxFlexibleTaskNum -> 99
-        runCatching {
-            val utilsCls = XposedHelpers.findClass(FLEXIBLE_WINDOW_UTILS, classLoader)
-            XposedBridge.hookAllMethods(utilsCls, "getMaxFlexibleTaskNum", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
-                        param.result = UNLIMITED_WINDOW_CAP
+        val utilsCls = OplusCompatAdapter.findClassAny(
+            "sys.class.FlexibleWindowUtils",
+            classLoader,
+            FLEXIBLE_WINDOW_UTILS,
+            "com.android.server.wm.OplusFlexibleWindowUtils",
+        )
+        if (utilsCls != null) {
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.limit.maxFlexibleTaskNum",
+                cls = utilsCls,
+                nameCandidates = listOf("getMaxFlexibleTaskNum", "getMaxFlexibleNum"),
+                fuzzyKeyword = "MaxFlexible",
+                hook = object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (HookGuard.isActive()) {
+                            param.result = UNLIMITED_WINDOW_CAP
+                        }
                     }
-                }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_WINDOW_UTILS#getMaxFlexibleTaskNum -> $UNLIMITED_WINDOW_CAP")
-        }.onFailure {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook getMaxFlexibleTaskNum", it)
+                },
+            )
         }
 
-        // 2. FloatHandleController#getLimitMaxFloatNum -> 99 (unlimited mini/float handles)
-        runCatching {
-            val floatCls = XposedHelpers.findClass(FLOAT_HANDLE_CONTROLLER, classLoader)
-            XposedBridge.hookAllMethods(floatCls, "getLimitMaxFloatNum", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
-                        param.result = UNLIMITED_WINDOW_CAP
+        val floatCls = OplusCompatAdapter.findClassAny(
+            "sys.class.FloatHandleController",
+            classLoader,
+            FLOAT_HANDLE_CONTROLLER,
+            "com.android.server.wm.OplusFloatHandleController",
+        )
+        if (floatCls != null) {
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.limit.maxFloatHandleNum",
+                cls = floatCls,
+                nameCandidates = listOf("getLimitMaxFloatNum", "getMaxFloatNum"),
+                fuzzyKeyword = "LimitMaxFloat",
+                hook = object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (HookGuard.isActive()) {
+                            param.result = UNLIMITED_WINDOW_CAP
+                        }
                     }
-                }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked $FLOAT_HANDLE_CONTROLLER#getLimitMaxFloatNum -> $UNLIMITED_WINDOW_CAP")
-        }.onFailure {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook getLimitMaxFloatNum", it)
+                },
+            )
         }
 
-        // 3. OplusConnectedDisplayManager#pickFlexibleTaskToRemoveWhenExceedLimit -> null
-        runCatching {
-            val cdmCls = XposedHelpers.findClass(CONNECTED_DISPLAY_MANAGER, classLoader)
-            XposedBridge.hookAllMethods(cdmCls, "pickFlexibleTaskToRemoveWhenExceedLimit", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
-                        param.result = null
+        val cdmCls = OplusCompatAdapter.findClassAny(
+            "sys.class.ConnectedDisplayManager",
+            classLoader,
+            CONNECTED_DISPLAY_MANAGER,
+        )
+        if (cdmCls != null) {
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.limit.pickRemoveTask",
+                cls = cdmCls,
+                nameCandidates = listOf("pickFlexibleTaskToRemoveWhenExceedLimit"),
+                hook = object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (HookGuard.isActive()) {
+                            param.result = null
+                        }
                     }
-                }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked $CONNECTED_DISPLAY_MANAGER#pickFlexibleTaskToRemoveWhenExceedLimit -> null")
+                },
+            )
+        }
+    }
+
+    private fun ensureStageReceiverRegistered(controllerObj: Any?) {
+        if (stageReceiverRegistered.get()) return
+        val ctx = runCatching {
+            controllerObj?.let { XposedHelpers.getObjectField(it, "mContext") as? Context }
+        }.getOrNull() ?: runCatching {
+            val atCls = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atCls, "currentActivityThread")
+            XposedHelpers.callMethod(at, "getSystemContext") as? Context
+        }.getOrNull() ?: return
+
+        if (!stageReceiverRegistered.compareAndSet(false, true)) return
+        runCatching {
+            val filter = IntentFilter().apply {
+                addAction(ACTION_ACTIVE_STAGE_CHANGED)
+                addAction("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG")
+            }
+            ctx.registerReceiver(
+                object : BroadcastReceiver() {
+                    override fun onReceive(context: Context?, intent: Intent?) {
+                        when (intent?.action) {
+                            ACTION_ACTIVE_STAGE_CHANGED -> {
+                                val nextStageId = intent.getStringExtra("stageId").orEmpty().ifBlank { "stage-default" }
+                                mainHandler.post { swapFloatHandlesForStage(nextStageId) }
+                            }
+                            "dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG" -> {
+                                mainHandler.post {
+                                    val lines = ArrayList(
+                                        OplusCompatAdapter.getAllProbes().values.map {
+                                            "${it.key}|${it.status.name}|${it.detail}"
+                                        },
+                                    )
+                                    runCatching {
+                                        ctx.sendBroadcast(
+                                            Intent("dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE").apply {
+                                                setPackage("dev.stagelab.nativehook")
+                                                putExtra("coloros", OplusCompatAdapter.getColorOsVersion())
+                                                putStringArrayListExtra("probes", lines)
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                filter,
+                Context.RECEIVER_EXPORTED,
+            )
+            HookGuard.info("SystemServerFlexibleHook: registered per-stage FloatHandle switcher & diag responder")
         }.onFailure {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook pickFlexibleTaskToRemoveWhenExceedLimit", it)
+            stageReceiverRegistered.set(false)
+            HookGuard.warn("SystemServerFlexibleHook: failed to register stage receiver", it)
+        }
+    }
+
+    /**
+     * Per-workspace edge-tucked Mini Windows (`FloatHandleController` / `FloatHandleViewManager`):
+     * Saves outgoing workspace's tucked edge pills and swaps in the incoming workspace's own list
+     * so every workspace has its own independent edge mini-windows instead of one global list!
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun swapFloatHandlesForStage(nextStageId: String) {
+        val prevStageId = currentActiveStageId
+        if (prevStageId == nextStageId) return
+        currentActiveStageId = nextStageId
+
+        val cl = cachedClassLoader ?: return
+        runCatching {
+            val floatCls = XposedHelpers.findClass(FLOAT_HANDLE_CONTROLLER, cl)
+            val controller = XposedHelpers.callStaticMethod(floatCls, "getInstance") ?: return@runCatching
+            val liveList = XposedHelpers.getObjectField(controller, "mFloatHandleInfoList") as? MutableList<Any>
+                ?: return@runCatching
+            val manager = runCatching { XposedHelpers.callMethod(controller, "getFloatManager") }.getOrNull()
+                ?: runCatching { XposedHelpers.getObjectField(controller, "mFloatManager") }.getOrNull()
+
+            // 1. Snapshot outgoing workspace's edge mini-windows
+            stageFloatHandles[prevStageId] = ArrayList(liveList)
+
+            // 2. Swap in incoming workspace's own edge mini-windows
+            val incoming = stageFloatHandles[nextStageId]?.let { ArrayList(it) } ?: ArrayList()
+            liveList.clear()
+            liveList.addAll(incoming)
+
+            // 3. Refresh or hide the native FloatHandle edge pill UI cleanly
+            if (manager != null) {
+                if (incoming.isEmpty()) {
+                    runCatching { XposedHelpers.callMethod(manager, "hideFloatHandleView") }
+                    runCatching { XposedHelpers.callMethod(manager, "setViewVisible", View.GONE) }
+                } else {
+                    runCatching { XposedHelpers.callMethod(manager, "setViewVisible", View.VISIBLE) }
+                    runCatching { XposedHelpers.callMethod(manager, "showFloatHandleView") }
+                    runCatching { XposedHelpers.callMethod(manager, "refreshFloatHandleView") }
+                }
+            }
+            HookGuard.info(
+                "SYS.FLOAT_HANDLE_STAGE_SWAP $prevStageId(${stageFloatHandles[prevStageId]?.size ?: 0}) -> $nextStageId(${incoming.size})",
+            )
+        }.onFailure {
+            HookGuard.warn("SYS.FLOAT_HANDLE_STAGE_SWAP failed", it)
         }
     }
 
@@ -174,24 +312,29 @@ object SystemServerFlexibleHook {
         }
 
         // 0. Never auto-evict or force-minimize existing Flexible/Mini tasks when opening more windows
-        try {
-            XposedBridge.hookAllMethods(cls, "handleExceedLimitFlexibleTask", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.limit.exceedFlexible",
+            cls = cls,
+            nameCandidates = listOf("handleExceedLimitFlexibleTask"),
+            fuzzyKeyword = "ExceedLimitFlexible",
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (HookGuard.isActive()) {
                         param.result = false
                     }
                 }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_TASK_CONTROLLER#handleExceedLimitFlexibleTask -> false")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook handleExceedLimitFlexibleTask", t)
-        }
+            },
+        )
 
         // 1. Wide Primary-Stage Default + Memorized Launch Bounds + Smart Sidebar Mini Detection in collectFlexibleTaskInfo
-        try {
-            XposedBridge.hookAllMethods(cls, "collectFlexibleTaskInfo", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.collectInfo",
+            cls = cls,
+            nameCandidates = listOf("collectFlexibleTaskInfo"),
+            hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     HookGuard.safeRun("FlexibleTaskController.collectFlexibleTaskInfo") {
+                        ensureStageReceiverRegistered(param.thisObject)
                         val info = param.result ?: return@safeRun
                         val pkg = extractPackageFromArgs(param.args) ?: return@safeRun
                         if (isIgnoredSystemPkg(pkg)) return@safeRun
@@ -201,8 +344,9 @@ object SystemServerFlexibleHook {
 
                         if (isMiniOrSidebar) {
                             notifySystemUiSidebarMiniHint(param.thisObject, pkg)
-                            val miniKey = MINI_MEMORY_PREFIX + pkg
-                            val miniMemorized = memoryMap[miniKey]?.takeIf { frame ->
+                            val stageMiniKey = "$MINI_MEMORY_PREFIX$currentActiveStageId:$pkg"
+                            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$pkg"
+                            val miniMemorized = (memoryMap[stageMiniKey] ?: memoryMap[fallbackMiniKey])?.takeIf { frame ->
                                 isValidMiniGeometry(frame.toRect(), frame.scale, screenW, screenH)
                             }
                             if (miniMemorized != null) {
@@ -210,9 +354,9 @@ object SystemServerFlexibleHook {
                                 runCatching { XposedHelpers.setFloatField(info, "mScale", miniMemorized.scale) }
                                 runCatching { XposedHelpers.setBooleanField(info, "mSkipPosInMemoryAdjust", true) }
                                 runCatching { XposedHelpers.setBooleanField(info, "mSkipMemoryRectToDefault", true) }
-                                HookGuard.info("SYS.LAUNCH_MINI_MEMORY pkg=$pkg rect=${miniMemorized.toRect()} scale=${miniMemorized.scale}")
+                                HookGuard.info("SYS.LAUNCH_MINI_MEMORY stage=$currentActiveStageId pkg=$pkg rect=${miniMemorized.toRect()} scale=${miniMemorized.scale}")
                             } else {
-                                HookGuard.info("SYS.LAUNCH_MINI_DEFAULT pkg=$pkg (preserving compact floating bounds)")
+                                HookGuard.info("SYS.LAUNCH_MINI_DEFAULT stage=$currentActiveStageId pkg=$pkg (preserving compact floating bounds)")
                             }
                             return@safeRun
                         }
@@ -250,11 +394,8 @@ object SystemServerFlexibleHook {
                         runCatching { XposedHelpers.setBooleanField(info, "mSkipMemoryRectToDefault", true) }
                     }
                 }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_TASK_CONTROLLER#collectFlexibleTaskInfo")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook collectFlexibleTaskInfo", t)
-        }
+            },
+        )
 
         // 2. Allow wide stage bounds during stagelab.force_adjust and persist the adjusted bounds
         try {
@@ -543,18 +684,20 @@ object SystemServerFlexibleHook {
 
         val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
 
-        // Persist mini/sidebar floating windows under a dedicated "mini:<pkg>" key so mini-window
-        // positions & scales are remembered independently from full Stage window sizes!
+        // Persist mini/sidebar floating windows per-Stage ("mini:<stageId>:<pkg>") AND fallback ("mini:<pkg>")
+        // so every workspace remembers its own distinct mini-window positions & scales independently!
         if (zoomState == 2 || scale < 0.72f) {
             val clampedMiniScale = scale.coerceIn(0.25f, 1.0f)
             if (!isValidMiniGeometry(bounds, clampedMiniScale, screenW, screenH)) return
             val miniFrame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedMiniScale)
-            val miniKey = MINI_MEMORY_PREFIX + pkg
-            val prevMini = memoryMap[miniKey]
+            val stageMiniKey = "$MINI_MEMORY_PREFIX$currentActiveStageId:$pkg"
+            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$pkg"
+            val prevMini = memoryMap[stageMiniKey]
             if (prevMini != miniFrame) {
-                memoryMap[miniKey] = miniFrame
+                memoryMap[stageMiniKey] = miniFrame
+                memoryMap[fallbackMiniKey] = miniFrame
                 saveMemoryToDisk()
-                HookGuard.info("SYS.MINI_MEMORY_SAVED pkg=$pkg rect=${miniFrame.toRect()} scale=$clampedMiniScale state=$zoomState")
+                HookGuard.info("SYS.MINI_MEMORY_SAVED stage=$currentActiveStageId pkg=$pkg rect=${miniFrame.toRect()} scale=$clampedMiniScale state=$zoomState")
             }
             return
         }

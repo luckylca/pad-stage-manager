@@ -14,6 +14,7 @@ import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.NativeWindowBridge
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.ui.strip.StageMagicTransitionOverlay
 import dev.stagelab.nativehook.xposed.HookGuard
 import dev.stagelab.nativehook.xposed.LauncherBackdropHook
@@ -268,39 +269,27 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
      * occupies the entire main stage excluding the left slanted Recent Strip, top status bar, and bottom Dock.
      */
     fun computePrimaryStageBounds(stripVisible: Boolean = true): WindowBounds {
-        val ctx = appContext()
-        val dm = ctx?.resources?.displayMetrics
+        val dm = appContext()?.resources?.displayMetrics
         val screenW = dm?.widthPixels ?: 2520
         val screenH = dm?.heightPixels ?: 1680
-        val isLandscape = screenW >= screenH
-
-        return if (isLandscape) {
-            // Symmetrical Main Stage on 2520x1680:
-            // left=450 (~55px from slanted strip), right=2465 (55px from right edge),
-            // top=87 (~27px below status bar), bottom=1364 (~54px clear above Dock pill)
-            val leftPx = if (stripVisible) (screenW * 0.1785f).toInt() else (screenW * 0.022f).toInt()
-            val topPx = (screenH * 0.052f).toInt()
-            val rightPx = screenW - (screenW * 0.022f).toInt()
-            val bottomPx = (screenH * 0.812f).toInt()
-            WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
-        } else {
-            val leftPx = if (stripVisible) (screenW * 0.21f).toInt() else (screenW * 0.03f).toInt()
-            val topPx = (screenH * 0.045f).toInt()
-            val rightPx = screenW - (screenW * 0.03f).toInt()
-            val bottomPx = screenH - (screenH * 0.145f).toInt()
-            WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
-        }
+        val density = dm?.density ?: StageLayoutMetrics.inferDensity(screenW, screenH)
+        return StageLayoutMetrics.compute(screenW, screenH, density, stripVisible).mainStageBounds
     }
 
     /**
      * Compute equal-height multi-column non-overlapping bounds for 2 or 3 windows in an Active Stage.
      */
     fun computeMultiColumnBounds(count: Int, stripVisible: Boolean = true): List<WindowBounds> {
-        val stage = computePrimaryStageBounds(stripVisible)
+        val dm = appContext()?.resources?.displayMetrics
+        val screenW = dm?.widthPixels ?: 2520
+        val screenH = dm?.heightPixels ?: 1680
+        val density = dm?.density ?: StageLayoutMetrics.inferDensity(screenW, screenH)
+        val metrics = StageLayoutMetrics.compute(screenW, screenH, density, stripVisible)
+        val stage = metrics.mainStageBounds
         val n = count.coerceIn(1, 3)
         if (n == 1) return listOf(stage)
-        val gap = if (n == 2) 28 else 20
-        val colW = ((stage.width - gap * (n - 1)) / n).coerceAtLeast(360)
+        val gap = if (n == 2) metrics.multiColGap2Px else metrics.multiColGap3Px
+        val colW = ((stage.width - gap * (n - 1)) / n).coerceAtLeast((140f * density).toInt())
         return List(n) { i ->
             val l = stage.left + i * (colW + gap)
             val r = if (i == n - 1) stage.right else l + colW

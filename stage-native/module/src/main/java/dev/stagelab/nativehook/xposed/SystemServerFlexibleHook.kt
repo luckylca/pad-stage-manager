@@ -7,6 +7,7 @@ import android.os.Bundle
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import java.io.File
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
@@ -426,21 +427,7 @@ object SystemServerFlexibleHook {
     }
 
     private fun computeWidePrimaryStageRect(screenW: Int, screenH: Int): Rect {
-        val isLandscape = screenW >= screenH
-        return if (isLandscape) {
-            // Symmetrical Main Stage on 2520x1680: 55px left/right margins, 54px clear above Dock
-            val left = (screenW * 0.1785f).toInt()
-            val top = (screenH * 0.052f).toInt()
-            val right = screenW - (screenW * 0.022f).toInt()
-            val bottom = (screenH * 0.812f).toInt()
-            Rect(left, top, right, bottom)
-        } else {
-            val left = (screenW * 0.21f).toInt()
-            val top = (screenH * 0.045f).toInt()
-            val right = screenW - (screenW * 0.03f).toInt()
-            val bottom = screenH - (screenH * 0.145f).toInt()
-            Rect(left, top, right, bottom)
-        }
+        return StageLayoutMetrics.compute(screenW = screenW, screenH = screenH).mainStageRect
     }
 
     private fun extractPackageFromArgs(args: Array<Any?>?): String? {

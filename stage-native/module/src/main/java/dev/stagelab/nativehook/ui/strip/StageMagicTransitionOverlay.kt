@@ -21,6 +21,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -207,10 +208,11 @@ object StageMagicTransitionOverlay {
             val dm = context.resources.displayMetrics
             val density = dm.density
             val screenH = dm.heightPixels
-            val stripAnchorX = dp(context, 94).toFloat()
+            val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, density)
+            val stripAnchorX = metrics.stripAnchorX
             val outgoingStripY = screenH * 0.34f
             val incomingStripY = screenH * 0.50f
-            val cornerPx = 68f
+            val cornerPx = metrics.cornerRadiusPx
 
             val outgoingViews = mutableListOf<Triple<FrameLayout, PreparedCard, Int>>()
             val incomingViews = mutableListOf<Triple<FrameLayout, PreparedCard, Int>>()

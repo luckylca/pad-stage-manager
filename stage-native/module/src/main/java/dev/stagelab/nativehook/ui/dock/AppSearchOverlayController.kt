@@ -28,6 +28,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
 
 /**
@@ -57,24 +58,60 @@ class AppSearchOverlayController(
     private var gridContainer: GridLayout? = null
     private var isDismissing = false
     private var allApps: List<LaunchableApp> = emptyList()
+    private var lastAppsLoadedAtMs = 0L
 
     val isShowing: Boolean get() = rootView != null
 
     fun toggle(context: Context) {
-        if (isShowing) {
-            dismiss()
-        } else {
-            show(context)
+        mainHandler.post {
+            when {
+                isShowing && isDismissing -> reopenInPlace()
+                isShowing -> dismiss()
+                else -> show(context)
+            }
         }
+    }
+
+    /**
+     * Interrupts an in-flight close animation on the exact same frame and springs back open!
+     */
+    private fun reopenInPlace() {
+        val v = rootView ?: return
+        val p = panelView ?: return
+        isDismissing = false
+        v.animate().cancel()
+        p.animate().cancel()
+        v.animate()
+            .alpha(1f)
+            .setDuration(220L)
+            .setInterpolator(scrimInterpolator)
+            .start()
+        p.animate()
+            .withLayer()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .translationY(0f)
+            .setDuration(320L)
+            .setInterpolator(openInterpolator)
+            .start()
     }
 
     fun show(context: Context) {
         mainHandler.post {
-            if (isShowing || !HookGuard.isActive()) return@post
+            if (isShowing) {
+                if (isDismissing) reopenInPlace()
+                return@post
+            }
+            if (!HookGuard.isActive()) return@post
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
             windowManager = wm
 
-            allApps = loadLaunchableApps(context)
+            val now = System.currentTimeMillis()
+            if (allApps.isEmpty() || now - lastAppsLoadedAtMs > 30_000L) {
+                allApps = loadLaunchableApps(context)
+                lastAppsLoadedAtMs = now
+            }
 
             val scrim = FrameLayout(context).apply {
                 setBackgroundColor(Color.argb(115, 16, 14, 24))
@@ -176,11 +213,15 @@ class AppSearchOverlayController(
                 override fun afterTextChanged(s: Editable?) = Unit
             })
 
+            val dm = context.resources.displayMetrics
+            val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
+            gridContainer?.columnCount = metrics.searchGridColumns
+
             populateGrid(context, "")
 
             scrim.addView(
                 panel,
-                FrameLayout.LayoutParams(dp(context, 560), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER),
+                FrameLayout.LayoutParams(metrics.searchPanelWidthPx, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER),
             )
 
             val lp = WindowManager.LayoutParams(

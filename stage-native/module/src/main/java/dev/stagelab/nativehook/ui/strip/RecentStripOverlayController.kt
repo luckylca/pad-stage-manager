@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import dev.stagelab.nativecore.Stage
 import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
 import kotlin.math.abs
 
@@ -142,8 +143,9 @@ class RecentStripOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            // Leave the leftmost ~30dp (~79px) clear so ColorOS native left-edge Back gesture is never intercepted.
-            x = dp(context, 30)
+            val dm = context.resources.displayMetrics
+            // Responsive left Back-gesture safe zone (~28dp) across any tablet DPI
+            x = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density).backSafePx
             title = "StageLabRecentStrip"
         }
 
@@ -172,10 +174,12 @@ class RecentStripOverlayController(
         column.removeAllViews()
         val maxCards = recentStages.take(StageSession.MAX_VISIBLE_RECENT_STAGES)
         val total = maxCards.size
+        val dm = context.resources.displayMetrics
+        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         maxCards.forEachIndexed { index, stage ->
-            val card = buildStageThumbnailCard(context, stage, index, total)
-            val params = LinearLayout.LayoutParams(dp(context, 148), dp(context, 106)).apply {
-                if (index > 0) topMargin = dp(context, 18)
+            val card = buildStageThumbnailCard(context, stage, index, total, metrics.stripCardWidthPx, metrics.stripCardHeightPx)
+            val params = LinearLayout.LayoutParams(metrics.stripCardWidthPx, metrics.stripCardHeightPx).apply {
+                if (index > 0) topMargin = dp(context, 16)
             }
             column.addView(card, params)
         }
@@ -187,9 +191,9 @@ class RecentStripOverlayController(
         stage: Stage,
         index: Int,
         total: Int,
+        cardW: Int,
+        cardH: Int,
     ): View {
-        val cardW = dp(context, 148)
-        val cardH = dp(context, 106)
         val radiusPx = dp(context, 18).toFloat()
 
         // Official iPadOS Stage Manager slanted 3D perspective:

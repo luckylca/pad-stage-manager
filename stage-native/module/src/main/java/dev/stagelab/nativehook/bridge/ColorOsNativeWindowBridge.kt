@@ -142,14 +142,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 fallbackShow.addAll(orderedShow)
             }
 
-            // Play Apple iPadOS-style 3D Magic Move transition overlay right over the 3ms atomic swap
-            appContext()?.let { ctx ->
-                val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
-                val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
-                StageMagicTransitionOverlay.playStageSwitch(ctx, outPairs, inPairs)
-            }
-
-            mainHandler.postDelayed({
+            val executeAtomicSwap = {
                 if (wct != null && atomicOps > 0) {
                     runCatching {
                         applyTransaction(organizer, wct)
@@ -164,7 +157,18 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 }
                 for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
                 for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
-            }, 35L)
+            }
+
+            // Preload snapshots off-thread, wait for GPU pre-draw, play silky 480ms 120fps Magic Move,
+            // and commit the 3ms atomic WCT seamlessly behind frame 1 of the overlay.
+            val ctx = appContext()
+            if (ctx != null) {
+                val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                StageMagicTransitionOverlay.playStageSwitch(ctx, outPairs, inPairs, executeAtomicSwap)
+            } else {
+                mainHandler.post(executeAtomicSwap)
+            }
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
         }
@@ -209,20 +213,33 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
-     * Promote an externally launched fullscreen task (e.g. opened from notification shade)
-     * directly into a widescreen Flexible Stage window.
+     * Promote an externally launched fullscreen task (e.g. notification shade) or a user-dragged
+     * fullscreen task back into Flexible Stage mode. When `maximizeToPrimaryStage` is true, snaps
+     * the window to fill the entire main stage (leaving left Recent Strip & bottom Dock clear).
      */
-    fun promoteFullscreenTaskToStage(taskId: Int, packageName: String) {
+    fun promoteFullscreenTaskToStage(
+        taskId: Int,
+        packageName: String,
+        maximizeToPrimaryStage: Boolean = false,
+    ) {
         val organizer = shellTaskOrganizer ?: return
+        val primaryBounds = computePrimaryStageBounds(
+            stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting,
+        )
         val dummyTask = StageTask(
             taskId = taskId,
             packageName = packageName,
-            bounds = WindowBounds.EMPTY,
+            bounds = if (maximizeToPrimaryStage) primaryBounds else WindowBounds.EMPTY,
             windowingMode = StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE,
         )
         mainHandler.post {
             restoreSingleFlexibleTask(organizer, dummyTask)
-            HookGuard.info("BRIDGE.PROMOTE_TO_STAGE task=$taskId pkg=$packageName")
+            HookGuard.info("BRIDGE.PROMOTE_TO_STAGE task=$taskId pkg=$packageName maxStage=$maximizeToPrimaryStage")
+            if (maximizeToPrimaryStage) {
+                mainHandler.postDelayed({
+                    adjustFlexibleTaskFrame(taskId, primaryBounds, 1.0f)
+                }, 180L)
+            }
         }
     }
 

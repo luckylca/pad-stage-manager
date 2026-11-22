@@ -319,16 +319,17 @@ object StageNativeRuntime {
 
         val stageTask = toStageTask(taskInfo, pkg)
 
-        // External notification / fullscreen launch detection
+        // External notification fullscreen launch OR user dragged an active Stage window to fullscreen:
+        // Never allow true 2520x1680 fullscreen to lock the stage — snap to Main Stage maximize instead!
         if (stageManagerEnabled && stageTask.isVisible && isTaskFocused(taskInfo) && isFullScreenBounds(stageTask.bounds)) {
-            // Park any lingering previous active stage tasks and promote this notification-launched app to Stage
             val currentActive = registry.getActiveStage()
-            if (currentActive != null && !currentActive.containsTask(taskInfo.taskId)) {
+            val isAlreadyInActiveStage = currentActive != null && currentActive.containsTask(taskInfo.taskId)
+            if (currentActive != null && !isAlreadyInActiveStage) {
                 val prevTasks = currentActive.tasks
                 registry.deactivateStageToRecentTop(currentActive.stageId)
                 bridge.parkNativeTasks(prevTasks)
             }
-            promoteIfNotDebounced(taskInfo.taskId, pkg)
+            promoteIfNotDebounced(taskInfo.taskId, pkg, maximizeToPrimaryStage = isAlreadyInActiveStage)
         }
 
         var session = transitionController.onNativeTaskInfoChanged(stageTask)
@@ -355,13 +356,17 @@ object StageNativeRuntime {
         updateStripUi(session)
     }
 
-    private fun promoteIfNotDebounced(taskId: Int, pkg: String) {
+    private fun promoteIfNotDebounced(
+        taskId: Int,
+        pkg: String,
+        maximizeToPrimaryStage: Boolean = false,
+    ) {
         val now = System.currentTimeMillis()
         val last = lastPromotedAtMs[taskId] ?: 0L
         if (now - last < 1_500L) return
         lastPromotedAtMs[taskId] = now
         markProgrammaticTransition(1_200L)
-        bridge.promoteFullscreenTaskToStage(taskId, pkg)
+        bridge.promoteFullscreenTaskToStage(taskId, pkg, maximizeToPrimaryStage = maximizeToPrimaryStage)
     }
 
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {

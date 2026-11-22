@@ -214,22 +214,35 @@ object SystemServerFlexibleHook {
                     if (!HookGuard.isActive()) return
                     HookGuard.safeRun("FlexibleTaskController.exitFlexibleTaskWindowInnerLocked") {
                         val strategy = param.args.firstOrNull() ?: return@safeRun
+                        val strategyName = strategy.javaClass.simpleName
                         val exitTo = runCatching {
                             XposedHelpers.callMethod(strategy, "getExitTo") as? Int
                         }.getOrNull() ?: runCatching {
                             XposedHelpers.getIntField(strategy, "mExitTo")
                         }.getOrDefault(-1)
-                        // exitTo == 4 is ColorOS fullscreen exit (from corner drag maximize, top-edge drag, or ··· maximize)
-                        if (exitTo == 4) {
+
+                        val taskObj = runCatching {
+                            XposedHelpers.callMethod(strategy, "getTask")
+                        }.getOrNull() ?: runCatching {
+                            XposedHelpers.getObjectField(strategy, "mTask")
+                        }.getOrNull()
+
+                        // 1. Fullscreen exit (exitTo == 4) -> snap cleanly to Main Stage full
+                        if (exitTo == 4 || strategyName.contains("Full", ignoreCase = true)) {
                             param.result = null
-                            val taskObj = runCatching {
-                                XposedHelpers.callMethod(strategy, "getTask")
-                            }.getOrNull() ?: runCatching {
-                                XposedHelpers.getObjectField(strategy, "mTask")
-                            }.getOrNull()
                             if (taskObj != null) {
                                 snapTaskObjToMainStage(taskObj, "exitToFullscreen")
                             }
+                            return@safeRun
+                        }
+
+                        // 2. Native Split Screen menu action -> keep inside Stage Manager, snap to left half of Main Stage!
+                        if (strategyName.contains("Split", ignoreCase = true) || exitTo == 2 || exitTo == 3) {
+                            param.result = null
+                            if (taskObj != null) {
+                                snapTaskObjToSplitLeft(taskObj)
+                            }
+                            return@safeRun
                         }
                     }
                 }
@@ -312,6 +325,30 @@ object SystemServerFlexibleHook {
                 HookGuard.warn("SystemServerFlexibleHook: optional hook $methodName unavailable", t)
             }
         }
+    }
+
+    private fun snapTaskObjToSplitLeft(taskObj: Any) {
+        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+        if (taskId <= 0) return
+        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+        val metrics = StageLayoutMetrics.compute(screenW = screenW, screenH = screenH)
+        val stage = metrics.mainStageRect
+        val halfW = ((stage.width() - metrics.multiColGap2Px) / 2).coerceAtLeast(360)
+        val leftRect = Rect(stage.left, stage.top, stage.left + halfW, stage.bottom)
+
+        val bundle = Bundle().apply {
+            putBoolean(KEY_FORCE_ADJUST, true)
+            putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
+            putParcelable("androidx.flexible.LaunchBounds", leftRect)
+            putFloat("androidx.activity.LaunchScale", 1.0f)
+        }
+        allowWideStageRect.set(true)
+        runCatching {
+            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+            XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
+        }
+        HookGuard.info("SYS.SNAP_TO_SPLIT_LEFT task=$taskId rect=$leftRect")
     }
 
     private fun snapTaskObjToMainStage(taskObj: Any, reason: String) {

@@ -73,10 +73,15 @@ class RecentStripOverlayController(
     }
 
     fun refreshSnapshotsForTasks(context: Context, tasks: List<StageTask>) {
-        // Pre-warm native TaskSnapshots right as tasks are parked.
+        if (tasks.isEmpty()) return
+        // Pre-warm fresh real content TaskSnapshots and immediately refresh strip thumbnails!
         mainHandler.post {
             for (t in tasks) {
                 snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+            }
+            val recent = lastSession.visibleRecentStages
+            if (isAttached && recent.isNotEmpty()) {
+                render(context, recent)
             }
         }
     }

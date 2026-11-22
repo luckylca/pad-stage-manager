@@ -102,12 +102,21 @@ object StageNativeRuntime {
     @Volatile
     private var magicAnimationBusyUntilMs: Long = 0L
 
-    fun markMagicAnimationBusy(durationMs: Long = 640L) {
+    fun markMagicAnimationBusy(durationMs: Long = 460L) {
         val until = System.currentTimeMillis() + durationMs
         if (until > magicAnimationBusyUntilMs) {
             magicAnimationBusyUntilMs = until
         }
-        mainHandler.postDelayed({ updateStripUi(registry.snapshot()) }, durationMs + 30L)
+        mainHandler.postDelayed({
+            val session = registry.snapshot()
+            val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+            if (ctx != null) {
+                // Capture fresh real content snapshots for parked stages once the animation completes
+                val recentTasks = session.visibleRecentStages.flatMap { it.tasks }
+                stripOverlay.refreshSnapshotsForTasks(ctx, recentTasks)
+            }
+            updateStripUi(session)
+        }, durationMs + 40L)
     }
 
     fun markProgrammaticTransition(durationMs: Long = 1_200L) {
@@ -401,6 +410,14 @@ object StageNativeRuntime {
     fun onNativeMenuMinimize(taskId: Int) {
         val session = dockController.onWindowMenuMinimize(taskId)
         logSession("ON_NATIVE_MENU_MINIMIZE(t=$taskId)", session)
+        updateStripUi(session)
+    }
+
+    fun onNativeMenuClose(taskId: Int) {
+        taskGeometryMemory.remove(taskId)
+        taskAppearedAtMs.remove(taskId)
+        val session = transitionController.onNativeTaskVanished(taskId)
+        logSession("ON_NATIVE_MENU_CLOSE(t=$taskId)", session)
         updateStripUi(session)
     }
 

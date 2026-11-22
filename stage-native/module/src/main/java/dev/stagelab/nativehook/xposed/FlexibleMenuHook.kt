@@ -42,8 +42,8 @@ object FlexibleMenuHook {
                                 StageNativeRuntime.onNativeMenuMinimize(taskId)
                             }
                             EVENT_CLOSE -> {
-                                // ColorOS menu close parks/exits the flexible window; reflect in S5 minimize/split
-                                StageNativeRuntime.onNativeMenuMinimize(taskId)
+                                // Close cleanly: remove task from StageRegistry instead of parking a ghost card
+                                StageNativeRuntime.onNativeMenuClose(taskId)
                             }
                         }
                     }

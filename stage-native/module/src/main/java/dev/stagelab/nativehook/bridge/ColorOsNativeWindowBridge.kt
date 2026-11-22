@@ -164,7 +164,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             // and commit the 3ms atomic WCT seamlessly behind frame 1 of the overlay.
             val ctx = appContext()
             if (ctx != null) {
-                StageNativeRuntime.markMagicAnimationBusy(640L)
+                StageNativeRuntime.markMagicAnimationBusy(460L)
                 val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
                 val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
                 StageMagicTransitionOverlay.playStageSwitch(ctx, outPairs, inPairs, executeAtomicSwap)

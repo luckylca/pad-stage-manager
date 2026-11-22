@@ -99,16 +99,15 @@ class NativeTaskSnapshotLoader {
     }
 
     private fun fetchViaTaskSnapshotManager(taskId: Int): Any? {
-        return runCatching {
+        val mgr = runCatching {
             val mgrCls = Class.forName("android.window.TaskSnapshotManager")
-            val mgr = XposedHelpers.callStaticMethod(mgrCls, "getInstance")
-            // resolution: 1 = RESOLUTION_LOW (fast thumbnail), 0 = RESOLUTION_HIGH
-            XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 1)
-                ?: XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 0)
-                ?: XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true)
-        }.onFailure {
-            HookGuard.warn("TaskSnapshotManager lookup failed for task=$taskId", it)
-        }.getOrNull()
+            XposedHelpers.callStaticMethod(mgrCls, "getInstance")
+        }.getOrNull() ?: return null
+
+        // Android 17 (API 37): RESOLUTION_HIGH = 1, RESOLUTION_LOW = 2 (0 is invalid and throws!)
+        return runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 2) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 1) }.getOrNull()
+            ?: runCatching { XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true) }.getOrNull()
     }
 
     private fun fetchViaActivityTaskManagerFallback(taskId: Int): Any? {

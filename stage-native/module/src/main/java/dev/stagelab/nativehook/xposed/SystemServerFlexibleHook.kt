@@ -187,7 +187,49 @@ object SystemServerFlexibleHook {
             HookGuard.warn("SystemServerFlexibleHook: failed to hook adjustFlexibleTask", t)
         }
 
-        // 3. Persist real user drag/resize bounds & scale directly inside system_server
+        // 3. Block true 2520x1680 fullscreen exit on drag/scale-to-fullscreen (prevents frozen transition snapshot)
+        //    and instead snap the window cleanly to the widescreen Main Stage rect.
+        try {
+            XposedBridge.hookAllMethods(cls, "canFullscreenTask", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        param.result = false
+                    }
+                }
+            })
+            XposedBridge.hookAllMethods(cls, "stopScaleAndToFullScreen", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    HookGuard.safeRun("FlexibleTaskController.stopScaleAndToFullScreen") {
+                        param.result = false
+                        val taskObj = param.args.firstOrNull() ?: return@safeRun
+                        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+                        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+                        val mainStage = computeWidePrimaryStageRect(screenW, screenH)
+                        if (taskId > 0) {
+                            val bundle = Bundle().apply {
+                                putBoolean(KEY_FORCE_ADJUST, true)
+                                putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
+                                putParcelable("androidx.flexible.LaunchBounds", mainStage)
+                                putFloat("androidx.activity.LaunchScale", 1.0f)
+                            }
+                            allowWideStageRect.set(true)
+                            runCatching {
+                                val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+                                val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+                                XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
+                            }
+                            HookGuard.info("SYS.SNAP_TO_MAIN_STAGE task=$taskId rect=$mainStage")
+                        }
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked canFullscreenTask & stopScaleAndToFullScreen")
+        } catch (t: Throwable) {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook fullscreen guards", t)
+        }
+
+        // 4. Persist real user drag/resize bounds & scale directly inside system_server
         val persistHook = object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 HookGuard.safeRun("FlexibleTaskController.persistGeometry") {

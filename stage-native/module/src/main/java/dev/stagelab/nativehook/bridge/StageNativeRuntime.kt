@@ -319,17 +319,20 @@ object StageNativeRuntime {
 
         val stageTask = toStageTask(taskInfo, pkg)
 
-        // External notification fullscreen launch OR user dragged an active Stage window to fullscreen:
-        // Never allow true 2520x1680 fullscreen to lock the stage — snap to Main Stage maximize instead!
+        // External notification fullscreen launch: park previous active Stage and promote to Stage Manager.
+        // (Active Stage drag-to-fullscreen is already intercepted cleanly inside system_server via
+        //  canFullscreenTask/stopScaleAndToFullScreen so it never collides with a running transition.)
         if (stageManagerEnabled && stageTask.isVisible && isTaskFocused(taskInfo) && isFullScreenBounds(stageTask.bounds)) {
             val currentActive = registry.getActiveStage()
             val isAlreadyInActiveStage = currentActive != null && currentActive.containsTask(taskInfo.taskId)
-            if (currentActive != null && !isAlreadyInActiveStage) {
-                val prevTasks = currentActive.tasks
-                registry.deactivateStageToRecentTop(currentActive.stageId)
-                bridge.parkNativeTasks(prevTasks)
+            if (!isAlreadyInActiveStage) {
+                if (currentActive != null) {
+                    val prevTasks = currentActive.tasks
+                    registry.deactivateStageToRecentTop(currentActive.stageId)
+                    bridge.parkNativeTasks(prevTasks)
+                }
+                promoteIfNotDebounced(taskInfo.taskId, pkg, maximizeToPrimaryStage = false)
             }
-            promoteIfNotDebounced(taskInfo.taskId, pkg, maximizeToPrimaryStage = isAlreadyInActiveStage)
         }
 
         var session = transitionController.onNativeTaskInfoChanged(stageTask)

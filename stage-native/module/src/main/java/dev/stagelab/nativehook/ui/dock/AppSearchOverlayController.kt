@@ -18,6 +18,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.EditText
@@ -46,8 +47,10 @@ class AppSearchOverlayController(
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val openInterpolator = PathInterpolator(0.18f, 0.96f, 0.24f, 1.0f)
-    private val closeInterpolator = PathInterpolator(0.40f, 0.0f, 0.20f, 1.0f)
+    // Gentle spring-overshoot curve so opening from the Dock feels unmistakably silky & tactile
+    private val openInterpolator = PathInterpolator(0.22f, 1.08f, 0.34f, 1.0f)
+    private val scrimInterpolator = PathInterpolator(0.25f, 0.1f, 0.25f, 1.0f)
+    private val closeInterpolator = PathInterpolator(0.36f, 0.0f, 0.66f, 1.0f)
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
     private var panelView: View? = null
@@ -196,12 +199,12 @@ class AppSearchOverlayController(
                 title = "StageLabAppSearch"
             }
 
-            // Prepare smooth iPadOS spring-bloom open animation
+            // Prepare smooth iPadOS spring-bloom open animation rising from the Dock
             scrim.alpha = 0f
             panel.alpha = 0f
-            panel.scaleX = 0.88f
-            panel.scaleY = 0.88f
-            panel.translationY = dp(context, 42).toFloat()
+            panel.scaleX = 0.72f
+            panel.scaleY = 0.72f
+            panel.translationY = dp(context, 120).toFloat()
 
             runCatching {
                 wm.addView(scrim, lp)
@@ -209,20 +212,28 @@ class AppSearchOverlayController(
                 panelView = panel
                 isDismissing = false
 
-                scrim.animate()
-                    .alpha(1f)
-                    .setDuration(220L)
-                    .setInterpolator(openInterpolator)
-                    .start()
-                panel.animate()
-                    .withLayer()
-                    .alpha(1f)
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .translationY(0f)
-                    .setDuration(280L)
-                    .setInterpolator(openInterpolator)
-                    .start()
+                // Wait for layout + 58-icon grid upload BEFORE frame 0 of the animation starts!
+                scrim.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        scrim.viewTreeObserver.removeOnPreDrawListener(this)
+                        if (rootView !== scrim || isDismissing) return true
+                        scrim.animate()
+                            .alpha(1f)
+                            .setDuration(260L)
+                            .setInterpolator(scrimInterpolator)
+                            .start()
+                        panel.animate()
+                            .withLayer()
+                            .alpha(1f)
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .translationY(0f)
+                            .setDuration(380L)
+                            .setInterpolator(openInterpolator)
+                            .start()
+                        return true
+                    }
+                })
 
                 HookGuard.info("APP_SEARCH opened (${allApps.size} apps)")
             }.onFailure {
@@ -245,16 +256,16 @@ class AppSearchOverlayController(
             p?.animate()
                 ?.withLayer()
                 ?.alpha(0f)
-                ?.scaleX(0.90f)
-                ?.scaleY(0.90f)
-                ?.translationY(dp(v.context, 28).toFloat())
-                ?.setDuration(180L)
+                ?.scaleX(0.78f)
+                ?.scaleY(0.78f)
+                ?.translationY(dp(v.context, 90).toFloat())
+                ?.setDuration(240L)
                 ?.setInterpolator(closeInterpolator)
                 ?.start()
 
             v.animate()
                 .alpha(0f)
-                .setDuration(190L)
+                .setDuration(240L)
                 .setInterpolator(closeInterpolator)
                 .withEndAction {
                     runCatching { wm.removeViewImmediate(v) }

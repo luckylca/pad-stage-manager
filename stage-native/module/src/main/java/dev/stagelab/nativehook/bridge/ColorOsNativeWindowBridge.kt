@@ -275,12 +275,13 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val isLandscape = screenW >= screenH
 
         return if (isLandscape) {
-            // Visually centered & balanced Main Stage on 2520x1680:
-            // left=423 (~43px clear of slanted strip), top=81, right=2464, bottom=1398 (~42px clear of Dock)
-            val leftPx = if (stripVisible) (screenW * 0.168f).toInt() else (screenW * 0.024f).toInt()
-            val topPx = (screenH * 0.048f).toInt()
+            // Symmetrical Main Stage on 2520x1680:
+            // left=450 (~55px from slanted strip), right=2465 (55px from right edge),
+            // top=87 (~27px below status bar), bottom=1364 (~54px clear above Dock pill)
+            val leftPx = if (stripVisible) (screenW * 0.1785f).toInt() else (screenW * 0.022f).toInt()
+            val topPx = (screenH * 0.052f).toInt()
             val rightPx = screenW - (screenW * 0.022f).toInt()
-            val bottomPx = screenH - (screenH * 0.168f).toInt()
+            val bottomPx = (screenH * 0.812f).toInt()
             WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
         } else {
             val leftPx = if (stripVisible) (screenW * 0.21f).toInt() else (screenW * 0.03f).toInt()

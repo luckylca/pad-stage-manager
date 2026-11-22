@@ -153,6 +153,11 @@ object StageMagicTransitionOverlay {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
+            // Align (0, 0) to exact physical screen (0, 0) with zero status-bar / cutout inset offset!
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                fitInsetsTypes = 0
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
             title = "StageLabMagicTransition"
         }
         return runCatching {
@@ -419,7 +424,7 @@ object StageMagicTransitionOverlay {
             context.resources.displayMetrics,
         ).toInt()
 
-    private const val OUTGOING_DURATION_MS = 500L
-    private const val INCOMING_DURATION_MS = 540L
-    private const val FADE_OUT_MS = 90L
+    private const val OUTGOING_DURATION_MS = 380L
+    private const val INCOMING_DURATION_MS = 400L
+    private const val FADE_OUT_MS = 75L
 }

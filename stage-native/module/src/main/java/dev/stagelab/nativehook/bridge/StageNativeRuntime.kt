@@ -42,9 +42,9 @@ object StageNativeRuntime {
     val stripOverlay = RecentStripOverlayController(
         onStageClicked = { stageId ->
             val session = recentController.onStageThumbnailClicked(stageId)
-            // Defer strip snapshot refresh until the 580ms Magic Move finishes so the SystemUI main
-            // thread has ZERO Binder/bitmap work during the 120fps transition animation!
-            mainHandler.postDelayed({ updateStripUi(registry.snapshot()) }, 650L)
+            // Update strip click bindings IMMEDIATELY (using cached snapshots) so rapid consecutive
+            // taps on Slot 1 switch back and forth instantaneously with zero dead-time!
+            updateStripUiImmediate(session)
         },
         onStageDraggedToCenter = { stageId ->
             val session = recentController.onStageTaskDraggedToCenter(stageId)
@@ -400,6 +400,17 @@ object StageNativeRuntime {
         updateStripUi(session)
     }
 
+    private fun updateStripUiImmediate(session: StageSession) {
+        if (isDeviceLocked || !stageManagerEnabled) return
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return
+        stripOverlay.update(
+            context = ctx,
+            session = session,
+            hidden = recentController.isHiddenByUserSetting,
+            tempRevealed = recentController.isTemporarilyRevealed,
+        )
+    }
+
     private fun updateStripUi(session: StageSession) {
         val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
         if (isDeviceLocked || !stageManagerEnabled) {
@@ -486,7 +497,7 @@ object StageNativeRuntime {
         return b.left == 0 && b.top == 0 && b.right == sw && b.bottom == sh
     }
 
-    private fun extractFlexibleScale(taskInfo: ActivityManager.RunningTaskInfo): Float {
+    fun extractFlexibleScale(taskInfo: ActivityManager.RunningTaskInfo): Float {
         return runCatching {
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val config = XposedHelpers.getObjectField(taskInfo, "configuration") as? Configuration ?: return 1.0f

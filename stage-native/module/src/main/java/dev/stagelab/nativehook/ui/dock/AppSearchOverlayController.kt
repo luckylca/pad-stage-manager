@@ -7,6 +7,7 @@ import android.graphics.Outline
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
@@ -18,6 +19,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
+import android.view.animation.PathInterpolator
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
@@ -44,9 +46,13 @@ class AppSearchOverlayController(
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val openInterpolator = PathInterpolator(0.18f, 0.96f, 0.24f, 1.0f)
+    private val closeInterpolator = PathInterpolator(0.40f, 0.0f, 0.20f, 1.0f)
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
+    private var panelView: View? = null
     private var gridContainer: GridLayout? = null
+    private var isDismissing = false
     private var allApps: List<LaunchableApp> = emptyList()
 
     val isShowing: Boolean get() = rootView != null
@@ -183,12 +189,41 @@ class AppSearchOverlayController(
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    fitInsetsTypes = 0
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                }
                 title = "StageLabAppSearch"
             }
+
+            // Prepare smooth iPadOS spring-bloom open animation
+            scrim.alpha = 0f
+            panel.alpha = 0f
+            panel.scaleX = 0.88f
+            panel.scaleY = 0.88f
+            panel.translationY = dp(context, 42).toFloat()
 
             runCatching {
                 wm.addView(scrim, lp)
                 rootView = scrim
+                panelView = panel
+                isDismissing = false
+
+                scrim.animate()
+                    .alpha(1f)
+                    .setDuration(220L)
+                    .setInterpolator(openInterpolator)
+                    .start()
+                panel.animate()
+                    .withLayer()
+                    .alpha(1f)
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(280L)
+                    .setInterpolator(openInterpolator)
+                    .start()
+
                 HookGuard.info("APP_SEARCH opened (${allApps.size} apps)")
             }.onFailure {
                 HookGuard.warn("APP_SEARCH failed to open", it)
@@ -200,11 +235,37 @@ class AppSearchOverlayController(
         mainHandler.post {
             val wm = windowManager
             val v = rootView
-            if (wm != null && v != null) {
-                runCatching { wm.removeViewImmediate(v) }
-            }
-            rootView = null
-            gridContainer = null
+            val p = panelView
+            if (wm == null || v == null || isDismissing) return@post
+            isDismissing = true
+
+            v.animate().cancel()
+            p?.animate()?.cancel()
+
+            p?.animate()
+                ?.withLayer()
+                ?.alpha(0f)
+                ?.scaleX(0.90f)
+                ?.scaleY(0.90f)
+                ?.translationY(dp(v.context, 28).toFloat())
+                ?.setDuration(180L)
+                ?.setInterpolator(closeInterpolator)
+                ?.start()
+
+            v.animate()
+                .alpha(0f)
+                .setDuration(190L)
+                .setInterpolator(closeInterpolator)
+                .withEndAction {
+                    runCatching { wm.removeViewImmediate(v) }
+                    if (rootView === v) {
+                        rootView = null
+                        panelView = null
+                        gridContainer = null
+                        isDismissing = false
+                    }
+                }
+                .start()
         }
     }
 

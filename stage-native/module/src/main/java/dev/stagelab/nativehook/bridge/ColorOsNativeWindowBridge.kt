@@ -275,10 +275,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val isLandscape = screenW >= screenH
 
         return if (isLandscape) {
-            val leftPx = if (stripVisible) (screenW * 0.185f).toInt() else (screenW * 0.032f).toInt()
-            val topPx = (screenH * 0.058f).toInt()
-            val rightPx = screenW - (screenW * 0.032f).toInt()
-            val bottomPx = screenH - (screenH * 0.195f).toInt()
+            // Visually centered & balanced Main Stage on 2520x1680:
+            // left=423 (~43px clear of slanted strip), top=81, right=2464, bottom=1398 (~42px clear of Dock)
+            val leftPx = if (stripVisible) (screenW * 0.168f).toInt() else (screenW * 0.024f).toInt()
+            val topPx = (screenH * 0.048f).toInt()
+            val rightPx = screenW - (screenW * 0.022f).toInt()
+            val bottomPx = screenH - (screenH * 0.168f).toInt()
             WindowBounds(leftPx, topPx, rightPx.coerceAtLeast(leftPx + 400), bottomPx.coerceAtLeast(topPx + 400))
         } else {
             val leftPx = if (stripVisible) (screenW * 0.21f).toInt() else (screenW * 0.03f).toInt()
@@ -311,7 +313,10 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 as? ActivityManager.RunningTaskInfo ?: return@runCatching null
             val r = StageNativeRuntime.extractBounds(info)
             if (!r.isEmpty && r.width() > 200 && r.height() > 200) {
-                WindowBounds(r.left, r.top, r.right, r.bottom)
+                val scale = StageNativeRuntime.extractFlexibleScale(info)
+                val visW = (r.width() * scale).toInt().coerceAtLeast(240)
+                val visH = (r.height() * scale).toInt().coerceAtLeast(240)
+                WindowBounds(r.left, r.top, r.left + visW, r.top + visH)
             } else {
                 null
             }

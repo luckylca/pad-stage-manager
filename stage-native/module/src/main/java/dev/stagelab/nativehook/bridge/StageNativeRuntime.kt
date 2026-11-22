@@ -62,9 +62,14 @@ object StageNativeRuntime {
 
     val dockOverlay = StageDockOverlayController(
         onDockAppClicked = { pkg ->
-            pendingLaunches[pkg] = false to System.currentTimeMillis()
+            val existing = registry.findStageByPackage(pkg)
+            if (existing == null) {
+                pendingLaunches[pkg] = false to System.currentTimeMillis()
+            } else {
+                pendingLaunches.remove(pkg)
+            }
             val session = dockController.onDockAppClicked(pkg)
-            updateStripUi(session)
+            updateStripUiImmediate(session)
         },
         onDockAppDraggedToCenter = { pkg ->
             pendingLaunches[pkg] = true to System.currentTimeMillis()
@@ -341,6 +346,12 @@ object StageNativeRuntime {
         taskAppearedAtMs[taskInfo.taskId] = System.currentTimeMillis()
         val mergeFlag = consumePendingMergeFlag(pkg)
         val stageTask = toStageTask(taskInfo, pkg)
+
+        // Safety net: if a task parked off-screen for live preview regains focus natively,
+        // immediately restore its SurfaceControl leash to its real on-screen origin!
+        if (stageTask.isVisible && isTaskFocused(taskInfo)) {
+            bridge.restoreOffscreenLeashIfParked(taskInfo.taskId)
+        }
         val session = transitionController.onNativeTaskAppeared(stageTask, mergeIntoActive = mergeFlag)
         if (isTaskFocused(taskInfo)) {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
@@ -377,6 +388,12 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         val stageTask = toStageTask(taskInfo, pkg)
+
+        // Safety net: if a task parked off-screen for live preview regains focus natively,
+        // immediately restore its SurfaceControl leash to its real on-screen origin!
+        if (stageTask.isVisible && isTaskFocused(taskInfo)) {
+            bridge.restoreOffscreenLeashIfParked(taskInfo.taskId)
+        }
 
         // External notification fullscreen launch: park previous active Stage and promote to Stage Manager.
         // (Active Stage drag-to-fullscreen is already intercepted cleanly inside system_server via
@@ -684,8 +701,17 @@ object StageNativeRuntime {
     }
 
     fun resolvePkg(taskInfo: ActivityManager.RunningTaskInfo): String {
-        val top = taskInfo.topActivity ?: taskInfo.baseActivity
-        return top?.packageName ?: taskInfo.baseIntent.component?.packageName ?: ""
+        // Prefer baseIntent / baseActivity (the real launcher package, e.g. com.android.settings)
+        // over topActivity (which can be an internal sub-package like com.oplus.wirelesssettings),
+        // so Dock taps always match the owning Stage cleanly!
+        val raw = taskInfo.baseIntent.component?.packageName
+            ?: taskInfo.baseActivity?.packageName
+            ?: taskInfo.topActivity?.packageName
+            ?: ""
+        return when (raw) {
+            "com.oplus.wirelesssettings", "com.oplus.settings" -> "com.android.settings"
+            else -> raw
+        }
     }
 
     fun extractBounds(taskInfo: ActivityManager.RunningTaskInfo): Rect {

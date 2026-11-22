@@ -207,6 +207,17 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         }
     }
 
+    fun restoreOffscreenLeashIfParked(taskId: Int) {
+        val origin = offscreenParkedOrigins.remove(taskId) ?: return
+        val leash = StageNativeRuntime.getTaskLeash(taskId) ?: return
+        if (!leash.isValid) return
+        val scTx = SurfaceControl.Transaction()
+        scTx.setPosition(leash, origin.first, origin.second)
+        runCatching { scTx.apply() }
+        scTx.close()
+        HookGuard.info("BRIDGE.RESTORE_OFFSCREEN_LEASH task=$taskId origin=$origin")
+    }
+
     fun restoreAllOffscreenLeashes() {
         if (offscreenParkedOrigins.isEmpty()) return
         val scTx = SurfaceControl.Transaction()

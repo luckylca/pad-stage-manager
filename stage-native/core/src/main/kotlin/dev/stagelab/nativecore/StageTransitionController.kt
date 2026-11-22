@@ -117,6 +117,7 @@ class StageTransitionController(
             lastFocusedAtMs = maxOf(existing.lastFocusedAtMs, updatedTask.lastFocusedAtMs),
             isRunning = updatedTask.isRunning,
             isVisible = updatedTask.isVisible,
+            isMiniFloating = existing.isMiniFloating || updatedTask.isMiniFloating,
         )
 
         if (merged == existing) {

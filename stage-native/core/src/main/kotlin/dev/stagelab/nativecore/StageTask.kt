@@ -34,6 +34,8 @@ data class StageTask(
     val lastFocusedAtMs: Long = 0L,
     val isRunning: Boolean = true,
     val isVisible: Boolean = true,
+    /** True when opened as a Smart Sidebar / corner mini floating window belonging to this Stage. */
+    val isMiniFloating: Boolean = false,
 ) {
     companion object {
         const val WINDOWING_MODE_UNDEFINED = 0

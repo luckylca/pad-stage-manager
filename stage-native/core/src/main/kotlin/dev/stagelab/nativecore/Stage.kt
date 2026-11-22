@@ -34,6 +34,7 @@ data class Stage(
     fun findTask(taskId: Int): StageTask? = tasks.firstOrNull { it.taskId == taskId }
 
     companion object {
-        const val MAX_TASKS_PER_STAGE = 4
+        /** Effectively unlimited windows per Stage workspace (regular + mini floating windows). */
+        const val MAX_TASKS_PER_STAGE = Int.MAX_VALUE
     }
 }

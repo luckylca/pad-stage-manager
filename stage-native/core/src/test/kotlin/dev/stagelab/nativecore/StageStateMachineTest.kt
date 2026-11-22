@@ -200,7 +200,7 @@ class StageStateMachineTest {
     }
 
     @Test
-    fun s4_overflowPastFourWindowsEvictsDeterministicallyIntoNewRecentStage() {
+    fun s4_unlimitedWindowsPerStageNeverEvicts() {
         val clock = FakeClock()
         val bridge = RecordingNativeWindowBridge()
         val registry = StageRegistry(
@@ -213,23 +213,16 @@ class StageStateMachineTest {
         controller.mergeTaskIntoActiveStage(StageTask(2, "pkg.b"))
         controller.mergeTaskIntoActiveStage(StageTask(3, "pkg.c"))
         controller.mergeTaskIntoActiveStage(StageTask(4, "pkg.d"))
-        // Focus task 1 so task 2 becomes the lowest Z-order candidate
-        controller.onNativeTaskFocused(1)
+        controller.mergeTaskIntoActiveStage(StageTask(5, "pkg.e"))
+        val afterSix = controller.mergeTaskIntoActiveStage(StageTask(6, "pkg.mini", isMiniFloating = true))
+        assertInvariants(afterSix)
 
-        // Add 5th window E(5)
-        val afterOverflow = controller.mergeTaskIntoActiveStage(StageTask(5, "pkg.e"))
-        assertInvariants(afterOverflow)
-
-        val active = afterOverflow.activeStage!!
-        assertEquals(4, active.tasks.size)
-        assertEquals(setOf(1, 3, 4, 5), active.taskIds.toSet())
-
-        // Task 2 was evicted into a new single-window Stage at top of Recent Strip, NOT closed
+        val active = afterSix.activeStage!!
+        assertEquals(6, active.tasks.size)
+        assertEquals(setOf(1, 2, 3, 4, 5, 6), active.taskIds.toSet())
+        assertTrue(active.findTask(6)!!.isMiniFloating)
         assertTrue(bridge.closedTaskIds.isEmpty())
-        val recentTop = afterOverflow.visibleRecentStages.first()
-        assertEquals(listOf(2), recentTop.taskIds)
-        assertFalse(recentTop.isActive)
-        assertTrue(recentTop.tasks.single().isRunning)
+        assertTrue(afterSix.visibleRecentStages.isEmpty())
     }
 
     @Test
@@ -333,7 +326,7 @@ class StageStateMachineTest {
         )
         val restored = controller.restoreFromSystemTasks(live)
         assertInvariants(restored)
-        assertEquals(setOf(102, 103, 104, 105), restored.activeStage!!.taskIds.toSet())
-        assertEquals(3, restored.allRecentStages.size) // 101 overflow + 106 + 107
+        assertEquals(setOf(101, 102, 103, 104, 105), restored.activeStage!!.taskIds.toSet())
+        assertEquals(2, restored.allRecentStages.size) // 106 + 107 (no 4-window overflow eviction)
     }
 }

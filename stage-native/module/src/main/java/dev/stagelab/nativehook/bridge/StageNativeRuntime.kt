@@ -176,6 +176,7 @@ object StageNativeRuntime {
      * Expires after 8 seconds so unrelated manual launches are never misclassified.
      */
     private val pendingLaunches = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private val pendingMiniLaunches = ConcurrentHashMap<String, Long>()
 
     fun getMemorizedGeometry(taskId: Int, packageName: String): SavedGeometry? =
         taskGeometryMemory[taskId] ?: pkgGeometryMemory[packageName]
@@ -193,7 +194,10 @@ object StageNativeRuntime {
             return
         }
         try {
-            val filter = IntentFilter(ACTION_STAGE_CMD)
+            val filter = IntentFilter().apply {
+                addAction(ACTION_STAGE_CMD)
+                addAction(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_SIDEBAR_MINI_HINT)
+            }
             ctx.registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
 
             // N7 System lifecycle awareness: hide strip on lockscreen, restore on unlock, adapt on rotation.
@@ -241,7 +245,16 @@ object StageNativeRuntime {
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != ACTION_STAGE_CMD) return
+            val action = intent?.action ?: return
+            if (action == dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_SIDEBAR_MINI_HINT) {
+                val miniPkg = intent.getStringExtra("pkg").orEmpty()
+                if (miniPkg.isNotBlank()) {
+                    pendingMiniLaunches[miniPkg] = System.currentTimeMillis()
+                    HookGuard.info("SIDEBAR_MINI_HINT received pkg=$miniPkg")
+                }
+                return
+            }
+            if (action != ACTION_STAGE_CMD) return
             HookGuard.safeRun("CommandReceiver.onReceive") {
                 handleCommand(intent)
             }
@@ -360,22 +373,26 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         taskAppearedAtMs[taskInfo.taskId] = System.currentTimeMillis()
+        val hasExplicitPending = pendingLaunches.containsKey(pkg)
         val mergeFlag = consumePendingMergeFlag(pkg)
-        val stageTask = toStageTask(taskInfo, pkg)
+        val isMiniLaunch = consumePendingMiniFlag(pkg) ||
+            (!hasExplicitPending && registry.getActiveStage() != null && isMiniTaskInfo(taskInfo))
+        val stageTask = toStageTask(taskInfo, pkg).copy(isMiniFloating = isMiniLaunch)
+        val effectiveMerge = mergeFlag || (isMiniLaunch && registry.getActiveStage() != null)
 
         // Safety net: if a task parked off-screen for live preview regains focus natively,
         // immediately restore its SurfaceControl leash to its real on-screen origin!
         if (stageTask.isVisible && isTaskFocused(taskInfo)) {
             bridge.restoreOffscreenLeashIfParked(taskInfo.taskId)
         }
-        val session = transitionController.onNativeTaskAppeared(stageTask, mergeIntoActive = mergeFlag)
+        val session = transitionController.onNativeTaskAppeared(stageTask, mergeIntoActive = effectiveMerge)
         if (isTaskFocused(taskInfo)) {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
 
-        // If a 2nd window was merged into the Active Stage, arrange both windows side-by-side
-        // at equal height so they never overlap by default (user can freely resize afterward).
-        if (mergeFlag) {
+        // Only auto-tile regular merged windows; Smart Sidebar / mini floating windows keep their
+        // own floating position & scale on top of the workspace without disturbing tiled windows.
+        if (mergeFlag && !isMiniLaunch) {
             maybeScheduleTwoWindowSideBySide(session)
         }
 
@@ -385,7 +402,7 @@ object StageNativeRuntime {
             promoteIfNotDebounced(taskInfo.taskId, pkg)
         }
 
-        logSession("ON_APPEARED(t=${taskInfo.taskId},merge=$mergeFlag)", session)
+        logSession("ON_APPEARED(t=${taskInfo.taskId},merge=$effectiveMerge,mini=$isMiniLaunch)", session)
         updateStripUi(session)
     }
 
@@ -589,21 +606,44 @@ object StageNativeRuntime {
 
     private fun maybeScheduleTwoWindowSideBySide(session: StageSession) {
         val active = session.activeStage ?: return
-        val count = active.tasks.size
-        if (count !in 2..3) return
-        val taskIds = active.tasks.map { it.taskId }
-        val columns = bridge.computeMultiColumnBounds(
-            count = count,
-            stripVisible = !recentController.isHiddenByUserSetting,
-        )
-        mainHandler.postDelayed({
-            taskIds.forEachIndexed { idx, tid ->
-                columns.getOrNull(idx)?.let { bounds ->
-                    bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)
+        val regularTasks = active.tasks.filterNot { it.isMiniFloating }
+        val count = regularTasks.size
+        if (count < 2) return
+        if (count in 2..3) {
+            val taskIds = regularTasks.map { it.taskId }
+            val columns = bridge.computeMultiColumnBounds(
+                count = count,
+                stripVisible = !recentController.isHiddenByUserSetting,
+            )
+            mainHandler.postDelayed({
+                taskIds.forEachIndexed { idx, tid ->
+                    columns.getOrNull(idx)?.let { bounds ->
+                        bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)
+                    }
                 }
-            }
-            HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$taskIds bounds=$columns")
-        }, 220L)
+                HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$taskIds bounds=$columns")
+            }, 220L)
+        } else {
+            // 4+ unlimited windows: keep existing windows intact and place the newly merged window
+            // neatly cascaded inside Main Stage so users can arrange unlimited windows freely.
+            val newest = regularTasks.lastOrNull() ?: return
+            val cols = bridge.computeMultiColumnBounds(
+                count = 2,
+                stripVisible = !recentController.isHiddenByUserSetting,
+            )
+            val base = cols.getOrNull((count - 1) % cols.size) ?: return
+            val cascadeStep = ((count - 3) % 5) * 44
+            val cascaded = WindowBounds(
+                left = (base.left + cascadeStep).coerceAtMost(base.right - 420),
+                top = (base.top + cascadeStep).coerceAtMost(base.bottom - 420),
+                right = base.right,
+                bottom = base.bottom,
+            )
+            mainHandler.postDelayed({
+                bridge.adjustFlexibleTaskFrame(newest.taskId, cascaded, 1.0f)
+                HookGuard.info("STAGE.CASCADE_LAYOUT count=$count newest=${newest.taskId} bounds=$cascaded")
+            }, 220L)
+        }
     }
 
     private fun isFullScreenBounds(b: WindowBounds): Boolean {
@@ -617,13 +657,28 @@ object StageNativeRuntime {
         return runCatching {
             val extra = extractOplusExtraBundle(taskInfo)
             val bundleScale = extra?.getFloat("androidx.activity.LaunchScale", -1f) ?: -1f
-            if (bundleScale in 0.35f..1.05f) return bundleScale
+            if (bundleScale in 0.20f..1.05f) return bundleScale
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val config = XposedHelpers.getObjectField(taskInfo, "configuration") as? Configuration ?: return 1.0f
             val cfgExtra = XposedHelpers.callStaticMethod(fwmCls, "getExtraConfiguration", config) ?: return 1.0f
             runCatching { XposedHelpers.getFloatField(cfgExtra, "mScale") }.getOrNull()
-                ?.takeIf { it in 0.35f..1.05f } ?: 1.0f
+                ?.takeIf { it in 0.20f..1.05f } ?: 1.0f
         }.getOrDefault(1.0f)
+    }
+
+    private fun isMiniTaskInfo(taskInfo: ActivityManager.RunningTaskInfo): Boolean {
+        val extra = extractOplusExtraBundle(taskInfo)
+        if (extra != null) {
+            if (extra.getBoolean("is_mini_state", false)) return true
+            if (extra.getInt("flexible_state", 1) == 2) return true
+        }
+        val scale = extractFlexibleScale(taskInfo)
+        return scale in 0.20f..0.72f
+    }
+
+    private fun consumePendingMiniFlag(pkg: String): Boolean {
+        val ts = pendingMiniLaunches.remove(pkg) ?: return false
+        return System.currentTimeMillis() - ts <= 8_000L
     }
 
     /**
@@ -703,6 +758,7 @@ object StageNativeRuntime {
             windowingMode = extractWindowingMode(taskInfo),
             isRunning = isTaskRunning(taskInfo),
             isVisible = isTaskVisible(taskInfo),
+            isMiniFloating = isMiniTaskInfo(taskInfo),
         )
     }
 

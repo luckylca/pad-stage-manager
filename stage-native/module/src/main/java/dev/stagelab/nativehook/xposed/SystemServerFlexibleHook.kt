@@ -31,10 +31,16 @@ import java.util.concurrent.ConcurrentHashMap
 object SystemServerFlexibleHook {
 
     const val KEY_FORCE_ADJUST = "stagelab.force_adjust"
+    const val ACTION_SIDEBAR_MINI_HINT = "dev.stagelab.nativehook.ACTION_SIDEBAR_MINI_HINT"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
+    private const val MINI_MEMORY_PREFIX = "mini:"
 
     private const val PANORAMA_CONTROLLER = "com.android.server.wm.OplusPanoramaWorkBranchController"
     private const val FLEXIBLE_TASK_CONTROLLER = "com.android.server.wm.FlexibleTaskController"
+    private const val FLEXIBLE_WINDOW_UTILS = "com.android.server.wm.FlexibleWindowUtils"
+    private const val FLOAT_HANDLE_CONTROLLER = "com.android.server.wm.FloatHandleController"
+    private const val CONNECTED_DISPLAY_MANAGER = "com.android.server.wm.OplusConnectedDisplayManager"
+    private const val UNLIMITED_WINDOW_CAP = 99
 
     private val allowWideStageRect = ThreadLocal<Boolean>()
     private val memoryMap = ConcurrentHashMap<String, MemorizedFrame>()
@@ -61,7 +67,7 @@ object SystemServerFlexibleHook {
                 val b = parts[3].toIntOrNull() ?: return null
                 val s = parts[4].toFloatOrNull() ?: 1.0f
                 if (r <= l || b <= t) return null
-                return MemorizedFrame(l, t, r, b, s.coerceIn(0.40f, 1.0f))
+                return MemorizedFrame(l, t, r, b, s.coerceIn(0.25f, 1.0f))
             }
         }
     }
@@ -69,7 +75,59 @@ object SystemServerFlexibleHook {
     fun install(classLoader: ClassLoader) {
         loadMemoryFromDisk()
         hookPanoramaBypass(classLoader)
+        hookUnlimitedWindowLimits(classLoader)
         hookFlexibleTaskController(classLoader)
+    }
+
+    /**
+     * Lifts ColorOS 17's hardcoded caps on both Flexible Stage windows and Mini / Float-Handle
+     * windows so every workspace can host unlimited regular windows AND unlimited mini windows.
+     */
+    private fun hookUnlimitedWindowLimits(classLoader: ClassLoader) {
+        // 1. FlexibleWindowUtils#getMaxFlexibleTaskNum -> 99
+        runCatching {
+            val utilsCls = XposedHelpers.findClass(FLEXIBLE_WINDOW_UTILS, classLoader)
+            XposedBridge.hookAllMethods(utilsCls, "getMaxFlexibleTaskNum", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        param.result = UNLIMITED_WINDOW_CAP
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_WINDOW_UTILS#getMaxFlexibleTaskNum -> $UNLIMITED_WINDOW_CAP")
+        }.onFailure {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook getMaxFlexibleTaskNum", it)
+        }
+
+        // 2. FloatHandleController#getLimitMaxFloatNum -> 99 (unlimited mini/float handles)
+        runCatching {
+            val floatCls = XposedHelpers.findClass(FLOAT_HANDLE_CONTROLLER, classLoader)
+            XposedBridge.hookAllMethods(floatCls, "getLimitMaxFloatNum", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        param.result = UNLIMITED_WINDOW_CAP
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked $FLOAT_HANDLE_CONTROLLER#getLimitMaxFloatNum -> $UNLIMITED_WINDOW_CAP")
+        }.onFailure {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook getLimitMaxFloatNum", it)
+        }
+
+        // 3. OplusConnectedDisplayManager#pickFlexibleTaskToRemoveWhenExceedLimit -> null
+        runCatching {
+            val cdmCls = XposedHelpers.findClass(CONNECTED_DISPLAY_MANAGER, classLoader)
+            XposedBridge.hookAllMethods(cdmCls, "pickFlexibleTaskToRemoveWhenExceedLimit", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        param.result = null
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked $CONNECTED_DISPLAY_MANAGER#pickFlexibleTaskToRemoveWhenExceedLimit -> null")
+        }.onFailure {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook pickFlexibleTaskToRemoveWhenExceedLimit", it)
+        }
     }
 
     private fun hookPanoramaBypass(classLoader: ClassLoader) {
@@ -115,7 +173,21 @@ object SystemServerFlexibleHook {
             return
         }
 
-        // 1. Wide Primary-Stage Default + Memorized Launch Bounds in collectFlexibleTaskInfo
+        // 0. Never auto-evict or force-minimize existing Flexible/Mini tasks when opening more windows
+        try {
+            XposedBridge.hookAllMethods(cls, "handleExceedLimitFlexibleTask", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        param.result = false
+                    }
+                }
+            })
+            HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_TASK_CONTROLLER#handleExceedLimitFlexibleTask -> false")
+        } catch (t: Throwable) {
+            HookGuard.warn("SystemServerFlexibleHook: failed to hook handleExceedLimitFlexibleTask", t)
+        }
+
+        // 1. Wide Primary-Stage Default + Memorized Launch Bounds + Smart Sidebar Mini Detection in collectFlexibleTaskInfo
         try {
             XposedBridge.hookAllMethods(cls, "collectFlexibleTaskInfo", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -125,6 +197,26 @@ object SystemServerFlexibleHook {
                         if (isIgnoredSystemPkg(pkg)) return@safeRun
 
                         val (screenW, screenH) = extractDisplaySizeFromArgs(param.args)
+                        val isMiniOrSidebar = isSidebarOrMiniLaunch(param.args, info)
+
+                        if (isMiniOrSidebar) {
+                            notifySystemUiSidebarMiniHint(param.thisObject, pkg)
+                            val miniKey = MINI_MEMORY_PREFIX + pkg
+                            val miniMemorized = memoryMap[miniKey]?.takeIf { frame ->
+                                isValidMiniGeometry(frame.toRect(), frame.scale, screenW, screenH)
+                            }
+                            if (miniMemorized != null) {
+                                runCatching { XposedHelpers.setObjectField(info, "mLaunchBounds", Rect(miniMemorized.toRect())) }
+                                runCatching { XposedHelpers.setFloatField(info, "mScale", miniMemorized.scale) }
+                                runCatching { XposedHelpers.setBooleanField(info, "mSkipPosInMemoryAdjust", true) }
+                                runCatching { XposedHelpers.setBooleanField(info, "mSkipMemoryRectToDefault", true) }
+                                HookGuard.info("SYS.LAUNCH_MINI_MEMORY pkg=$pkg rect=${miniMemorized.toRect()} scale=${miniMemorized.scale}")
+                            } else {
+                                HookGuard.info("SYS.LAUNCH_MINI_DEFAULT pkg=$pkg (preserving compact floating bounds)")
+                            }
+                            return@safeRun
+                        }
+
                         val memorized = memoryMap[pkg]?.takeIf { frame ->
                             if (isValidVisualGeometry(frame.toRect(), frame.scale, screenW, screenH)) {
                                 true
@@ -320,7 +412,12 @@ object SystemServerFlexibleHook {
                 }
             }
         }
-        for (methodName in listOf("finishMovingFlexibleTask", "updateResizedTaskParams", "resizeTaskByVisibleBounds")) {
+        for (methodName in listOf(
+            "finishMovingFlexibleTask",
+            "updateResizedTaskParams",
+            "resizeTaskByVisibleBounds",
+            "adjustMiniFinishRectIfOffScreen",
+        )) {
             try {
                 XposedBridge.hookAllMethods(cls, methodName, persistHook)
                 HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_TASK_CONTROLLER#$methodName")
@@ -444,11 +541,25 @@ object SystemServerFlexibleHook {
             s to st
         }.getOrDefault(1.0f to 1)
 
-        // Never memorize ColorOS auto-minimized corner mini-windows (state=2 or scale < 0.45)
-        if (zoomState == 2 || scale < 0.45f) return
+        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+
+        // Persist mini/sidebar floating windows under a dedicated "mini:<pkg>" key so mini-window
+        // positions & scales are remembered independently from full Stage window sizes!
+        if (zoomState == 2 || scale < 0.72f) {
+            val clampedMiniScale = scale.coerceIn(0.25f, 1.0f)
+            if (!isValidMiniGeometry(bounds, clampedMiniScale, screenW, screenH)) return
+            val miniFrame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedMiniScale)
+            val miniKey = MINI_MEMORY_PREFIX + pkg
+            val prevMini = memoryMap[miniKey]
+            if (prevMini != miniFrame) {
+                memoryMap[miniKey] = miniFrame
+                saveMemoryToDisk()
+                HookGuard.info("SYS.MINI_MEMORY_SAVED pkg=$pkg rect=${miniFrame.toRect()} scale=$clampedMiniScale state=$zoomState")
+            }
+            return
+        }
 
         val clampedScale = scale.coerceIn(0.45f, 1.0f)
-        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
         if (!isValidVisualGeometry(bounds, clampedScale, screenW, screenH)) return
 
         val frame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedScale)
@@ -457,6 +568,68 @@ object SystemServerFlexibleHook {
             memoryMap[pkg] = frame
             saveMemoryToDisk()
             HookGuard.info("SYS.MEMORY_SAVED pkg=$pkg rect=${frame.toRect()} scale=$clampedScale")
+        }
+    }
+
+    private fun isValidMiniGeometry(rect: Rect, scale: Float, screenW: Int, screenH: Int): Boolean {
+        if (rect.isEmpty || scale < 0.25f || scale > 1.05f) return false
+        val visW = (rect.width() * scale).toInt()
+        val visH = (rect.height() * scale).toInt()
+        if (visW < 180 || visH < 180) return false
+        val visRight = rect.left + visW
+        val visBottom = rect.top + visH
+        return rect.left >= -120 && rect.top >= 0 && visRight <= screenW + 120 && visBottom <= screenH + 120
+    }
+
+    private fun isSidebarOrMiniLaunch(args: Array<Any?>?, info: Any): Boolean {
+        val isMiniFlag = runCatching { XposedHelpers.getBooleanField(info, "mIsMiniState") }.getOrDefault(false)
+        if (isMiniFlag) return true
+        val state = runCatching { XposedHelpers.getIntField(info, "mFlexibleState") }.getOrDefault(1)
+        if (state == 2) return true
+        if (args != null) {
+            for (arg in args) {
+                if (arg == null) continue
+                if (arg is String && arg.contains("smartsidebar", ignoreCase = true)) return true
+                if (arg is Bundle) {
+                    if (arg.getBoolean("is_mini_state", false)) return true
+                    val str = runCatching { arg.toString() }.getOrDefault("")
+                    if (str.contains("smartsidebar", ignoreCase = true) || str.contains("sidebar", ignoreCase = true)) {
+                        return true
+                    }
+                }
+                if (arg.javaClass.name.endsWith("ActivityOptions")) {
+                    val str = runCatching { arg.toString() }.getOrDefault("")
+                    if (str.contains("smartsidebar", ignoreCase = true) || str.contains("mini", ignoreCase = true)) {
+                        return true
+                    }
+                }
+                if (arg.javaClass.name.endsWith("ActivityRecord")) {
+                    val launchedFrom = runCatching {
+                        XposedHelpers.getObjectField(arg, "launchedFromPackage") as? String
+                    }.getOrNull().orEmpty()
+                    if (launchedFrom.contains("smartsidebar", ignoreCase = true)) return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun notifySystemUiSidebarMiniHint(controllerObj: Any?, pkg: String) {
+        mainHandler.post {
+            runCatching {
+                val ctx = runCatching {
+                    XposedHelpers.getObjectField(controllerObj, "mContext") as? android.content.Context
+                }.getOrNull() ?: runCatching {
+                    val atCls = Class.forName("android.app.ActivityThread")
+                    val at = XposedHelpers.callStaticMethod(atCls, "currentActivityThread")
+                    XposedHelpers.callMethod(at, "getSystemContext") as? android.content.Context
+                }.getOrNull() ?: return@runCatching
+                val intent = Intent(ACTION_SIDEBAR_MINI_HINT).apply {
+                    setPackage("com.android.systemui")
+                    putExtra("pkg", pkg)
+                }
+                ctx.sendBroadcast(intent)
+            }
         }
     }
 

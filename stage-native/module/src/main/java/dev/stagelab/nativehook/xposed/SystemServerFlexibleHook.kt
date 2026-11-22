@@ -237,29 +237,53 @@ object SystemServerFlexibleHook {
             HookGuard.warn("SystemServerFlexibleHook: failed to hook fullscreen guards", t)
         }
 
-        // 3b. Block FlexibleTaskScaleManager#fullScreenByScaleRatios (corner-drag maximize to fullscreen)
+        // 3b. Prevent FlexibleTaskScaleManager from EVER entering fullscreen-maximize preview/animation
+        //     when dragging a window corner bigger — keeps resizing smooth & never leaves scale state stuck!
         try {
             val scaleMgrCls = XposedHelpers.findClass("com.android.server.wm.FlexibleTaskScaleManager", classLoader)
-            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScaleRatios", object : XC_MethodHook() {
+            val returnFalseHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
-                    HookGuard.safeRun("FlexibleTaskScaleManager.fullScreenByScaleRatios") {
+                    if (HookGuard.isActive()) {
+                        param.result = false
+                    }
+                }
+            }
+            XposedBridge.hookAllMethods(scaleMgrCls, "isInMaxingRegion", returnFalseHook)
+            XposedBridge.hookAllMethods(scaleMgrCls, "isInWaitMaxingState", returnFalseHook)
+            XposedBridge.hookAllMethods(scaleMgrCls, "startFlexibleTaskMaximizedAnimation", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
                         param.result = null
-                        val taskId = (param.args.getOrNull(2) as? Int) ?: -1
-                        val taskObj = runCatching {
-                            XposedHelpers.getObjectField(param.thisObject, "mScaleTask")
-                        }.getOrNull() ?: runCatching {
-                            XposedHelpers.getObjectField(param.thisObject, "mTask")
-                        }.getOrNull()
-                        if (taskObj != null) {
-                            snapTaskObjToMainStage(taskObj, "fullScreenByScaleRatios")
-                        } else if (taskId > 0) {
-                            snapTaskIdToMainStage(taskId, 2520, 1680, "fullScreenByScaleRatios")
-                        }
                     }
                 }
             })
-            HookGuard.info("SystemServerFlexibleHook: hooked FlexibleTaskScaleManager#fullScreenByScaleRatios")
+            val blockFullScreenScaleHook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    HookGuard.safeRun("FlexibleTaskScaleManager.blockFullScreenScale") {
+                        param.result = null
+                        val mgr = param.thisObject
+                        val taskId = (param.args.getOrNull(2) as? Int) ?: -1
+                        val taskObj = runCatching {
+                            XposedHelpers.getObjectField(mgr, "mScaleTask")
+                        }.getOrNull() ?: runCatching {
+                            XposedHelpers.getObjectField(mgr, "mTask")
+                        }.getOrNull()
+                        // Cleanly reset scale leash & state so the window remains 100% resizable afterward!
+                        runCatching { XposedHelpers.callMethod(mgr, "removeFlexibleMaximizedOverlay") }
+                        runCatching { XposedHelpers.callMethod(mgr, "destroyFlexibleScaleLeash") }
+                        runCatching { XposedHelpers.callMethod(mgr, "resetFlexibleTaskScaleState") }
+                        if (taskObj != null) {
+                            snapTaskObjToMainStage(taskObj, "fullScreenByScale")
+                        } else if (taskId > 0) {
+                            snapTaskIdToMainStage(taskId, 2520, 1680, "fullScreenByScale")
+                        }
+                    }
+                }
+            }
+            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScaleRatios", blockFullScreenScaleHook)
+            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScale", blockFullScreenScaleHook)
+            HookGuard.info("SystemServerFlexibleHook: hooked FlexibleTaskScaleManager maxing-region & fullscreen guards")
         } catch (t: Throwable) {
             HookGuard.warn("SystemServerFlexibleHook: failed to hook FlexibleTaskScaleManager", t)
         }

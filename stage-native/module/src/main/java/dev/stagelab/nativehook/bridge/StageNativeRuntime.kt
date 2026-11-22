@@ -12,6 +12,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.SurfaceControl
 import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.DockIntegrationController
 import dev.stagelab.nativecore.RecentStageController
@@ -83,6 +84,21 @@ object StageNativeRuntime {
 
     @Volatile
     private var stageManagerEnabled = true
+
+    /** Experimental real-time live SurfaceControl mirroring in the left Recent Strip (default ON). */
+    @Volatile
+    var livePreviewEnabled = true
+
+    private val taskLeashes = ConcurrentHashMap<Int, SurfaceControl>()
+
+    fun registerTaskLeash(taskId: Int, leash: SurfaceControl) {
+        if (taskId > 0 && leash.isValid) {
+            taskLeashes[taskId] = leash
+        }
+    }
+
+    fun getTaskLeash(taskId: Int): SurfaceControl? =
+        taskLeashes[taskId]?.takeIf { it.isValid }
 
     data class SavedGeometry(
         val bounds: WindowBounds,
@@ -269,8 +285,18 @@ object StageNativeRuntime {
                 dockController.setDockHiddenBySetting(hidden)
                 registry.snapshot()
             }
+            "live_preview" -> {
+                val enabled = intent.getBooleanExtra("enabled", true)
+                livePreviewEnabled = enabled
+                if (!enabled) {
+                    bridge.flushOffscreenParkedTasksToHidden(registry.snapshot().allRecentStages.flatMap { it.tasks })
+                }
+                HookGuard.info("LIVE_PREVIEW toggled enabled=$enabled")
+                registry.snapshot()
+            }
             "disable_module" -> {
                 stageManagerEnabled = false
+                bridge.restoreAllOffscreenLeashes()
                 registry.clear()
                 pendingLaunches.clear()
                 stripOverlay.detach()
@@ -399,6 +425,7 @@ object StageNativeRuntime {
 
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
+        taskLeashes.remove(taskInfo.taskId)
         if (!isManagedUserApp(pkg)) return
         taskGeometryMemory.remove(taskInfo.taskId)
         taskAppearedAtMs.remove(taskInfo.taskId)

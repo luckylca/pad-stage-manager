@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
                 var safeMode by remember { mutableStateOf(prefs.getBoolean("safe_mode", false)) }
                 var hideRecentStrip by remember { mutableStateOf(prefs.getBoolean("hide_strip", false)) }
                 var hideDock by remember { mutableStateOf(prefs.getBoolean("hide_dock", false)) }
+                var livePreview by remember { mutableStateOf(prefs.getBoolean("live_preview", true)) }
                 val active = remember { ModuleStatus.isXposedModuleActive() }
 
                 SettingsScreen(
@@ -122,6 +123,18 @@ class MainActivity : ComponentActivity() {
                     safeMode = safeMode,
                     hideRecentStrip = hideRecentStrip,
                     hideDock = hideDock,
+                    livePreview = livePreview,
+                    onToggleLivePreview = { next ->
+                        livePreview = next
+                        prefs.edit().putBoolean("live_preview", next).apply()
+                        sendBroadcast(
+                            Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {
+                                setPackage("com.android.systemui")
+                                putExtra("cmd", "live_preview")
+                                putExtra("enabled", next)
+                            },
+                        )
+                    },
                     onToggleEnabled = { next ->
                         moduleEnabledState.value = next
                         prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, next).apply()
@@ -209,6 +222,8 @@ private fun SettingsScreen(
     safeMode: Boolean,
     hideRecentStrip: Boolean,
     hideDock: Boolean,
+    livePreview: Boolean,
+    onToggleLivePreview: (Boolean) -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
     onToggleSafeMode: (Boolean) -> Unit,
     onToggleHideStrip: (Boolean) -> Unit,
@@ -311,6 +326,12 @@ private fun SettingsScreen(
                         subtitle = "隐藏后从屏幕底部向上轻扫可临时呼出，向上拖动图标可合并进当前 Stage",
                         checked = hideDock,
                         onCheckedChange = onToggleHideDock,
+                    )
+                    SettingSwitchRow(
+                        title = "侧边栏实时动态内容预览（实验性）",
+                        subtitle = "保持后台工作区画面实时镜像到左侧 3D 侧边栏（默认开启，关闭后切回省电高清快照）",
+                        checked = livePreview,
+                        onCheckedChange = onToggleLivePreview,
                     )
                     SettingSwitchRow(
                         title = "安全模式（Safe Mode）",

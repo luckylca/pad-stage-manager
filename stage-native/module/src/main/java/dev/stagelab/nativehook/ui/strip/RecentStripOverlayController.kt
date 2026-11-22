@@ -11,15 +11,20 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.SurfaceControl
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.Stage
 import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
+import dev.stagelab.nativehook.bridge.StageNativeRuntime
 import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
 import kotlin.math.abs
@@ -332,6 +337,17 @@ class RecentStripOverlayController(
             frame.addView(img, FrameLayout.LayoutParams(widthPx, heightPx))
         }
 
+        // Experimental Real-Time Live Content Preview via SurfaceControl.mirrorSurface (default ON)
+        if (StageNativeRuntime.livePreviewEnabled) {
+            val leash = StageNativeRuntime.getTaskLeash(task.taskId)
+            if (leash != null && leash.isValid) {
+                val mirrorSurfaceView = createLiveMirrorSurfaceView(context, task, leash, widthPx, heightPx, radiusPx)
+                if (mirrorSurfaceView != null) {
+                    frame.addView(mirrorSurfaceView, FrameLayout.LayoutParams(widthPx, heightPx))
+                }
+            }
+        }
+
         // Subtle app icon badge in bottom-right corner (or centered when snapshot is unavailable/FLAG_SECURE)
         preview.appIcon?.let { iconDrawable ->
             val iconSize = if (preview.bitmap != null) dp(context, 22) else dp(context, 34)
@@ -351,6 +367,68 @@ class RecentStripOverlayController(
         }
 
         return frame
+    }
+
+    private fun createLiveMirrorSurfaceView(
+        context: Context,
+        task: StageTask,
+        leash: SurfaceControl,
+        widthPx: Int,
+        heightPx: Int,
+        radiusPx: Float,
+    ): SurfaceView? {
+        return runCatching {
+            SurfaceView(context).apply {
+                setZOrderMediaOverlay(true)
+                holder.setFormat(PixelFormat.TRANSLUCENT)
+                holder.addCallback(object : SurfaceHolder.Callback {
+                    private var mirrorSc: SurfaceControl? = null
+
+                    override fun surfaceCreated(holder: SurfaceHolder) {
+                        runCatching {
+                            if (!leash.isValid) return
+                            val mirror = XposedHelpers.callStaticMethod(
+                                SurfaceControl::class.java,
+                                "mirrorSurface",
+                                leash,
+                            ) as? SurfaceControl ?: return
+                            mirrorSc = mirror
+                            val hostSc = surfaceControl ?: return
+                            val srcW = task.bounds.width.takeIf { it > 200 } ?: 1920
+                            val srcH = task.bounds.height.takeIf { it > 200 } ?: 1280
+                            val sx = widthPx.toFloat() / srcW.toFloat()
+                            val sy = heightPx.toFloat() / srcH.toFloat()
+                            val scale = maxOf(sx, sy).coerceIn(0.05f, 1.0f)
+
+                            val tx = SurfaceControl.Transaction()
+                            tx.reparent(mirror, hostSc)
+                            tx.setScale(mirror, scale, scale)
+                            tx.setPosition(mirror, 0f, 0f)
+                            runCatching { XposedHelpers.callMethod(tx, "setCornerRadius", mirror, radiusPx / scale) }
+                            tx.setVisibility(mirror, true)
+                            tx.apply()
+                            tx.close()
+                        }
+                    }
+
+                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        mirrorSc?.let { sc ->
+                            runCatching {
+                                val tx = SurfaceControl.Transaction()
+                                runCatching { XposedHelpers.callMethod(tx, "remove", sc) }
+                                    .onFailure { tx.reparent(sc, null) }
+                                tx.apply()
+                                tx.close()
+                                sc.release()
+                            }
+                        }
+                        mirrorSc = null
+                    }
+                })
+            }
+        }.getOrNull()
     }
 
     @SuppressLint("ClickableViewAccessibility")

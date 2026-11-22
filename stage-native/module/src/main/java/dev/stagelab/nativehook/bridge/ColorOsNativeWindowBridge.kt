@@ -10,6 +10,7 @@ import android.os.Binder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.SurfaceControl
 import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.NativeWindowBridge
 import dev.stagelab.nativecore.StageTask
@@ -19,6 +20,7 @@ import dev.stagelab.nativehook.ui.strip.StageMagicTransitionOverlay
 import dev.stagelab.nativehook.xposed.HookGuard
 import dev.stagelab.nativehook.xposed.LauncherBackdropHook
 import dev.stagelab.nativehook.xposed.SystemServerFlexibleHook
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * N4 NativeWindowBridge backed by ColorOS 17's real `ShellTaskOrganizer`,
@@ -34,6 +36,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val navLockToken = Binder()
+    private val offscreenParkedOrigins = ConcurrentHashMap<Int, Pair<Float, Float>>()
     @Volatile
     private var lastNavLocked: Boolean? = null
 
@@ -110,69 +113,128 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         StageNativeRuntime.markProgrammaticTransition(1_200L)
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
-            val wct = newWindowContainerTransaction()
-            var atomicOps = 0
-            val fallbackPark = mutableListOf<StageTask>()
-            val fallbackShow = mutableListOf<StageTask>()
+            val liveMode = StageNativeRuntime.livePreviewEnabled
 
-            if (wct != null) {
-                // 1. Atomically hide + reorder ALL outgoing tasks in ONE single WCT (zero transition queueing!)
+            val executeParkOutgoing = {
+                val wctPark = newWindowContainerTransaction()
+                val scTx = SurfaceControl.Transaction()
+                var scOps = 0
+                var wctOps = 0
+                val fallbackPark = mutableListOf<StageTask>()
+
                 for (task in tasksToPark) {
                     val token = resolveTaskToken(organizer, task.taskId)
-                    if (token != null) {
-                        runCatching { XposedHelpers.callMethod(wct, "setHidden", token, true) }
-                        XposedHelpers.callMethod(wct, "reorder", token, false)
-                        atomicOps++
+                    val leash = StageNativeRuntime.getTaskLeash(task.taskId)
+                    if (liveMode && token != null && leash != null && leash.isValid && wctPark != null) {
+                        val b = resolveLiveOrFallbackBounds(organizer, task)
+                        offscreenParkedOrigins[task.taskId] = b.left.toFloat() to b.top.toFloat()
+                        scTx.setPosition(leash, -6000f, 0f)
+                        scOps++
+                        XposedHelpers.callMethod(wctPark, "reorder", token, false)
+                        wctOps++
+                    } else if (token != null && wctPark != null) {
+                        runCatching { XposedHelpers.callMethod(wctPark, "setHidden", token, true) }
+                        XposedHelpers.callMethod(wctPark, "reorder", token, false)
+                        wctOps++
                     } else {
                         fallbackPark.add(task)
                     }
                 }
-                // 2. Atomically unhide + raise ALL incoming Stage tasks in the EXACT SAME WCT!
+                if (scOps > 0) runCatching { scTx.apply() }
+                scTx.close()
+                if (wctPark != null && wctOps > 0) {
+                    runCatching { applyTransaction(organizer, wctPark) }
+                }
+                for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
+                HookGuard.info("BRIDGE.SWITCH_PARK live=$liveMode park=${tasksToPark.map { it.taskId }}")
+            }
+
+            val executeShowIncoming = {
+                val wctShow = newWindowContainerTransaction()
+                val scTx = SurfaceControl.Transaction()
+                var scOps = 0
+                var wctOps = 0
+                val fallbackShow = mutableListOf<StageTask>()
+
                 for (task in orderedShow) {
                     val token = resolveTaskToken(organizer, task.taskId)
-                    if (token != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
-                        runCatching { XposedHelpers.callMethod(wct, "setHidden", token, false) }
-                        XposedHelpers.callMethod(wct, "reorder", token, true)
-                        atomicOps++
+                    val leash = StageNativeRuntime.getTaskLeash(task.taskId)
+                    if (token != null && wctShow != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
+                        runCatching { XposedHelpers.callMethod(wctShow, "setHidden", token, false) }
+                        XposedHelpers.callMethod(wctShow, "reorder", token, true)
+                        wctOps++
+                        val savedOrigin = offscreenParkedOrigins.remove(task.taskId)
+                        if (leash != null && leash.isValid && savedOrigin != null) {
+                            scTx.setPosition(leash, savedOrigin.first, savedOrigin.second)
+                            scOps++
+                        }
                     } else {
+                        offscreenParkedOrigins.remove(task.taskId)
                         fallbackShow.add(task)
                     }
                 }
-            } else {
-                fallbackPark.addAll(tasksToPark)
-                fallbackShow.addAll(orderedShow)
-            }
-
-            val executeAtomicSwap = {
-                if (wct != null && atomicOps > 0) {
-                    runCatching {
-                        applyTransaction(organizer, wct)
-                        HookGuard.info(
-                            "BRIDGE.SWITCH_ATOMIC ops=$atomicOps show=${orderedShow.map { it.taskId }} park=${tasksToPark.map { it.taskId }}"
-                        )
-                    }.onFailure {
-                        HookGuard.warn("BRIDGE.SWITCH_ATOMIC failed, falling back", it)
-                        for (t in tasksToPark) parkSingleFlexibleTask(t.taskId)
-                        for (t in orderedShow) restoreSingleFlexibleTask(organizer, t)
-                    }
+                if (wctShow != null && wctOps > 0) {
+                    runCatching { applyTransaction(organizer, wctShow) }
                 }
-                for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
+                if (scOps > 0) runCatching { scTx.apply() }
+                scTx.close()
                 for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
+                HookGuard.info("BRIDGE.SWITCH_SHOW live=$liveMode show=${orderedShow.map { it.taskId }}")
             }
 
-            // Preload snapshots off-thread, wait for GPU pre-draw, play silky 480ms 120fps Magic Move,
-            // and commit the 3ms atomic WCT seamlessly behind frame 1 of the overlay.
+            // Two-phase Magic Move: Phase 1 parks outgoing right after frame 0;
+            // Phase 2 reveals incoming ONLY when the gliding card lands (zero early static pop-in!).
             val ctx = appContext()
             if (ctx != null) {
                 StageNativeRuntime.markMagicAnimationBusy(460L)
                 val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
                 val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
-                StageMagicTransitionOverlay.playStageSwitch(ctx, outPairs, inPairs, executeAtomicSwap)
+                StageMagicTransitionOverlay.playStageSwitch(
+                    context = ctx,
+                    outgoingTasks = outPairs,
+                    incomingTasks = inPairs,
+                    onParkOutgoing = executeParkOutgoing,
+                    onShowIncoming = executeShowIncoming,
+                )
             } else {
-                mainHandler.post(executeAtomicSwap)
+                mainHandler.post {
+                    executeParkOutgoing()
+                    executeShowIncoming()
+                }
             }
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
+        }
+    }
+
+    fun restoreAllOffscreenLeashes() {
+        if (offscreenParkedOrigins.isEmpty()) return
+        val scTx = SurfaceControl.Transaction()
+        var ops = 0
+        for ((taskId, origin) in offscreenParkedOrigins) {
+            val leash = StageNativeRuntime.getTaskLeash(taskId)
+            if (leash != null && leash.isValid) {
+                scTx.setPosition(leash, origin.first, origin.second)
+                ops++
+            }
+        }
+        offscreenParkedOrigins.clear()
+        if (ops > 0) runCatching { scTx.apply() }
+        scTx.close()
+    }
+
+    fun flushOffscreenParkedTasksToHidden(parkedTasks: List<StageTask>) {
+        restoreAllOffscreenLeashes()
+        val organizer = shellTaskOrganizer ?: return
+        val wct = newWindowContainerTransaction() ?: return
+        var ops = 0
+        for (t in parkedTasks) {
+            val token = resolveTaskToken(organizer, t.taskId) ?: continue
+            runCatching { XposedHelpers.callMethod(wct, "setHidden", token, true) }
+            ops++
+        }
+        if (ops > 0) {
+            mainHandler.post { runCatching { applyTransaction(organizer, wct) } }
         }
     }
 

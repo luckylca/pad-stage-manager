@@ -4,6 +4,8 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Rect
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -37,6 +39,7 @@ object SystemServerFlexibleHook {
     private val allowWideStageRect = ThreadLocal<Boolean>()
     private val memoryMap = ConcurrentHashMap<String, MemorizedFrame>()
     private val lastAutoSnapMs = ConcurrentHashMap<Int, Long>()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     data class MemorizedFrame(
         val left: Int,
@@ -336,19 +339,22 @@ object SystemServerFlexibleHook {
         val halfW = ((stage.width() - metrics.multiColGap2Px) / 2).coerceAtLeast(360)
         val leftRect = Rect(stage.left, stage.top, stage.left + halfW, stage.bottom)
 
-        val bundle = Bundle().apply {
-            putBoolean(KEY_FORCE_ADJUST, true)
-            putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
-            putParcelable("androidx.flexible.LaunchBounds", leftRect)
-            putFloat("androidx.activity.LaunchScale", 1.0f)
+        // Dispatch outside WindowManagerGlobalLock so clicking Split Screen never stutters!
+        mainHandler.post {
+            val bundle = Bundle().apply {
+                putBoolean(KEY_FORCE_ADJUST, true)
+                putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
+                putParcelable("androidx.flexible.LaunchBounds", leftRect)
+                putFloat("androidx.activity.LaunchScale", 1.0f)
+            }
+            allowWideStageRect.set(true)
+            runCatching {
+                val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+                val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+                XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
+            }
+            HookGuard.info("SYS.SNAP_TO_SPLIT_LEFT task=$taskId rect=$leftRect")
         }
-        allowWideStageRect.set(true)
-        runCatching {
-            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
-            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
-            XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
-        }
-        HookGuard.info("SYS.SNAP_TO_SPLIT_LEFT task=$taskId rect=$leftRect")
     }
 
     private fun snapTaskObjToMainStage(taskObj: Any, reason: String) {
@@ -360,19 +366,21 @@ object SystemServerFlexibleHook {
 
     private fun snapTaskIdToMainStage(taskId: Int, screenW: Int, screenH: Int, reason: String) {
         val mainStage = computeWidePrimaryStageRect(screenW, screenH)
-        val bundle = Bundle().apply {
-            putBoolean(KEY_FORCE_ADJUST, true)
-            putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
-            putParcelable("androidx.flexible.LaunchBounds", mainStage)
-            putFloat("androidx.activity.LaunchScale", 1.0f)
+        mainHandler.post {
+            val bundle = Bundle().apply {
+                putBoolean(KEY_FORCE_ADJUST, true)
+                putInt("androidx.activity.LaunchFlexibleTaskId", taskId)
+                putParcelable("androidx.flexible.LaunchBounds", mainStage)
+                putFloat("androidx.activity.LaunchScale", 1.0f)
+            }
+            allowWideStageRect.set(true)
+            runCatching {
+                val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+                val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+                XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
+            }
+            HookGuard.info("SYS.SNAP_TO_MAIN_STAGE($reason) task=$taskId rect=$mainStage")
         }
-        allowWideStageRect.set(true)
-        runCatching {
-            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
-            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
-            XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
-        }
-        HookGuard.info("SYS.SNAP_TO_MAIN_STAGE($reason) task=$taskId rect=$mainStage")
     }
 
     /**

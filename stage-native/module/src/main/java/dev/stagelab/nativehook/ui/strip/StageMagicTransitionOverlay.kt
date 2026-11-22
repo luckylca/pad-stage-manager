@@ -48,7 +48,8 @@ object StageMagicTransitionOverlay {
     private var persistentRoot: FrameLayout? = null
     private var attachedWm: WindowManager? = null
     private var pendingCleanup: Runnable? = null
-    private var pendingSwap: Runnable? = null
+    private var pendingPark: Runnable? = null
+    private var pendingShow: Runnable? = null
 
     private data class CachedPreview(
         val bitmap: Bitmap?,
@@ -71,10 +72,14 @@ object StageMagicTransitionOverlay {
         context: Context,
         outgoingTasks: List<Pair<StageTask, WindowBounds>>,
         incomingTasks: List<Pair<StageTask, WindowBounds>>,
-        onOverlayReadyForAtomicSwap: () -> Unit,
+        onParkOutgoing: () -> Unit,
+        onShowIncoming: () -> Unit,
     ) {
         if (outgoingTasks.isEmpty() && incomingTasks.isEmpty()) {
-            mainHandler.post(onOverlayReadyForAtomicSwap)
+            mainHandler.post {
+                onParkOutgoing()
+                onShowIncoming()
+            }
             return
         }
 
@@ -97,7 +102,7 @@ object StageMagicTransitionOverlay {
             }
             mainHandler.post {
                 if (seq != animationSeq) return@post
-                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onOverlayReadyForAtomicSwap)
+                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onParkOutgoing, onShowIncoming)
             }
             // Refresh outgoing snapshots asynchronously for next time
             bgExecutor.execute {
@@ -128,7 +133,7 @@ object StageMagicTransitionOverlay {
 
             mainHandler.post {
                 if (seq != animationSeq) return@post
-                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onOverlayReadyForAtomicSwap)
+                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onParkOutgoing, onShowIncoming)
             }
         }
     }
@@ -176,16 +181,20 @@ object StageMagicTransitionOverlay {
         outgoing: List<PreparedCard>,
         incoming: List<PreparedCard>,
         seq: Long,
-        onOverlayReadyForAtomicSwap: () -> Unit,
+        onParkOutgoing: () -> Unit,
+        onShowIncoming: () -> Unit,
     ) {
         runCatching {
             pendingCleanup?.let { mainHandler.removeCallbacks(it) }
             pendingCleanup = null
-            pendingSwap?.let { mainHandler.removeCallbacks(it) }
-            pendingSwap = null
+            pendingPark?.let { mainHandler.removeCallbacks(it) }
+            pendingPark = null
+            pendingShow?.let { mainHandler.removeCallbacks(it) }
+            pendingShow = null
 
             val root = ensurePersistentRoot(context) ?: run {
-                onOverlayReadyForAtomicSwap()
+                onParkOutgoing()
+                onShowIncoming()
                 return
             }
 
@@ -269,11 +278,21 @@ object StageMagicTransitionOverlay {
 
             val startAnimators = {
                 if (seq == animationSeq) {
-                    val swapRunnable = Runnable {
-                        if (seq == animationSeq) onOverlayReadyForAtomicSwap()
+                    // Phase 1 (t=16ms): Hide outgoing Stage right after overlay frame 0 covers it,
+                    // leaving clean blurred wallpaper while the incoming card glides in from the left.
+                    val parkRunnable = Runnable {
+                        if (seq == animationSeq) onParkOutgoing()
                     }
-                    pendingSwap = swapRunnable
-                    mainHandler.postDelayed(swapRunnable, 20L)
+                    pendingPark = parkRunnable
+                    mainHandler.postDelayed(parkRunnable, 16L)
+
+                    // Phase 2 (t=INCOMING-30ms): Show real incoming Stage ONLY when the gliding card
+                    // has landed in place — eliminates any early static pop-in before/during the glide!
+                    val showRunnable = Runnable {
+                        if (seq == animationSeq) onShowIncoming()
+                    }
+                    pendingShow = showRunnable
+                    mainHandler.postDelayed(showRunnable, (INCOMING_DURATION_MS - 30L).coerceAtLeast(100L))
 
                     outgoingViews.forEach { (card, item, idx) ->
                         val b = item.bounds
@@ -345,7 +364,8 @@ object StageMagicTransitionOverlay {
         }.onFailure {
             HookGuard.warn("MAGIC_TRANSITION failed", it)
             hideNow()
-            onOverlayReadyForAtomicSwap()
+            onParkOutgoing()
+            onShowIncoming()
         }
     }
 
@@ -424,8 +444,10 @@ object StageMagicTransitionOverlay {
     fun hideNow() {
         pendingCleanup?.let { mainHandler.removeCallbacks(it) }
         pendingCleanup = null
-        pendingSwap?.let { mainHandler.removeCallbacks(it) }
-        pendingSwap = null
+        pendingPark?.let { mainHandler.removeCallbacks(it) }
+        pendingPark = null
+        pendingShow?.let { mainHandler.removeCallbacks(it) }
+        pendingShow = null
         activeCards.clear()
         persistentRoot?.let { root ->
             root.animate().cancel()

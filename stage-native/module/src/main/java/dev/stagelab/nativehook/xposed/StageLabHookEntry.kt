@@ -2,6 +2,7 @@ package dev.stagelab.nativehook.xposed
 
 import android.app.ActivityManager
 import android.content.res.Configuration
+import android.view.SurfaceControl
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -77,6 +78,12 @@ class StageLabHookEntry : IXposedHookLoadPackage {
                         HookGuard.safeRun("ShellTaskOrganizer.onTaskAppeared") {
                             StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
                             val taskInfo = extractTaskInfo(param.args[0]) ?: return@safeRun
+                            val leash = runCatching {
+                                XposedHelpers.callMethod(param.args[0], "getLeash") as? SurfaceControl
+                            }.getOrNull()
+                            if (leash != null) {
+                                StageNativeRuntime.registerTaskLeash(taskInfo.taskId, leash)
+                            }
                             StageNativeRuntime.onNativeTaskAppeared(taskInfo)
                         }
                     }

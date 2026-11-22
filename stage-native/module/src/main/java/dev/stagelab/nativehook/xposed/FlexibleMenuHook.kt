@@ -18,6 +18,7 @@ object FlexibleMenuHook {
     private const val FLEXIBLE_MENU_MANAGER = "com.oplus.flexibletask.menu.FlexibleMenuManager"
     private const val EVENT_MINI = 2002
     private const val EVENT_CLOSE = 2003
+    private const val EVENT_SPLIT = 2100
 
     fun install(classLoader: ClassLoader) {
         val cls = try {
@@ -29,9 +30,24 @@ object FlexibleMenuHook {
 
         try {
             XposedBridge.hookAllMethods(cls, "notifySystemMenuEvent", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent.before") {
+                        val event = param.args.firstOrNull() as? Int ?: return@safeRun
+                        if (event == EVENT_SPLIT) {
+                            val taskInfo = resolveCurrentTaskInfo(param.thisObject) ?: return@safeRun
+                            // Intercept Split Screen BEFORE ColorOS wakes Launcher SplitRecents (zero stutter!)
+                            param.result = null
+                            HookGuard.info("NATIVE_MENU intercept SPLIT task=${taskInfo.taskId} pkg=${StageNativeRuntime.resolvePkg(taskInfo)}")
+                            StageNativeRuntime.onNativeMenuSplitLeft(taskInfo.taskId)
+                        }
+                    }
+                }
+
                 override fun afterHookedMethod(param: MethodHookParam) {
                     HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent") {
                         val event = param.args.firstOrNull() as? Int ?: return@safeRun
+                        if (event == EVENT_SPLIT) return@safeRun
                         val taskInfo = resolveCurrentTaskInfo(param.thisObject) ?: return@safeRun
                         val taskId = taskInfo.taskId
                         HookGuard.info("NATIVE_MENU event=$event task=$taskId pkg=${StageNativeRuntime.resolvePkg(taskInfo)}")

@@ -118,6 +118,8 @@ object StageNativeRuntime {
     @Volatile
     private var magicAnimationBusyUntilMs: Long = 0L
 
+    fun isMagicAnimationBusy(): Boolean = System.currentTimeMillis() < magicAnimationBusyUntilMs
+
     fun markMagicAnimationBusy(durationMs: Long = 460L) {
         val until = System.currentTimeMillis() + durationMs
         if (until > magicAnimationBusyUntilMs) {
@@ -127,11 +129,17 @@ object StageNativeRuntime {
             val session = registry.snapshot()
             val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
             if (ctx != null) {
-                // Capture fresh real content snapshots for parked stages once the animation completes
+                // In-place snapshot refresh (zero removeAllViews flash!)
                 val recentTasks = session.visibleRecentStages.flatMap { it.tasks }
                 stripOverlay.refreshSnapshotsForTasks(ctx, recentTasks)
             }
-            updateStripUi(session)
+            dockOverlay.update(
+                context = ctx ?: return@postDelayed,
+                session = session,
+                enabled = stageManagerEnabled,
+                hidden = dockController.isDockHiddenBySetting,
+                tempRevealed = dockController.isDockTemporarilyRevealed,
+            )
         }, durationMs + 40L)
     }
 
@@ -446,6 +454,30 @@ object StageNativeRuntime {
         val session = transitionController.onNativeTaskVanished(taskId)
         logSession("ON_NATIVE_MENU_CLOSE(t=$taskId)", session)
         updateStripUi(session)
+    }
+
+    /**
+     * Handles ColorOS `···` menu "分屏" directly inside SystemUI before Launcher SplitRecents wakes up:
+     * snaps the task smoothly to the left half of the Main Stage (or tiles both windows if 2 are active).
+     */
+    fun onNativeMenuSplitLeft(taskId: Int) {
+        val cols = bridge.computeMultiColumnBounds(
+            count = 2,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+        val active = registry.getActiveStage()
+        mainHandler.post {
+            if (active != null && active.tasks.size == 2 && active.containsTask(taskId)) {
+                val other = active.tasks.firstOrNull { it.taskId != taskId }
+                bridge.adjustFlexibleTaskFrame(taskId, cols[0], 1.0f)
+                if (other != null) {
+                    bridge.adjustFlexibleTaskFrame(other.taskId, cols[1], 1.0f)
+                }
+            } else {
+                bridge.adjustFlexibleTaskFrame(taskId, cols[0], 1.0f)
+            }
+            HookGuard.info("ON_NATIVE_MENU_SPLIT_LEFT task=$taskId left=${cols[0]}")
+        }
     }
 
     private fun updateStripUiImmediate(session: StageSession) {

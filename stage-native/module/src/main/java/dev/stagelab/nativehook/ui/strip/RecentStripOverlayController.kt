@@ -11,22 +11,20 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.SurfaceControl
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.Stage
 import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativehook.bridge.StageNativeRuntime
 import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.math.abs
 
 /**
@@ -45,7 +43,9 @@ class RecentStripOverlayController(
     private val onLeftEdgeSwipeReveal: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val snapshotExecutor = Executors.newSingleThreadExecutor()
     private val snapshotLoader = NativeTaskSnapshotLoader()
+    private val thumbImageViews = ConcurrentHashMap<Int, ImageView>()
 
     private var windowManager: WindowManager? = null
     private var rootContainer: FrameLayout? = null
@@ -54,10 +54,29 @@ class RecentStripOverlayController(
     private var isAttached = false
 
     private var lastSession: StageSession = StageSession.EMPTY
+    private var lastRenderedSignature: String = ""
     private var hiddenBySetting = false
     private var temporarilyRevealed = false
+    private var livePollRunning = false
+    private var appContextRef: Context? = null
+
+    private val livePollRunnable = object : Runnable {
+        override fun run() {
+            if (!isAttached || !StageNativeRuntime.livePreviewEnabled) {
+                livePollRunning = false
+                return
+            }
+            val ctx = appContextRef
+            val tasks = lastSession.visibleRecentStages.flatMap { it.tasks }
+            if (ctx != null && tasks.isNotEmpty() && !StageNativeRuntime.isMagicAnimationBusy()) {
+                refreshSnapshotsForTasks(ctx, tasks)
+            }
+            mainHandler.postDelayed(this, LIVE_PREVIEW_INTERVAL_MS)
+        }
+    }
 
     fun update(context: Context, session: StageSession, hidden: Boolean, tempRevealed: Boolean) {
+        appContextRef = context.applicationContext
         lastSession = session
         hiddenBySetting = hidden
         temporarilyRevealed = tempRevealed
@@ -73,32 +92,53 @@ class RecentStripOverlayController(
                 return@post
             }
             ensureAttached(context)
-            render(context, recent)
+            val sig = buildSignature(recent, hidden, tempRevealed)
+            if (sig != lastRenderedSignature) {
+                lastRenderedSignature = sig
+                render(context, recent)
+            }
+            if (StageNativeRuntime.livePreviewEnabled && !livePollRunning) {
+                livePollRunning = true
+                mainHandler.postDelayed(livePollRunnable, LIVE_PREVIEW_INTERVAL_MS)
+            }
         }
     }
 
+    private fun buildSignature(stages: List<Stage>, hidden: Boolean, tempRevealed: Boolean): String =
+        "$hidden|$tempRevealed|" + stages.joinToString(";") { st ->
+            "${st.stageId}:${st.tasks.joinToString(",") { it.taskId.toString() }}"
+        }
+
     fun refreshSnapshotsForTasks(context: Context, tasks: List<StageTask>) {
         if (tasks.isEmpty()) return
-        // Pre-warm fresh real content TaskSnapshots and immediately refresh strip thumbnails!
-        mainHandler.post {
+        // Fetch fresh snapshots OFF the main thread and update ImageViews IN-PLACE (zero removeAllViews flash!)
+        snapshotExecutor.execute {
             for (t in tasks) {
-                snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
-            }
-            val recent = lastSession.visibleRecentStages
-            if (isAttached && recent.isNotEmpty()) {
-                render(context, recent)
+                val res = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+                val bmp = res.bitmap ?: continue
+                mainHandler.post {
+                    thumbImageViews[t.taskId]?.let { iv ->
+                        if (!bmp.isRecycled) {
+                            iv.setImageBitmap(bmp)
+                        }
+                    }
+                }
             }
         }
     }
 
     fun detach() {
         mainHandler.post {
+            livePollRunning = false
+            mainHandler.removeCallbacks(livePollRunnable)
             val wm = windowManager
             val root = rootContainer
             if (isAttached && wm != null && root != null) {
                 runCatching { wm.removeViewImmediate(root) }
             }
             isAttached = false
+            lastRenderedSignature = ""
+            thumbImageViews.clear()
             rootContainer = null
             stripColumn = null
             edgeRevealHandle = null
@@ -182,6 +222,7 @@ class RecentStripOverlayController(
         if (!showStrip) return
 
         column.removeAllViews()
+        thumbImageViews.clear()
         val maxCards = recentStages.take(StageSession.MAX_VISIBLE_RECENT_STAGES)
         val total = maxCards.size
         val dm = context.resources.displayMetrics
@@ -329,24 +370,16 @@ class RecentStripOverlayController(
             clipToOutline = true
         }
 
-        if (preview.mode == PreviewMode.NATIVE_TASK_SNAPSHOT && preview.bitmap != null) {
-            val img = ImageView(context).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
+        // Always attach an ImageView so in-place live preview updates preserve true 3D perspective slant (rotationY=28°)
+        // and rounded corners with ZERO SurfaceView hole-punch or removeAllViews flash!
+        val img = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            if (preview.mode == PreviewMode.NATIVE_TASK_SNAPSHOT && preview.bitmap != null) {
                 setImageBitmap(preview.bitmap)
             }
-            frame.addView(img, FrameLayout.LayoutParams(widthPx, heightPx))
         }
-
-        // Experimental Real-Time Live Content Preview via SurfaceControl.mirrorSurface (default ON)
-        if (StageNativeRuntime.livePreviewEnabled) {
-            val leash = StageNativeRuntime.getTaskLeash(task.taskId)
-            if (leash != null && leash.isValid) {
-                val mirrorSurfaceView = createLiveMirrorSurfaceView(context, task, leash, widthPx, heightPx, radiusPx)
-                if (mirrorSurfaceView != null) {
-                    frame.addView(mirrorSurfaceView, FrameLayout.LayoutParams(widthPx, heightPx))
-                }
-            }
-        }
+        thumbImageViews[task.taskId] = img
+        frame.addView(img, FrameLayout.LayoutParams(widthPx, heightPx))
 
         // Subtle app icon badge in bottom-right corner (or centered when snapshot is unavailable/FLAG_SECURE)
         preview.appIcon?.let { iconDrawable ->
@@ -367,68 +400,6 @@ class RecentStripOverlayController(
         }
 
         return frame
-    }
-
-    private fun createLiveMirrorSurfaceView(
-        context: Context,
-        task: StageTask,
-        leash: SurfaceControl,
-        widthPx: Int,
-        heightPx: Int,
-        radiusPx: Float,
-    ): SurfaceView? {
-        return runCatching {
-            SurfaceView(context).apply {
-                setZOrderMediaOverlay(true)
-                holder.setFormat(PixelFormat.TRANSLUCENT)
-                holder.addCallback(object : SurfaceHolder.Callback {
-                    private var mirrorSc: SurfaceControl? = null
-
-                    override fun surfaceCreated(holder: SurfaceHolder) {
-                        runCatching {
-                            if (!leash.isValid) return
-                            val mirror = XposedHelpers.callStaticMethod(
-                                SurfaceControl::class.java,
-                                "mirrorSurface",
-                                leash,
-                            ) as? SurfaceControl ?: return
-                            mirrorSc = mirror
-                            val hostSc = surfaceControl ?: return
-                            val srcW = task.bounds.width.takeIf { it > 200 } ?: 1920
-                            val srcH = task.bounds.height.takeIf { it > 200 } ?: 1280
-                            val sx = widthPx.toFloat() / srcW.toFloat()
-                            val sy = heightPx.toFloat() / srcH.toFloat()
-                            val scale = maxOf(sx, sy).coerceIn(0.05f, 1.0f)
-
-                            val tx = SurfaceControl.Transaction()
-                            tx.reparent(mirror, hostSc)
-                            tx.setScale(mirror, scale, scale)
-                            tx.setPosition(mirror, 0f, 0f)
-                            runCatching { XposedHelpers.callMethod(tx, "setCornerRadius", mirror, radiusPx / scale) }
-                            tx.setVisibility(mirror, true)
-                            tx.apply()
-                            tx.close()
-                        }
-                    }
-
-                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-
-                    override fun surfaceDestroyed(holder: SurfaceHolder) {
-                        mirrorSc?.let { sc ->
-                            runCatching {
-                                val tx = SurfaceControl.Transaction()
-                                runCatching { XposedHelpers.callMethod(tx, "remove", sc) }
-                                    .onFailure { tx.reparent(sc, null) }
-                                tx.apply()
-                                tx.close()
-                                sc.release()
-                            }
-                        }
-                        mirrorSc = null
-                    }
-                })
-            }
-        }.getOrNull()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -460,4 +431,8 @@ class RecentStripOverlayController(
             value.toFloat(),
             context.resources.displayMetrics,
         ).toInt()
+
+    companion object {
+        private const val LIVE_PREVIEW_INTERVAL_MS = 350L
+    }
 }

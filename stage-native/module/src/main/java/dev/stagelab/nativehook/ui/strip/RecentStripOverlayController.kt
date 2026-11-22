@@ -46,6 +46,8 @@ class RecentStripOverlayController(
     private val snapshotExecutor = Executors.newSingleThreadExecutor()
     private val snapshotLoader = NativeTaskSnapshotLoader()
     private val thumbImageViews = ConcurrentHashMap<Int, ImageView>()
+    private val stageCardViews = ConcurrentHashMap<String, View>()
+    private var hoveredStageId: String? = null
 
     private var windowManager: WindowManager? = null
     private var rootContainer: FrameLayout? = null
@@ -139,6 +141,8 @@ class RecentStripOverlayController(
             isAttached = false
             lastRenderedSignature = ""
             thumbImageViews.clear()
+            stageCardViews.clear()
+            hoveredStageId = null
             rootContainer = null
             stripColumn = null
             edgeRevealHandle = null
@@ -223,16 +227,55 @@ class RecentStripOverlayController(
 
         column.removeAllViews()
         thumbImageViews.clear()
+        stageCardViews.clear()
+        hoveredStageId = null
         val maxCards = recentStages.take(StageSession.MAX_VISIBLE_RECENT_STAGES)
         val total = maxCards.size
         val dm = context.resources.displayMetrics
         val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         maxCards.forEachIndexed { index, stage ->
             val card = buildStageThumbnailCard(context, stage, index, total, metrics.stripCardWidthPx, metrics.stripCardHeightPx)
+            stageCardViews[stage.stageId] = card
             val params = LinearLayout.LayoutParams(metrics.stripCardWidthPx, metrics.stripCardHeightPx).apply {
                 if (index > 0) topMargin = dp(context, 16)
             }
             column.addView(card, params)
+        }
+    }
+
+    /**
+     * Hit-tests which Recent Stage card sits under screen coordinates `(rawX, rawY)`
+     * so users can freely drag a Dock app directly onto any workspace in the left strip!
+     */
+    fun findStageIdAtScreenPoint(rawX: Float, rawY: Float): String? {
+        if (!isAttached) return null
+        val loc = IntArray(2)
+        val slop = 36
+        for ((stageId, view) in stageCardViews) {
+            if (!view.isAttachedToWindow) continue
+            view.getLocationOnScreen(loc)
+            val left = loc[0] - slop
+            val top = loc[1] - slop
+            val right = loc[0] + view.width + slop
+            val bottom = loc[1] + view.height + slop
+            if (rawX >= left && rawX <= right && rawY >= top && rawY <= bottom) {
+                return stageId
+            }
+        }
+        return null
+    }
+
+    fun highlightHoverStage(stageId: String?) {
+        if (hoveredStageId == stageId) return
+        val prev = hoveredStageId
+        hoveredStageId = stageId
+        mainHandler.post {
+            if (prev != null) {
+                stageCardViews[prev]?.animate()?.scaleX(1f)?.scaleY(1f)?.setDuration(140L)?.start()
+            }
+            if (stageId != null) {
+                stageCardViews[stageId]?.animate()?.scaleX(1.10f)?.scaleY(1.10f)?.setDuration(140L)?.start()
+            }
         }
     }
 

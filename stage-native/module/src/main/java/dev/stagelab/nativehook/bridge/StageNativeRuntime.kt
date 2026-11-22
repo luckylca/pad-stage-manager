@@ -74,8 +74,24 @@ object StageNativeRuntime {
         onDockAppDraggedToCenter = { pkg ->
             pendingLaunches[pkg] = true to System.currentTimeMillis()
             val session = dockController.onDockAppDraggedToCenter(pkg)
-            updateStripUi(session)
+            maybeScheduleTwoWindowSideBySide(session)
+            updateStripUiImmediate(session)
         },
+        onDockAppDroppedOnStage = { pkg, targetStageId ->
+            // Switch directly to the target workspace in the left strip first, then wait for
+            // BRIDGE.SWITCH_SHOW (370ms) to finish before launching/merging the dropped app
+            // so the restored single-window bounds never overwrite the new side-by-side tile layout.
+            val switched = recentController.onStageThumbnailClicked(targetStageId)
+            updateStripUiImmediate(switched)
+            pendingLaunches[pkg] = true to System.currentTimeMillis()
+            mainHandler.postDelayed({
+                val session = dockController.onDockAppDraggedToCenter(pkg)
+                maybeScheduleTwoWindowSideBySide(session)
+                updateStripUiImmediate(session)
+            }, 430L)
+        },
+        findRecentStageAtPoint = { rawX, rawY -> stripOverlay.findStageIdAtScreenPoint(rawX, rawY) },
+        onHoverRecentStage = { stageId -> stripOverlay.highlightHoverStage(stageId) },
         onBottomSwipeReveal = {
             dockController.onBottomSwipeReveal()
             updateStripUi(registry.snapshot())

@@ -5,7 +5,9 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.PixelFormat
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
@@ -21,6 +23,7 @@ import android.widget.TextView
 import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativehook.xposed.HookGuard
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Custom iPadOS-style frosted glass floating Dock inside `com.android.systemui`.
@@ -35,6 +38,9 @@ import kotlin.math.abs
 class StageDockOverlayController(
     private val onDockAppClicked: (packageName: String) -> Unit,
     private val onDockAppDraggedToCenter: (packageName: String) -> Unit,
+    private val onDockAppDroppedOnStage: (packageName: String, stageId: String) -> Unit = { pkg, _ -> onDockAppDraggedToCenter(pkg) },
+    private val findRecentStageAtPoint: (rawX: Float, rawY: Float) -> String? = { _, _ -> null },
+    private val onHoverRecentStage: (stageId: String?) -> Unit = {},
     private val onBottomSwipeReveal: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -47,6 +53,8 @@ class StageDockOverlayController(
     private var rootContainer: FrameLayout? = null
     private var dockCapsule: LinearLayout? = null
     private var bottomEdgeHandle: View? = null
+    private var dragGhostRoot: FrameLayout? = null
+    private var dragGhostIcon: ImageView? = null
     private var isAttached = false
 
     private var pinnedPackages: List<String> = emptyList()
@@ -104,11 +112,65 @@ class StageDockOverlayController(
             if (isAttached && wm != null && root != null) {
                 runCatching { wm.removeViewImmediate(root) }
             }
+            dragGhostRoot?.let { ghost ->
+                if (wm != null) runCatching { wm.removeViewImmediate(ghost) }
+            }
             isAttached = false
             rootContainer = null
             dockCapsule = null
             bottomEdgeHandle = null
+            dragGhostRoot = null
+            dragGhostIcon = null
         }
+    }
+
+    private fun ensureDragGhost(context: Context): ImageView? {
+        dragGhostIcon?.let { return it }
+        val wm = windowManager ?: return null
+        val ghostSize = dp(context, 58)
+        val ghostRadius = dp(context, 16).toFloat()
+        val ghostRoot = FrameLayout(context).apply {
+            clipChildren = false
+            clipToPadding = false
+            setBackgroundColor(Color.TRANSPARENT)
+            visibility = View.INVISIBLE
+        }
+        val ghostIcon = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, ghostRadius)
+                }
+            }
+            clipToOutline = true
+        }
+        ghostRoot.addView(ghostIcon, FrameLayout.LayoutParams(ghostSize, ghostSize, Gravity.TOP or Gravity.START))
+
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                fitInsetsTypes = 0
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+            title = "StageLabDragGhost"
+        }
+        return runCatching {
+            wm.addView(ghostRoot, lp)
+            dragGhostRoot = ghostRoot
+            dragGhostIcon = ghostIcon
+            ghostIcon
+        }.getOrNull()
     }
 
     private fun ensureAttached(context: Context) {
@@ -354,42 +416,93 @@ class StageDockOverlayController(
 
         var downX = 0f
         var downY = 0f
-        var draggingUp = false
-        val mergeThresholdPx = dp(context, 54).toFloat()
+        var isDragging = false
+        var lastHoveredStageId: String? = null
+        val dragSlopPx = dp(context, 14).toFloat()
+        val ghostHalfPx = dp(context, 58) / 2f
+        val dockCancelMarginPx = dp(context, 110)
 
         col.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX
                     downY = event.rawY
-                    draggingUp = false
-                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(100).start()
+                    isDragging = false
+                    lastHoveredStageId = null
+                    ensureDragGhost(context)
+                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(90).start()
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
-                    if (dy < -dp(context, 14) && abs(dy) > abs(dx)) {
-                        draggingUp = true
-                        v.translationY = dy.coerceIn(-dp(context, 86).toFloat(), 0f)
+                    if (!isDragging && hypot(dx.toDouble(), dy.toDouble()) > dragSlopPx) {
+                        isDragging = true
+                        v.animate().cancel()
+                        v.scaleX = 0.92f
+                        v.scaleY = 0.92f
+                        v.alpha = 0.28f
+                        val ghost = ensureDragGhost(context)
+                        if (ghost != null) {
+                            ghost.setImageDrawable(iconView.drawable)
+                            ghost.scaleX = 1.08f
+                            ghost.scaleY = 1.08f
+                            ghost.elevation = dp(context, 12).toFloat()
+                            ghost.translationX = event.rawX - ghostHalfPx
+                            ghost.translationY = event.rawY - ghostHalfPx
+                            dragGhostRoot?.visibility = View.VISIBLE
+                        }
+                    }
+                    if (isDragging) {
+                        // Direct GPU translation on hardware-layered fullscreen ghost: zero layout/WM IPC, locked 120fps
+                        dragGhostIcon?.let { ghost ->
+                            ghost.translationX = event.rawX - ghostHalfPx
+                            ghost.translationY = event.rawY - ghostHalfPx
+                        }
+                        val hoveredId = findRecentStageAtPoint(event.rawX, event.rawY)
+                        if (hoveredId != lastHoveredStageId) {
+                            lastHoveredStageId = hoveredId
+                            onHoverRecentStage(hoveredId)
+                        }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    val dy = event.rawY - downY
                     val dx = event.rawX - downX
-                    v.animate().scaleX(1f).scaleY(1f).translationY(0f).setDuration(160).start()
-                    if (draggingUp && dy <= -mergeThresholdPx) {
-                        HookGuard.info("STAGE_DOCK drag-up merge pkg=$pkg")
-                        onDockAppDraggedToCenter(pkg)
-                    } else if (!draggingUp && abs(dx) < dp(context, 16) && abs(dy) < dp(context, 16)) {
+                    val dy = event.rawY - downY
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(140).start()
+                    if (isDragging) {
+                        isDragging = false
+                        dragGhostRoot?.visibility = View.INVISIBLE
+                        onHoverRecentStage(null)
+                        val targetStageId = findRecentStageAtPoint(event.rawX, event.rawY)
+                        val screenH = context.resources.displayMetrics.heightPixels
+                        when {
+                            targetStageId != null -> {
+                                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> recentStage=$targetStageId")
+                                onDockAppDroppedOnStage(pkg, targetStageId)
+                            }
+                            event.rawY < screenH - dockCancelMarginPx -> {
+                                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> activeStage")
+                                onDockAppDraggedToCenter(pkg)
+                            }
+                            else -> {
+                                HookGuard.info("STAGE_DOCK free-drop cancelled in dock zone pkg=$pkg")
+                            }
+                        }
+                    } else if (hypot(dx.toDouble(), dy.toDouble()) <= dragSlopPx) {
                         HookGuard.info("STAGE_DOCK tap launch pkg=$pkg")
                         onDockAppClicked(pkg)
                     }
+                    lastHoveredStageId = null
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    v.animate().scaleX(1f).scaleY(1f).translationY(0f).setDuration(140).start()
+                    isDragging = false
+                    lastHoveredStageId = null
+                    dragGhostRoot?.visibility = View.INVISIBLE
+                    onHoverRecentStage(null)
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120).start()
                     true
                 }
                 else -> false

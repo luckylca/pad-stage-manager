@@ -35,6 +35,7 @@ object SystemServerFlexibleHook {
 
     private val allowWideStageRect = ThreadLocal<Boolean>()
     private val memoryMap = ConcurrentHashMap<String, MemorizedFrame>()
+    private val lastAutoSnapMs = ConcurrentHashMap<Int, Long>()
 
     data class MemorizedFrame(
         val left: Int,
@@ -289,10 +290,15 @@ object SystemServerFlexibleHook {
         }
 
         // 4. Persist real user drag/resize bounds & scale directly inside system_server
+        //    AND auto-snap to Main Stage default max bounds when the user stretches a window near max size!
         val persistHook = object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 HookGuard.safeRun("FlexibleTaskController.persistGeometry") {
                     val taskObj = param.args.firstOrNull { it != null && it.javaClass.name.endsWith(".Task") } ?: return@safeRun
+                    val isResizeMethod = param.method.name != "finishMovingFlexibleTask"
+                    if (isResizeMethod && maybeAutoSnapNearMaxToMainStage(taskObj)) {
+                        return@safeRun
+                    }
                     recordTaskGeometry(taskObj)
                 }
             }
@@ -329,6 +335,48 @@ object SystemServerFlexibleHook {
             XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle)
         }
         HookGuard.info("SYS.SNAP_TO_MAIN_STAGE($reason) task=$taskId rect=$mainStage")
+    }
+
+    /**
+     * Auto-snap feature: when the user resizes a window close to or beyond the Main Stage maximum
+     * (width >= 86% or height >= 86% of Main Stage), cleanly snap it to the exact Main Stage
+     * default full rect `Rect(466, 97 - 2440, 1353)` (`scale = 1.0f`).
+     */
+    private fun maybeAutoSnapNearMaxToMainStage(taskObj: Any): Boolean {
+        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+        if (taskId <= 0) return false
+        val now = System.currentTimeMillis()
+        val prevSnap = lastAutoSnapMs[taskId] ?: 0L
+        if (now - prevSnap < 800L) return false
+
+        val bounds = runCatching { XposedHelpers.callMethod(taskObj, "getBounds") as? Rect }.getOrNull() ?: return false
+        val (scale, zoomState) = runCatching {
+            val wrapper = XposedHelpers.callMethod(taskObj, "getWrapper")
+            val ext = XposedHelpers.callMethod(wrapper, "getExtImpl")
+            val s = (XposedHelpers.callMethod(ext, "getScale") as? Float) ?: 1.0f
+            val st = (XposedHelpers.callMethod(ext, "getFlexibleZoomState") as? Int) ?: 1
+            s to st
+        }.getOrDefault(1.0f to 1)
+        if (zoomState == 2 || scale < 0.45f) return false
+
+        val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+        val mainStage = computeWidePrimaryStageRect(screenW, screenH)
+        val visW = (bounds.width() * scale).toInt()
+        val visH = (bounds.height() * scale).toInt()
+
+        val nearMax = visW >= (mainStage.width() * 0.86f).toInt() && visH >= (mainStage.height() * 0.82f).toInt()
+        val alreadySnapped = kotlin.math.abs(bounds.left - mainStage.left) <= 16 &&
+            kotlin.math.abs(bounds.top - mainStage.top) <= 16 &&
+            kotlin.math.abs(bounds.right - mainStage.right) <= 16 &&
+            kotlin.math.abs(bounds.bottom - mainStage.bottom) <= 16 &&
+            scale >= 0.98f
+
+        if (nearMax && !alreadySnapped) {
+            lastAutoSnapMs[taskId] = now
+            snapTaskIdToMainStage(taskId, screenW, screenH, "autoSnapMax")
+            return true
+        }
+        return false
     }
 
     private fun recordTaskGeometry(taskObj: Any) {

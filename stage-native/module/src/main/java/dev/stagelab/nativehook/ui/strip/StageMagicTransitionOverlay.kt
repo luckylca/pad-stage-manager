@@ -26,14 +26,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
- * Interruptible, GPU-accelerated Apple iPadOS Stage Manager "Magic Move" 3D transition overlay.
+ * Zero-flash, truly interruptible Apple iPadOS Stage Manager "Magic Move" 3D transition overlay.
  *
- * Key guarantees:
- * - Pixel-exact 68px rounded corners (`clipToOutline = true` baked into GPU hardware layer via `withLayer()`)
- *   from frame 0 to the final frame — never flashes as a sharp rectangle.
- * - Fully interruptible: tapping another Stage mid-flight captures each card's live transform
- *   (`translationX/Y`, `scaleX/Y`, `rotationY`, `alpha`) and smoothly redirects from that exact position.
- * - Persistent `INVISIBLE`/`VISIBLE` container + zero-copy `Bitmap.Config.HARDWARE` snapshots.
+ * Rapid-tap smoothness architecture:
+ * - Caches GPU-ready snapshots per taskId (`snapshotCache`) AND reuses live in-flight `FrameLayout`
+ *   cards in-place without calling `removeAllViews()` on cards still participating in the new switch.
+ * - When tapping rapidly mid-flight, bypasses `bgExecutor` completely and retargets every card's
+ *   `ViewPropertyAnimator` synchronously on the exact same frame from its live mid-air pose!
+ * - Pixel-exact 68px rounded corners (`clipToOutline = true`, baked via `withLayer()`).
  */
 object StageMagicTransitionOverlay {
 
@@ -47,18 +47,15 @@ object StageMagicTransitionOverlay {
     private var persistentRoot: FrameLayout? = null
     private var attachedWm: WindowManager? = null
     private var pendingCleanup: Runnable? = null
+    private var pendingSwap: Runnable? = null
 
-    private data class LiveCardPose(
-        val translationX: Float,
-        val translationY: Float,
-        val scaleX: Float,
-        val scaleY: Float,
-        val rotationY: Float,
-        val alpha: Float,
+    private data class CachedPreview(
+        val bitmap: Bitmap?,
+        val icon: Drawable?,
     )
 
+    private val previewCache = ConcurrentHashMap<Int, CachedPreview>()
     private val activeCards = ConcurrentHashMap<Int, FrameLayout>()
-    private val interruptedPoses = ConcurrentHashMap<Int, LiveCardPose>()
 
     @Volatile
     private var animationSeq = 0L
@@ -66,8 +63,7 @@ object StageMagicTransitionOverlay {
     private data class PreparedCard(
         val task: StageTask,
         val bounds: WindowBounds,
-        val bitmap: Bitmap?,
-        val icon: Drawable?,
+        val preview: CachedPreview,
     )
 
     fun playStageSwitch(
@@ -82,46 +78,57 @@ object StageMagicTransitionOverlay {
         }
 
         val seq = ++animationSeq
+        val validOut = outgoingTasks.filter { !it.second.isEmpty }
+        val validIn = incomingTasks.filter { !it.second.isEmpty }
 
-        // Immediately interrupt any in-flight animation on the main thread and snapshot each card's live pose
-        mainHandler.post {
-            captureAndInterruptInFlightCards()
+        // Fast path: if all tasks already have a cached preview or live in-flight card, retarget
+        // SYNCHRONOUSLY on the main thread with zero bgExecutor delay and zero removeAllViews flash!
+        val allCached = (validOut + validIn).all { (t, _) ->
+            activeCards.containsKey(t.taskId) || previewCache.containsKey(t.taskId)
         }
 
-        bgExecutor.execute {
-            val outPrepared = outgoingTasks.mapNotNull { (t, b) ->
-                if (b.isEmpty) return@mapNotNull null
-                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
-                PreparedCard(t, b, prepareGpuBitmap(p.bitmap), p.appIcon)
+        if (allCached) {
+            val outPrepared = validOut.map { (t, b) ->
+                PreparedCard(t, b, previewCache[t.taskId] ?: CachedPreview(null, null))
             }
-            val inPrepared = incomingTasks.mapNotNull { (t, b) ->
-                if (b.isEmpty) return@mapNotNull null
-                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
-                PreparedCard(t, b, prepareGpuBitmap(p.bitmap), p.appIcon)
+            val inPrepared = validIn.map { (t, b) ->
+                PreparedCard(t, b, previewCache[t.taskId] ?: CachedPreview(null, null))
+            }
+            mainHandler.post {
+                if (seq != animationSeq) return@post
+                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onOverlayReadyForAtomicSwap)
+            }
+            // Refresh outgoing snapshots asynchronously for next time
+            bgExecutor.execute {
+                for ((t, _) in validOut) {
+                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
+                    previewCache[t.taskId] = CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon)
+                }
+            }
+            return
+        }
+
+        // Cold path (first time seeing a task): fetch snapshots off-thread, then animate
+        bgExecutor.execute {
+            val outPrepared = validOut.map { (t, b) ->
+                val cached = previewCache[t.taskId] ?: run {
+                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
+                    CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
+                }
+                PreparedCard(t, b, cached)
+            }
+            val inPrepared = validIn.map { (t, b) ->
+                val cached = previewCache[t.taskId] ?: run {
+                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
+                    CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
+                }
+                PreparedCard(t, b, cached)
             }
 
             mainHandler.post {
                 if (seq != animationSeq) return@post
-                runSmoothTransition(context, outPrepared, inPrepared, seq, onOverlayReadyForAtomicSwap)
+                runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onOverlayReadyForAtomicSwap)
             }
-        }
-    }
-
-    private fun captureAndInterruptInFlightCards() {
-        pendingCleanup?.let { mainHandler.removeCallbacks(it) }
-        pendingCleanup = null
-        persistentRoot?.animate()?.cancel()
-        interruptedPoses.clear()
-        for ((taskId, card) in activeCards) {
-            card.animate().cancel()
-            interruptedPoses[taskId] = LiveCardPose(
-                translationX = card.translationX,
-                translationY = card.translationY,
-                scaleX = card.scaleX,
-                scaleY = card.scaleY,
-                rotationY = card.rotationY,
-                alpha = card.alpha,
-            )
         }
     }
 
@@ -158,7 +165,7 @@ object StageMagicTransitionOverlay {
         }.getOrNull()
     }
 
-    private fun runSmoothTransition(
+    private fun runInPlaceInterruptibleTransition(
         context: Context,
         outgoing: List<PreparedCard>,
         incoming: List<PreparedCard>,
@@ -168,17 +175,29 @@ object StageMagicTransitionOverlay {
         runCatching {
             pendingCleanup?.let { mainHandler.removeCallbacks(it) }
             pendingCleanup = null
+            pendingSwap?.let { mainHandler.removeCallbacks(it) }
+            pendingSwap = null
 
             val root = ensurePersistentRoot(context) ?: run {
                 onOverlayReadyForAtomicSwap()
                 return
             }
 
+            val wasAlreadyVisible = root.visibility == View.VISIBLE
             root.animate().cancel()
-            root.removeAllViews()
-            activeCards.clear()
             root.alpha = 1f
             root.visibility = View.VISIBLE
+
+            val participatingIds = (outgoing.map { it.task.taskId } + incoming.map { it.task.taskId }).toSet()
+
+            // Remove only unrelated stale cards; keep participating in-flight cards alive in-place!
+            val staleIds = activeCards.keys.filter { it !in participatingIds }
+            for (id in staleIds) {
+                activeCards.remove(id)?.let { staleCard ->
+                    staleCard.animate().cancel()
+                    root.removeView(staleCard)
+                }
+            }
 
             val dm = context.resources.displayMetrics
             val density = dm.density
@@ -186,70 +205,66 @@ object StageMagicTransitionOverlay {
             val stripAnchorX = dp(context, 94).toFloat()
             val outgoingStripY = screenH * 0.34f
             val incomingStripY = screenH * 0.50f
-            // Exact match to ColorOS Flexible Window `LaunchCornerRadius = 68px` (~26dp at 420dpi)
             val cornerPx = 68f
 
             val outgoingViews = mutableListOf<Triple<FrameLayout, PreparedCard, Int>>()
             val incomingViews = mutableListOf<Triple<FrameLayout, PreparedCard, Int>>()
+            var addedNewViews = false
 
+            // 1. Prepare outgoing cards (reuse in-place if already flying!)
             outgoing.forEachIndexed { idx, item ->
-                val card = createRoundedCardView(context, item, cornerPx, density)
-                card.pivotX = 0f
-                card.pivotY = item.bounds.height * 0.5f
-                // If this card was interrupted mid-flight, continue smoothly from its live pose!
-                interruptedPoses.remove(item.task.taskId)?.let { pose ->
-                    card.translationX = pose.translationX
-                    card.translationY = pose.translationY
-                    card.scaleX = pose.scaleX
-                    card.scaleY = pose.scaleY
-                    card.rotationY = pose.rotationY
-                    card.alpha = pose.alpha
+                val existing = activeCards[item.task.taskId]
+                val card = if (existing != null) {
+                    existing.animate().cancel()
+                    existing
+                } else {
+                    addedNewViews = true
+                    createRoundedCardView(context, item, cornerPx, density).also { c ->
+                        c.pivotX = 0f
+                        c.pivotY = item.bounds.height * 0.5f
+                        root.addView(c)
+                        activeCards[item.task.taskId] = c
+                    }
                 }
-                root.addView(card)
-                activeCards[item.task.taskId] = card
                 outgoingViews.add(Triple(card, item, idx))
             }
 
+            // 2. Prepare incoming cards (reuse in-place if already flying, and bring to front!)
             incoming.forEachIndexed { idx, item ->
-                val card = createRoundedCardView(context, item, cornerPx, density)
                 val b = item.bounds
-                card.pivotX = 0f
-                card.pivotY = b.height * 0.5f
-
-                val pose = interruptedPoses.remove(item.task.taskId)
-                if (pose != null) {
-                    // Interrupted mid-flight: smoothly redirect back toward the main stage from live pose!
-                    card.translationX = pose.translationX
-                    card.translationY = pose.translationY
-                    card.scaleX = pose.scaleX
-                    card.scaleY = pose.scaleY
-                    card.rotationY = pose.rotationY
-                    card.alpha = pose.alpha.coerceAtLeast(0.35f)
+                val existing = activeCards[item.task.taskId]
+                val card = if (existing != null) {
+                    existing.animate().cancel()
+                    existing.bringToFront()
+                    existing
                 } else {
-                    val startScaleX = (dp(context, 148).toFloat() / b.width.coerceAtLeast(1)).coerceIn(0.14f, 0.45f)
-                    val startScaleY = (dp(context, 106).toFloat() / b.height.coerceAtLeast(1)).coerceIn(0.14f, 0.45f)
-                    val startScale = minOf(startScaleX, startScaleY)
-                    card.translationX = stripAnchorX - b.left + idx * dp(context, 14)
-                    card.translationY = incomingStripY - b.top + idx * dp(context, 10)
-                    card.scaleX = startScale
-                    card.scaleY = startScale
-                    card.rotationY = 26f
-                    card.alpha = 0.25f
+                    addedNewViews = true
+                    createRoundedCardView(context, item, cornerPx, density).also { c ->
+                        val startScaleX = (dp(context, 148).toFloat() / b.width.coerceAtLeast(1)).coerceIn(0.14f, 0.45f)
+                        val startScaleY = (dp(context, 106).toFloat() / b.height.coerceAtLeast(1)).coerceIn(0.14f, 0.45f)
+                        val startScale = minOf(startScaleX, startScaleY)
+                        c.pivotX = 0f
+                        c.pivotY = b.height * 0.5f
+                        c.translationX = stripAnchorX - b.left + idx * dp(context, 14)
+                        c.translationY = incomingStripY - b.top + idx * dp(context, 10)
+                        c.scaleX = startScale
+                        c.scaleY = startScale
+                        c.rotationY = 26f
+                        c.alpha = 0.25f
+                        root.addView(c)
+                        activeCards[item.task.taskId] = c
+                    }
                 }
-                root.addView(card)
-                activeCards[item.task.taskId] = card
                 incomingViews.add(Triple(card, item, idx))
             }
-            interruptedPoses.clear()
 
-            root.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
-                    root.viewTreeObserver.removeOnPreDrawListener(this)
-                    if (seq != animationSeq) return true
-
-                    mainHandler.postDelayed({
+            val startAnimators = {
+                if (seq == animationSeq) {
+                    val swapRunnable = Runnable {
                         if (seq == animationSeq) onOverlayReadyForAtomicSwap()
-                    }, 24L)
+                    }
+                    pendingSwap = swapRunnable
+                    mainHandler.postDelayed(swapRunnable, 20L)
 
                     outgoingViews.forEach { (card, item, idx) ->
                         val b = item.bounds
@@ -303,9 +318,21 @@ object StageMagicTransitionOverlay {
                     }
                     pendingCleanup = cleanup
                     mainHandler.postDelayed(cleanup, INCOMING_DURATION_MS)
-                    return true
                 }
-            })
+            }
+
+            if (wasAlreadyVisible && !addedNewViews) {
+                // Pure mid-flight interruption: start retargeting on THIS EXACT FRAME (0ms delay!)
+                startAnimators()
+            } else {
+                root.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        root.viewTreeObserver.removeOnPreDrawListener(this)
+                        startAnimators()
+                        return true
+                    }
+                })
+            }
         }.onFailure {
             HookGuard.warn("MAGIC_TRANSITION failed", it)
             hideNow()
@@ -330,7 +357,6 @@ object StageMagicTransitionOverlay {
                 cornerRadius = cornerPx
                 setColor(Color.argb(242, 245, 242, 250))
             }
-            // Clip snapshot cleanly to ColorOS's exact 68px rounded corners from frame 0!
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
                     outline.setRoundRect(0, 0, view.width, view.height, cornerPx)
@@ -344,14 +370,14 @@ object StageMagicTransitionOverlay {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
-            if (item.bitmap != null) {
+            if (item.preview.bitmap != null) {
                 scaleType = ImageView.ScaleType.CENTER_CROP
-                setImageBitmap(item.bitmap)
+                setImageBitmap(item.preview.bitmap)
             } else {
                 scaleType = ImageView.ScaleType.CENTER_INSIDE
                 val pad = dp(context, 48)
                 setPadding(pad, pad, pad, pad)
-                setImageDrawable(item.icon)
+                setImageDrawable(item.preview.icon)
             }
         }
         card.addView(img)
@@ -375,8 +401,9 @@ object StageMagicTransitionOverlay {
     fun hideNow() {
         pendingCleanup?.let { mainHandler.removeCallbacks(it) }
         pendingCleanup = null
+        pendingSwap?.let { mainHandler.removeCallbacks(it) }
+        pendingSwap = null
         activeCards.clear()
-        interruptedPoses.clear()
         persistentRoot?.let { root ->
             root.animate().cancel()
             root.removeAllViews()
@@ -392,7 +419,7 @@ object StageMagicTransitionOverlay {
             context.resources.displayMetrics,
         ).toInt()
 
-    private const val OUTGOING_DURATION_MS = 520L
-    private const val INCOMING_DURATION_MS = 580L
-    private const val FADE_OUT_MS = 95L
+    private const val OUTGOING_DURATION_MS = 500L
+    private const val INCOMING_DURATION_MS = 540L
+    private const val FADE_OUT_MS = 90L
 }

@@ -188,7 +188,7 @@ object SystemServerFlexibleHook {
                         when (intent?.action) {
                             ACTION_ACTIVE_STAGE_CHANGED -> {
                                 val nextStageId = intent.getStringExtra("stageId").orEmpty().ifBlank { "stage-default" }
-                                mainHandler.post { swapFloatHandlesForStage(nextStageId) }
+                                postOnAndroidUiThread { swapFloatHandlesForStage(nextStageId) }
                             }
                             "dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG" -> {
                                 mainHandler.post {
@@ -222,9 +222,28 @@ object SystemServerFlexibleHook {
     }
 
     /**
+     * Posts work onto `system_server`'s `android.ui` (`com.android.server.UiThread`), which is the
+     * ONLY thread allowed to touch `FloatHandleView` / `FloatHandleViewSpringAnimation` without
+     * triggering `ViewRootImpl$CalledFromWrongThreadException`.
+     */
+    private fun postOnAndroidUiThread(block: () -> Unit) {
+        val uiHandler = runCatching {
+            val cl = cachedClassLoader ?: ClassLoader.getSystemClassLoader()
+            val uiThreadCls = XposedHelpers.findClass("com.android.server.UiThread", cl)
+            XposedHelpers.callStaticMethod(uiThreadCls, "getHandler") as? Handler
+        }.getOrNull()
+        if (uiHandler != null) {
+            uiHandler.post { runCatching { block() }.onFailure { HookGuard.warn("SYS.UI_THREAD_TASK failed", it) } }
+        } else {
+            HookGuard.warn("SystemServerFlexibleHook: com.android.server.UiThread unavailable; skipping FloatHandle UI swap")
+        }
+    }
+
+    /**
      * Per-workspace edge-tucked Mini Windows (`FloatHandleController` / `FloatHandleViewManager`):
      * Saves outgoing workspace's tucked edge pills and swaps in the incoming workspace's own list
      * so every workspace has its own independent edge mini-windows instead of one global list!
+     * MUST run on `android.ui` (`UiThread`).
      */
     @Suppress("UNCHECKED_CAST")
     private fun swapFloatHandlesForStage(nextStageId: String) {
@@ -249,7 +268,7 @@ object SystemServerFlexibleHook {
             liveList.clear()
             liveList.addAll(incoming)
 
-            // 3. Refresh or hide the native FloatHandle edge pill UI cleanly
+            // 3. Refresh or hide the native FloatHandle edge pill UI cleanly on android.ui thread
             if (manager != null) {
                 if (incoming.isEmpty()) {
                     runCatching { XposedHelpers.callMethod(manager, "hideFloatHandleView") }
@@ -261,7 +280,7 @@ object SystemServerFlexibleHook {
                 }
             }
             HookGuard.info(
-                "SYS.FLOAT_HANDLE_STAGE_SWAP $prevStageId(${stageFloatHandles[prevStageId]?.size ?: 0}) -> $nextStageId(${incoming.size})",
+                "SYS.FLOAT_HANDLE_STAGE_SWAP thread=${Thread.currentThread().name} $prevStageId(${stageFloatHandles[prevStageId]?.size ?: 0}) -> $nextStageId(${incoming.size})",
             )
         }.onFailure {
             HookGuard.warn("SYS.FLOAT_HANDLE_STAGE_SWAP failed", it)

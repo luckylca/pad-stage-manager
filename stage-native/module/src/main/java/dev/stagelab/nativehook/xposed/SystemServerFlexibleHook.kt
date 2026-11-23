@@ -97,8 +97,39 @@ object SystemServerFlexibleHook {
         hookPanoramaBypass(classLoader)
         hookUnlimitedWindowLimits(classLoader)
         hookFlexibleTaskController(classLoader)
+        hookAllowStageLabBroadcastWakeup(classLoader)
         OplusCompatAdapter.persistProbesToFile(OplusCompatAdapter.SYS_DIAG_PATH)
         mainHandler.postDelayed({ ensureStageReceiverRegistered(null) }, 4_000L)
+    }
+
+    /**
+     * Prevents ColorOS `OplusAppStartupManager` from blocking `com.android.systemui`'s
+     * `ACTION_SYNC_STATE` broadcast to `dev.stagelab.nativehook/.ui.StageModeStateReceiver`,
+     * guaranteeing the standalone exit notification ALWAYS appears after boot & unlock!
+     */
+    private fun hookAllowStageLabBroadcastWakeup(classLoader: ClassLoader) {
+        val cls = OplusCompatAdapter.findClassAny(
+            "sys.class.OplusAppStartupManager",
+            classLoader,
+            "com.android.server.am.OplusAppStartupManager",
+        ) ?: return
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.startup.allowNotifSync",
+            cls = cls,
+            nameCandidates = listOf("shouldPreventSendReceiver"),
+            hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive()) return
+                    val args = param.args ?: return
+                    for (arg in args) {
+                        if (arg != null && arg.toString().contains("dev.stagelab.nativehook")) {
+                            param.result = false
+                            return
+                        }
+                    }
+                }
+            },
+        )
     }
 
     /**

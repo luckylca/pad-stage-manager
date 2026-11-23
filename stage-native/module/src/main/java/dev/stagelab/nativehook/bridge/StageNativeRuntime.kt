@@ -177,6 +177,19 @@ object StageNativeRuntime {
      */
     private val pendingLaunches = ConcurrentHashMap<String, Pair<Boolean, Long>>()
     private val pendingMiniLaunches = ConcurrentHashMap<String, Long>()
+    private val tuckedFloatHandleTaskIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+
+    fun isTaskTuckedFloatHandle(taskId: Int): Boolean = tuckedFloatHandleTaskIds.contains(taskId)
+
+    fun isTuckedFloatHandleTaskInfo(taskInfo: ActivityManager.RunningTaskInfo): Boolean {
+        val extra = extractOplusExtraBundle(taskInfo)
+        if (extra != null) {
+            if (extra.getInt("flexible_state", 1) == 4) return true
+            if (extra.getInt("state", 1) == 4) return true
+            if (extra.getBoolean("is_float_handle", false)) return true
+        }
+        return false
+    }
 
     fun getMemorizedGeometry(taskId: Int, packageName: String): SavedGeometry? =
         taskGeometryMemory[taskId] ?: pkgGeometryMemory[packageName]
@@ -452,6 +465,22 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         val stageTask = toStageTask(taskInfo, pkg)
+        if (isTuckedFloatHandleTaskInfo(taskInfo)) {
+            tuckedFloatHandleTaskIds.add(taskInfo.taskId)
+        } else if (stageTask.isVisible && isTaskFocused(taskInfo)) {
+            val raw = extractBounds(taskInfo)
+            val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
+            val sw = dm?.widthPixels ?: 2520
+            val offEdge = !raw.isEmpty && ((raw.left >= (sw * 0.72f).toInt() && raw.right > sw + 80) ||
+                (raw.right <= (sw * 0.28f).toInt() && raw.left < -80))
+            if (!offEdge) {
+                tuckedFloatHandleTaskIds.remove(taskInfo.taskId)
+                val sc = extractFlexibleScale(taskInfo)
+                if (!stageTask.bounds.isEmpty) {
+                    taskGeometryMemory[taskInfo.taskId] = SavedGeometry(stageTask.bounds, sc, userCustomized = true)
+                }
+            }
+        }
 
         // Safety net: if a task parked off-screen for live preview regains focus natively,
         // immediately restore its SurfaceControl leash to its real on-screen origin!

@@ -113,6 +113,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         StageNativeRuntime.markProgrammaticTransition(1_200L)
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
+            val visibleIncoming = orderedShow.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
+            val visibleOutgoing = tasksToPark.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
             val liveMode = StageNativeRuntime.livePreviewEnabled
 
             val executeParkOutgoing = {
@@ -122,14 +124,14 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 var wctOps = 0
                 val fallbackPark = mutableListOf<StageTask>()
 
-                for (task in tasksToPark) {
+                for (task in visibleOutgoing) {
                     val token = resolveTaskToken(organizer, task.taskId)
                     val leash = StageNativeRuntime.getTaskLeash(task.taskId)
                     // Mini floating windows MUST be parked via setHidden(true), not offscreen leash move,
                     // because ColorOS's adjustMiniFinishRectIfOffScreen pulls offscreen mini-windows back on-screen!
                     if (liveMode && !task.isMiniFloating && token != null && leash != null && leash.isValid && wctPark != null) {
-                        val b = resolveLiveOrFallbackBounds(organizer, task)
-                        offscreenParkedOrigins[task.taskId] = b.left.toFloat() to b.top.toFloat()
+                        val rawOrigin = resolveRawLeashOrigin(organizer, task)
+                        offscreenParkedOrigins[task.taskId] = rawOrigin
                         scTx.setPosition(leash, -6000f, 0f)
                         scOps++
                         XposedHelpers.callMethod(wctPark, "reorder", token, false)
@@ -148,7 +150,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                     runCatching { applyTransaction(organizer, wctPark) }
                 }
                 for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
-                HookGuard.info("BRIDGE.SWITCH_PARK live=$liveMode park=${tasksToPark.map { it.taskId }}")
+                HookGuard.info("BRIDGE.SWITCH_PARK live=$liveMode park=${visibleOutgoing.map { it.taskId }}")
             }
 
             val executeShowIncoming = {
@@ -158,7 +160,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 var wctOps = 0
                 val fallbackShow = mutableListOf<StageTask>()
 
-                for (task in orderedShow) {
+                for (task in visibleIncoming) {
                     val token = resolveTaskToken(organizer, task.taskId)
                     val leash = StageNativeRuntime.getTaskLeash(task.taskId)
                     if (token != null && wctShow != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
@@ -181,16 +183,19 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 if (scOps > 0) runCatching { scTx.apply() }
                 scTx.close()
                 for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
-                HookGuard.info("BRIDGE.SWITCH_SHOW live=$liveMode show=${orderedShow.map { it.taskId }}")
+                HookGuard.info(
+                    "BRIDGE.SWITCH_SHOW live=$liveMode show=${visibleIncoming.map { it.taskId }} " +
+                        "skippedTucked=${orderedShow.map { it.taskId } - visibleIncoming.map { it.taskId }.toSet()}",
+                )
             }
 
             // Two-phase Magic Move: Phase 1 parks outgoing right after frame 0;
             // Phase 2 reveals incoming ONLY when the gliding card lands (zero early static pop-in!).
             val ctx = appContext()
-            if (ctx != null) {
+            if (ctx != null && (visibleOutgoing.isNotEmpty() || visibleIncoming.isNotEmpty())) {
                 StageNativeRuntime.markMagicAnimationBusy(460L)
-                val outPairs = tasksToPark.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
-                val inPairs = orderedShow.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                val outPairs = visibleOutgoing.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                val inPairs = visibleIncoming.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
                 StageMagicTransitionOverlay.playStageSwitch(
                     context = ctx,
                     outgoingTasks = outPairs,
@@ -372,20 +377,72 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         }
     }
 
+    /**
+     * Detects whether [taskId] is currently tucked to the screen edge as a ColorOS `FloatHandle`
+     * (`state == 4` or parked past the screen edge), so Stage switching NEVER forcibly un-hides
+     * a tucked window halfway off the screen or launches a phantom Magic Move card for it.
+     */
+    private fun isTaskTuckedAsFloatHandle(organizer: Any, taskId: Int): Boolean {
+        if (StageNativeRuntime.isTaskTuckedFloatHandle(taskId)) return true
+        val info = runCatching {
+            XposedHelpers.callMethod(organizer, "getRunningTaskInfo", taskId) as? ActivityManager.RunningTaskInfo
+        }.getOrNull() ?: return false
+        if (StageNativeRuntime.isTuckedFloatHandleTaskInfo(info)) return true
+        val raw = StageNativeRuntime.extractBounds(info)
+        if (raw.isEmpty) return false
+        val dm = appContext()?.resources?.displayMetrics
+        val sw = dm?.widthPixels ?: 2520
+        val tuckedRight = raw.left >= (sw * 0.72f).toInt() && raw.right > sw + 80
+        val tuckedLeft = raw.right <= (sw * 0.28f).toInt() && raw.left < -80
+        return tuckedRight || tuckedLeft
+    }
+
+    private fun resolveRawLeashOrigin(organizer: Any, task: StageTask): Pair<Float, Float> {
+        val raw = runCatching {
+            val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", task.taskId)
+                as? ActivityManager.RunningTaskInfo ?: return@runCatching null
+            val b = StageNativeRuntime.extractBounds(info)
+            if (!b.isEmpty) b.left.toFloat() to b.top.toFloat() else null
+        }.getOrNull()
+        if (raw != null) return raw
+        val fb = resolveLiveOrFallbackBounds(organizer, task)
+        return fb.left.toFloat() to fb.top.toFloat()
+    }
+
     private fun resolveLiveOrFallbackBounds(organizer: Any, task: StageTask): WindowBounds {
+        val dm = appContext()?.resources?.displayMetrics
+        val sw = dm?.widthPixels ?: 2520
+        val sh = dm?.heightPixels ?: 1680
         val live = runCatching {
             val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", task.taskId)
                 as? ActivityManager.RunningTaskInfo ?: return@runCatching null
             val vis = StageNativeRuntime.extractVisualBounds(info)
-            if (!vis.isEmpty && vis.width() > 200 && vis.height() > 200) {
-                WindowBounds(vis.left, vis.top, vis.right, vis.bottom)
+            if (!vis.isEmpty && vis.width() > 160 && vis.height() > 160) {
+                WindowBounds(
+                    left = vis.left.coerceIn(-40, sw - 160),
+                    top = vis.top.coerceIn(0, sh - 160),
+                    right = vis.right.coerceIn(160, sw + 40),
+                    bottom = vis.bottom.coerceIn(160, sh + 40),
+                )
             } else {
                 null
             }
         }.getOrNull()
-        return live
-            ?: task.bounds.takeIf { !it.isEmpty }
-            ?: computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
+        if (live != null) return live
+
+        val rawFallback = task.bounds.takeIf { !it.isEmpty }
+        if (rawFallback != null) {
+            val scale = StageNativeRuntime.getMemorizedGeometry(task.taskId, task.packageName)?.scale ?: 1.0f
+            val w = (rawFallback.width * scale).toInt().coerceAtLeast(180)
+            val h = (rawFallback.height * scale).toInt().coerceAtLeast(180)
+            return WindowBounds(
+                left = rawFallback.left.coerceIn(-40, sw - 160),
+                top = rawFallback.top.coerceIn(0, sh - 160),
+                right = (rawFallback.left + w).coerceIn(160, sw + 40),
+                bottom = (rawFallback.top + h).coerceIn(160, sh + 40),
+            )
+        }
+        return computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
     }
 
     /**

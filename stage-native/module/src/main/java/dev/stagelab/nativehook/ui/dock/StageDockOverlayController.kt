@@ -100,6 +100,7 @@ class StageDockOverlayController(
                 return@post
             }
             ensureAttached(context)
+            appSearchOverlay.prewarm(context)
             render(context, session)
         }
     }

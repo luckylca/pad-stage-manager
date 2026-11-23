@@ -48,19 +48,48 @@ class AppSearchOverlayController(
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    // Gentle spring-overshoot curve so opening from the Dock feels unmistakably silky & tactile
-    private val openInterpolator = PathInterpolator(0.22f, 1.08f, 0.34f, 1.0f)
+    private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    // Silky Apple-style spring-overshoot curve for 3D Magic Bloom from the bottom Dock
+    private val openInterpolator = PathInterpolator(0.20f, 1.08f, 0.32f, 1.0f)
     private val scrimInterpolator = PathInterpolator(0.25f, 0.1f, 0.25f, 1.0f)
-    private val closeInterpolator = PathInterpolator(0.36f, 0.0f, 0.66f, 1.0f)
+    private val closeInterpolator = PathInterpolator(0.36f, 0.0f, 0.64f, 1.0f)
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
     private var panelView: View? = null
     private var gridContainer: GridLayout? = null
     private var isDismissing = false
+    @Volatile
     private var allApps: List<LaunchableApp> = emptyList()
+    @Volatile
     private var lastAppsLoadedAtMs = 0L
+    @Volatile
+    private var isLoadingApps = false
 
     val isShowing: Boolean get() = rootView != null
+
+    /**
+     * Pre-warms the launchable app list & icons off the main thread so opening App Search
+     * is 0ms instantaneous and NEVER blocks closing or animation interruption!
+     */
+    fun prewarm(context: Context) {
+        val now = System.currentTimeMillis()
+        if (isLoadingApps || (allApps.isNotEmpty() && now - lastAppsLoadedAtMs <= 180_000L)) return
+        isLoadingApps = true
+        val appCtx = context.applicationContext
+        bgExecutor.execute {
+            val loaded = runCatching { loadLaunchableApps(appCtx) }.getOrDefault(emptyList())
+            if (loaded.isNotEmpty()) {
+                allApps = loaded
+                lastAppsLoadedAtMs = System.currentTimeMillis()
+                mainHandler.post {
+                    if (isShowing && !isDismissing) {
+                        populateGrid(appCtx, "")
+                    }
+                }
+            }
+            isLoadingApps = false
+        }
+    }
 
     fun toggle(context: Context) {
         mainHandler.post {
@@ -73,7 +102,7 @@ class AppSearchOverlayController(
     }
 
     /**
-     * Interrupts an in-flight close animation on the exact same frame and springs back open!
+     * Interrupts an in-flight close animation on the exact same frame and 3D-springs back open!
      */
     private fun reopenInPlace() {
         val v = rootView ?: return
@@ -92,7 +121,8 @@ class AppSearchOverlayController(
             .scaleX(1f)
             .scaleY(1f)
             .translationY(0f)
-            .setDuration(320L)
+            .rotationX(0f)
+            .setDuration(340L)
             .setInterpolator(openInterpolator)
             .start()
     }
@@ -107,11 +137,8 @@ class AppSearchOverlayController(
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
             windowManager = wm
 
-            val now = System.currentTimeMillis()
-            if (allApps.isEmpty() || now - lastAppsLoadedAtMs > 30_000L) {
-                allApps = loadLaunchableApps(context)
-                lastAppsLoadedAtMs = now
-            }
+            // Refresh app list asynchronously off-thread — NEVER block the main thread on open!
+            prewarm(context)
 
             val scrim = FrameLayout(context).apply {
                 setBackgroundColor(Color.argb(115, 16, 14, 24))
@@ -240,12 +267,15 @@ class AppSearchOverlayController(
                 title = "StageLabAppSearch"
             }
 
-            // Prepare smooth iPadOS spring-bloom open animation rising from the Dock
+            // Prepare Apple-style 3D Magic Bloom open animation rising directly from the bottom Dock
+            val dockRisePx = (dm.heightPixels * 0.34f).coerceIn(dp(context, 180).toFloat(), dp(context, 420).toFloat())
             scrim.alpha = 0f
+            panel.cameraDistance = 6800f * dm.density
             panel.alpha = 0f
-            panel.scaleX = 0.72f
-            panel.scaleY = 0.72f
-            panel.translationY = dp(context, 120).toFloat()
+            panel.scaleX = 0.24f
+            panel.scaleY = 0.18f
+            panel.translationY = dockRisePx
+            panel.rotationX = 22f
 
             runCatching {
                 wm.addView(scrim, lp)
@@ -253,14 +283,15 @@ class AppSearchOverlayController(
                 panelView = panel
                 isDismissing = false
 
-                // Wait for layout + 58-icon grid upload BEFORE frame 0 of the animation starts!
                 scrim.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
                     override fun onPreDraw(): Boolean {
                         scrim.viewTreeObserver.removeOnPreDrawListener(this)
                         if (rootView !== scrim || isDismissing) return true
+                        panel.pivotX = panel.width * 0.5f
+                        panel.pivotY = panel.height.toFloat()
                         scrim.animate()
                             .alpha(1f)
-                            .setDuration(260L)
+                            .setDuration(240L)
                             .setInterpolator(scrimInterpolator)
                             .start()
                         panel.animate()
@@ -269,14 +300,15 @@ class AppSearchOverlayController(
                             .scaleX(1f)
                             .scaleY(1f)
                             .translationY(0f)
-                            .setDuration(380L)
+                            .rotationX(0f)
+                            .setDuration(360L)
                             .setInterpolator(openInterpolator)
                             .start()
                         return true
                     }
                 })
 
-                HookGuard.info("APP_SEARCH opened (${allApps.size} apps)")
+                HookGuard.info("APP_SEARCH opened (${allApps.size} cached apps)")
             }.onFailure {
                 HookGuard.warn("APP_SEARCH failed to open", it)
             }
@@ -294,21 +326,32 @@ class AppSearchOverlayController(
             v.animate().cancel()
             p?.animate()?.cancel()
 
-            p?.animate()
-                ?.withLayer()
-                ?.alpha(0f)
-                ?.scaleX(0.78f)
-                ?.scaleY(0.78f)
-                ?.translationY(dp(v.context, 90).toFloat())
-                ?.setDuration(240L)
-                ?.setInterpolator(closeInterpolator)
-                ?.start()
+            val dm = v.context.resources.displayMetrics
+            val dockDropPx = (dm.heightPixels * 0.34f).coerceIn(dp(v.context, 180).toFloat(), dp(v.context, 420).toFloat())
+
+            p?.let { panel ->
+                if (panel.width > 0 && panel.height > 0) {
+                    panel.pivotX = panel.width * 0.5f
+                    panel.pivotY = panel.height.toFloat()
+                }
+                panel.animate()
+                    .withLayer()
+                    .alpha(0f)
+                    .scaleX(0.20f)
+                    .scaleY(0.16f)
+                    .translationY(dockDropPx)
+                    .rotationX(22f)
+                    .setDuration(260L)
+                    .setInterpolator(closeInterpolator)
+                    .start()
+            }
 
             v.animate()
                 .alpha(0f)
-                .setDuration(240L)
+                .setDuration(260L)
                 .setInterpolator(closeInterpolator)
                 .withEndAction {
+                    if (!isDismissing) return@withEndAction
                     runCatching { wm.removeViewImmediate(v) }
                     if (rootView === v) {
                         rootView = null

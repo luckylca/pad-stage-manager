@@ -277,9 +277,20 @@ object StageNativeRuntime {
                     }
                     Intent.ACTION_USER_PRESENT -> {
                         isDeviceLocked = false
-                        // Reset sync cache on unlock so standalone notification is always posted after boot/unlock!
+                        // Reset sync cache on unlock and schedule a 2.5s confirmation sync so
+                        // ColorOS boot-time broadcast throttling can never drop the exit notification!
                         lastSyncedAppEnabled = null
+                        lastSyncedSysEnabled = null
                         updateStripUi(registry.snapshot())
+                        mainHandler.postDelayed({
+                            if (!isDeviceLocked && stageManagerEnabled) {
+                                val c = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+                                if (c != null) {
+                                    lastSyncedAppEnabled = null
+                                    syncAppState(c, true)
+                                }
+                            }
+                        }, 2_500L)
                         HookGuard.info("LIFECYCLE unlocked -> Recent Strip & standalone notification restored")
                     }
                     Intent.ACTION_CONFIGURATION_CHANGED -> {
@@ -373,6 +384,8 @@ object StageNativeRuntime {
             }
             "enable_module" -> {
                 stageManagerEnabled = true
+                lastSyncedAppEnabled = null
+                lastSyncedSysEnabled = null
                 syncFromLiveOrganizer()
             }
             "sync_live" -> syncFromLiveOrganizer()

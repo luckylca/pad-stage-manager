@@ -39,10 +39,17 @@ class NativeTaskSnapshotLoader {
 
     private val bitmapCache = LruCache<Int, Bitmap>(16)
 
-    fun loadPreview(context: Context, taskId: Int, packageName: String, forceRefresh: Boolean = false): TaskPreviewResult {
+    fun loadPreview(
+        context: Context,
+        taskId: Int,
+        packageName: String,
+        forceRefresh: Boolean = false,
+        captureLiveFrame: Boolean = false,
+        highResolution: Boolean = false,
+    ): TaskPreviewResult {
         val icon = runCatching { context.packageManager.getApplicationIcon(packageName) }.getOrNull()
 
-        if (!forceRefresh) {
+        if (!forceRefresh && !captureLiveFrame) {
             bitmapCache.get(taskId)?.let { cached ->
                 if (!cached.isRecycled) {
                     return TaskPreviewResult(taskId, PreviewMode.NATIVE_TASK_SNAPSHOT, cached, icon)
@@ -50,7 +57,11 @@ class NativeTaskSnapshotLoader {
             }
         }
 
-        val snapshotResult = fetchNativeTaskSnapshot(taskId)
+        val snapshotResult = fetchNativeTaskSnapshot(
+            taskId = taskId,
+            captureLiveFrame = captureLiveFrame,
+            highResolution = highResolution,
+        )
         if (snapshotResult != null) {
             bitmapCache.put(taskId, snapshotResult)
             return TaskPreviewResult(taskId, PreviewMode.NATIVE_TASK_SNAPSHOT, snapshotResult, icon)
@@ -67,11 +78,15 @@ class NativeTaskSnapshotLoader {
         bitmapCache.evictAll()
     }
 
-    private fun fetchNativeTaskSnapshot(taskId: Int): Bitmap? {
+    private fun fetchNativeTaskSnapshot(
+        taskId: Int,
+        captureLiveFrame: Boolean,
+        highResolution: Boolean,
+    ): Bitmap? {
         return runCatching {
             // Android 17 (API 37) verified API: android.window.TaskSnapshotManager
-            val snapshot = fetchViaTaskSnapshotManager(taskId)
-                ?: fetchViaActivityTaskManagerFallback(taskId)
+            val snapshot = fetchViaTaskSnapshotManager(taskId, captureLiveFrame, highResolution)
+                ?: fetchViaActivityTaskManagerFallback(taskId, captureLiveFrame, highResolution)
                 ?: return null
 
             // Respect FLAG_SECURE (TaskSnapshot.isRealSnapshot == false or buffer == null)
@@ -98,16 +113,30 @@ class NativeTaskSnapshotLoader {
         }.getOrNull()
     }
 
-    private fun fetchViaTaskSnapshotManager(taskId: Int): Any? {
+    private fun fetchViaTaskSnapshotManager(
+        taskId: Int,
+        captureLiveFrame: Boolean,
+        highResolution: Boolean,
+    ): Any? {
         val mgr = runCatching {
             val mgrCls = Class.forName("android.window.TaskSnapshotManager")
             XposedHelpers.callStaticMethod(mgrCls, "getInstance")
         }.getOrNull() ?: return null
 
+        // For an active visible outgoing task, capture a BRAND-NEW live frame via takeTaskSnapshot
+        // (and update WMS cache!) so the Magic Move mask NEVER shows a stale old screenshot!
         // Android 17 (API 37): RESOLUTION_HIGH = 1, RESOLUTION_LOW = 2 (0 is invalid and throws!)
-        val snap = runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 2) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, 1) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        val primaryRes = if (highResolution) 1 else 2
+        val secondaryRes = if (highResolution) 2 else 1
+        val snap = if (captureLiveFrame) {
+            runCatching { XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, primaryRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, secondaryRes) }.getOrNull()
+        } else {
+            runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, primaryRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(mgr, "getTaskSnapshot", taskId, secondaryRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(mgr, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        }
         if (snap != null) {
             dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
                 "ui.snapshot",
@@ -118,18 +147,29 @@ class NativeTaskSnapshotLoader {
         return snap
     }
 
-    private fun fetchViaActivityTaskManagerFallback(taskId: Int): Any? {
+    private fun fetchViaActivityTaskManagerFallback(
+        taskId: Int,
+        captureLiveFrame: Boolean,
+        highResolution: Boolean,
+    ): Any? {
         val service = runCatching {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             XposedHelpers.callStaticMethod(atmClass, "getService")
         }.getOrNull() ?: return null
 
         // Android 14 / 15 / 16 multi-signature fallback chain
-        val snap = runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, true) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, false) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, true, true) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, false) }.getOrNull()
-            ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        val lowRes = !highResolution
+        val snap = if (captureLiveFrame) {
+            runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, true) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, lowRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, !lowRes) }.getOrNull()
+        } else {
+            runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, lowRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, !lowRes) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "getTaskSnapshot", taskId, lowRes, true) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, false) }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(service, "takeTaskSnapshot", taskId, true) }.getOrNull()
+        }
         if (snap != null) {
             dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
                 "ui.snapshot",

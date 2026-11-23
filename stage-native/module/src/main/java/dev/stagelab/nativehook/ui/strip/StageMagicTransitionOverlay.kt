@@ -116,11 +116,21 @@ object StageMagicTransitionOverlay {
             return
         }
 
-        // Fresh-snapshot path: force-refresh both outgoing (currently live on screen) and incoming
-        // snapshots off-thread (~6ms) so the Magic Move mask matches the latest real content 1:1!
+        // Fresh-snapshot path:
+        // - Outgoing (currently live on screen): captureLiveFrame = true (takeTaskSnapshot) + highResolution = true
+        //   so SurfaceFlinger captures the EXACT current pixels AND updates WMS's cache for next switch!
+        // - Incoming (parked in Recent): highResolution = true (RESOLUTION_HIGH = 1) so the gliding card
+        //   is crisp 1:1 full resolution and NEVER flashes from blurry low-res to sharp when landing!
         bgExecutor.execute {
             val outPrepared = validOut.map { (t, b) ->
-                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+                val p = snapshotLoader.loadPreview(
+                    context = context,
+                    taskId = t.taskId,
+                    packageName = t.packageName,
+                    forceRefresh = true,
+                    captureLiveFrame = true,
+                    highResolution = true,
+                )
                 val fresh = if (p.bitmap != null) {
                     CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
                 } else {
@@ -129,7 +139,14 @@ object StageMagicTransitionOverlay {
                 PreparedCard(t, b, fresh)
             }
             val inPrepared = validIn.map { (t, b) ->
-                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+                val p = snapshotLoader.loadPreview(
+                    context = context,
+                    taskId = t.taskId,
+                    packageName = t.packageName,
+                    forceRefresh = true,
+                    captureLiveFrame = false,
+                    highResolution = true,
+                )
                 val fresh = if (p.bitmap != null) {
                     CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
                 } else {
@@ -421,7 +438,7 @@ object StageMagicTransitionOverlay {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
             if (item.preview.bitmap != null) {
-                scaleType = ImageView.ScaleType.CENTER_CROP
+                scaleType = ImageView.ScaleType.FIT_XY
                 setImageBitmap(item.preview.bitmap)
             } else {
                 scaleType = ImageView.ScaleType.CENTER_INSIDE

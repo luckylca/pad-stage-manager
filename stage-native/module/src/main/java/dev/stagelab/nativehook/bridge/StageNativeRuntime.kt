@@ -9,9 +9,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.SurfaceControl
 import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.DockIntegrationController
@@ -21,6 +23,7 @@ import dev.stagelab.nativecore.StageSession
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.StageTransitionController
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.ui.StageModeNotificationHelper
 import dev.stagelab.nativehook.ui.dock.StageDockOverlayController
 import dev.stagelab.nativehook.ui.strip.RecentStripOverlayController
@@ -42,14 +45,16 @@ object StageNativeRuntime {
     val recentController = RecentStageController(transitionController)
     val dockController = DockIntegrationController(transitionController, bridge)
 
-    val stripOverlay = RecentStripOverlayController(
+    val stripOverlay: RecentStripOverlayController = RecentStripOverlayController(
         onStageClicked = { stageId ->
+            dockOverlay.dismissAppSearchIfShowing()
             val session = recentController.onStageThumbnailClicked(stageId)
             // Update strip click bindings IMMEDIATELY (using cached snapshots) so rapid consecutive
             // taps on Slot 1 switch back and forth instantaneously with zero dead-time!
             updateStripUiImmediate(session)
         },
         onStageDraggedToCenter = { stageId ->
+            dockOverlay.dismissAppSearchIfShowing()
             val session = recentController.onStageTaskDraggedToCenter(stageId)
             maybeScheduleTwoWindowSideBySide(session)
             updateStripUi(session)
@@ -60,7 +65,7 @@ object StageNativeRuntime {
         },
     )
 
-    val dockOverlay = StageDockOverlayController(
+    val dockOverlay: StageDockOverlayController = StageDockOverlayController(
         onDockAppClicked = { pkg ->
             val existing = registry.findStageByPackage(pkg)
             if (existing == null) {
@@ -92,6 +97,10 @@ object StageNativeRuntime {
         },
         findRecentStageAtPoint = { rawX, rawY -> stripOverlay.findStageIdAtScreenPoint(rawX, rawY) },
         onHoverRecentStage = { stageId -> stripOverlay.highlightHoverStage(stageId) },
+        onRecentStageClickedFromSearch = { stageId ->
+            val session = recentController.onStageThumbnailClicked(stageId)
+            updateStripUiImmediate(session)
+        },
         onBottomSwipeReveal = {
             dockController.onBottomSwipeReveal()
             updateStripUi(registry.snapshot())
@@ -146,8 +155,9 @@ object StageNativeRuntime {
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val taskGeometryMemory = ConcurrentHashMap<Int, SavedGeometry>()
-    private val pkgGeometryMemory = ConcurrentHashMap<String, SavedGeometry>()
+    private val taskGeometryMemory = ConcurrentHashMap<Pair<Boolean, Int>, SavedGeometry>()
+    private val pkgGeometryMemory = ConcurrentHashMap<Pair<Boolean, String>, SavedGeometry>()
+    private val stageOrientedLandscape = ConcurrentHashMap<String, Boolean>()
     private val taskAppearedAtMs = ConcurrentHashMap<Int, Long>()
     private val lastPromotedAtMs = ConcurrentHashMap<Int, Long>()
     @Volatile
@@ -156,6 +166,182 @@ object StageNativeRuntime {
     private var programmaticTransitionUntilMs: Long = 0L
     @Volatile
     private var magicAnimationBusyUntilMs: Long = 0L
+    @Volatile
+    private var lastKnownDisplayKey: String = ""
+    private val displayListenerRegistered = AtomicBoolean(false)
+
+    private val relayoutActivePass1 = Runnable {
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return@Runnable
+        if (!isDeviceLocked && stageManagerEnabled) {
+            relayoutActiveStageForOrientation(ctx, passName = "pass1", onlyFixUnconverged = false)
+        }
+    }
+    private val relayoutActivePass2 = Runnable {
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return@Runnable
+        if (!isDeviceLocked && stageManagerEnabled) {
+            relayoutActiveStageForOrientation(ctx, passName = "pass2", onlyFixUnconverged = true)
+        }
+    }
+    private val relayoutActivePass3 = Runnable {
+        val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull() ?: return@Runnable
+        if (!isDeviceLocked && stageManagerEnabled) {
+            relayoutActiveStageForOrientation(ctx, passName = "pass3", onlyFixUnconverged = true)
+        }
+    }
+
+    fun isCurrentLandscape(): Boolean {
+        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
+        val sw = dm?.widthPixels ?: 2520
+        val sh = dm?.heightPixels ?: 1680
+        return sw >= sh
+    }
+
+    private fun computeLayoutTargetsForTasks(
+        tasks: List<StageTask>,
+        screenW: Int,
+        screenH: Int,
+        density: Float,
+        stripVisible: Boolean,
+    ): Map<Int, WindowBounds> {
+        val metrics = StageLayoutMetrics.compute(screenW, screenH, density, stripVisible)
+        val regular = tasks.filterNot { it.isMiniFloating }
+        val result = HashMap<Int, WindowBounds>(tasks.size)
+
+        if (regular.size == 1) {
+            result[regular[0].taskId] = metrics.mainStageBounds
+        } else if (regular.size in 2..3) {
+            val tiled = StageLayoutMetrics.computeTiledBounds(metrics, regular.size)
+            regular.forEachIndexed { idx, t ->
+                tiled.getOrNull(idx)?.let { result[t.taskId] = it }
+            }
+        } else if (regular.size >= 4) {
+            val baseCols = StageLayoutMetrics.computeTiledBounds(metrics, 2)
+            regular.forEachIndexed { idx, t ->
+                val base = baseCols[idx % baseCols.size]
+                val step = (idx / baseCols.size) * (28f * density).toInt()
+                val l = (base.left + step).coerceAtMost(base.right - (220f * density).toInt())
+                val tp = (base.top + step).coerceAtMost(base.bottom - (220f * density).toInt())
+                result[t.taskId] = WindowBounds(l, tp, base.right, base.bottom)
+            }
+        }
+
+        // Clamp mini floating windows inside the new rotated viewport so they never fall off-screen.
+        val miniTasks = tasks.filter { it.isMiniFloating }
+        for (mt in miniTasks) {
+            val b = mt.bounds
+            if (!b.isEmpty) {
+                val mw = b.width.coerceIn((180f * density).toInt(), (screenW * 0.65f).toInt())
+                val mh = b.height.coerceIn((180f * density).toInt(), (screenH * 0.65f).toInt())
+                val nl = b.left.coerceIn(0, (screenW - mw).coerceAtLeast(0))
+                val nt = b.top.coerceIn((28f * density).toInt(), (screenH - mh - (96f * density).toInt()).coerceAtLeast(0))
+                result[mt.taskId] = WindowBounds(nl, nt, nl + mw, nt + mh)
+            }
+        }
+        return result
+    }
+
+    fun computeIncomingStageOrientationOverrides(incomingTasks: List<StageTask>): Map<Int, WindowBounds> {
+        if (incomingTasks.isEmpty()) return emptyMap()
+        val first = incomingTasks.firstOrNull() ?: return emptyMap()
+        val stageId = registry.findStageIdForTask(first.taskId) ?: return emptyMap()
+        val curLand = isCurrentLandscape()
+        val recordedLand = stageOrientedLandscape[stageId]
+        if (recordedLand == null || recordedLand == curLand) return emptyMap()
+        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull() ?: return emptyMap()
+        return computeLayoutTargetsForTasks(
+            tasks = incomingTasks,
+            screenW = dm.widthPixels,
+            screenH = dm.heightPixels,
+            density = dm.density,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+    }
+
+    fun markIncomingStageOriented(incomingTasks: List<StageTask>) {
+        val first = incomingTasks.firstOrNull() ?: return
+        val stageId = registry.findStageIdForTask(first.taskId) ?: return
+        stageOrientedLandscape[stageId] = isCurrentLandscape()
+    }
+
+    private fun relayoutActiveStageForOrientation(
+        context: Context,
+        passName: String,
+        onlyFixUnconverged: Boolean = false,
+    ) {
+        val session = registry.snapshot()
+        val active = session.activeStage ?: return
+        val dm = context.resources.displayMetrics
+        val curLand = dm.widthPixels >= dm.heightPixels
+        stageOrientedLandscape[active.stageId] = curLand
+
+        val visibleTasks = active.tasks.filterNot { isTaskTuckedFloatHandle(it.taskId) }
+        if (visibleTasks.isEmpty()) return
+        val targets = computeLayoutTargetsForTasks(
+            tasks = visibleTasks,
+            screenW = dm.widthPixels,
+            screenH = dm.heightPixels,
+            density = dm.density,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+        val liveMap = if (onlyFixUnconverged) {
+            bridge.queryLiveRunningTasks().associateBy { it.taskId }
+        } else {
+            emptyMap()
+        }
+        markProgrammaticTransition(1_000L)
+        var adjusted = 0
+        for (t in visibleTasks) {
+            val targetB = targets[t.taskId] ?: continue
+            if (onlyFixUnconverged) {
+                val info = liveMap[t.taskId]
+                if (info != null) {
+                    val liveB = extractBounds(info)
+                    val liveScale = extractFlexibleScale(info)
+                    val boundsOk = kotlin.math.abs(liveB.left - targetB.left) <= 16 &&
+                        kotlin.math.abs(liveB.top - targetB.top) <= 16 &&
+                        kotlin.math.abs(liveB.right - targetB.right) <= 16 &&
+                        kotlin.math.abs(liveB.bottom - targetB.bottom) <= 16
+                    if (boundsOk && (t.isMiniFloating || liveScale >= 0.98f)) {
+                        continue
+                    }
+                }
+            }
+            if (!t.isMiniFloating) {
+                taskGeometryMemory[curLand to t.taskId] = SavedGeometry(targetB, 1.0f, userCustomized = false)
+                bridge.adjustFlexibleTaskFrame(t.taskId, targetB, 1.0f)
+                adjusted++
+            } else if (targetB != t.bounds) {
+                bridge.adjustFlexibleTaskFrame(t.taskId, targetB, 1.0f)
+                adjusted++
+            }
+        }
+        if (!onlyFixUnconverged || adjusted > 0) {
+            HookGuard.info(
+                "ROTATION.RELAYOUT($passName) stage=${active.stageId} size=${dm.widthPixels}x${dm.heightPixels} " +
+                    "land=$curLand adjusted=$adjusted tasks=${visibleTasks.map { it.taskId }}",
+            )
+        }
+    }
+
+    private fun handleDisplayGeometryChanged(context: Context) {
+        val dm = context.resources.displayMetrics
+        val key = "${dm.widthPixels}x${dm.heightPixels}"
+        val sizeChanged = key != lastKnownDisplayKey
+        lastKnownDisplayKey = key
+
+        stripOverlay.onDisplayConfigChanged(context)
+        dockOverlay.onDisplayConfigChanged(context)
+        updateStripUi(registry.snapshot())
+
+        if (sizeChanged && stageManagerEnabled && !isDeviceLocked) {
+            mainHandler.removeCallbacks(relayoutActivePass1)
+            mainHandler.removeCallbacks(relayoutActivePass2)
+            mainHandler.removeCallbacks(relayoutActivePass3)
+            mainHandler.postDelayed(relayoutActivePass1, 260L)
+            mainHandler.postDelayed(relayoutActivePass2, 780L)
+            mainHandler.postDelayed(relayoutActivePass3, 1_250L)
+        }
+    }
 
     fun isMagicAnimationBusy(): Boolean = System.currentTimeMillis() < magicAnimationBusyUntilMs
 
@@ -215,8 +401,10 @@ object StageNativeRuntime {
         return false
     }
 
-    fun getMemorizedGeometry(taskId: Int, packageName: String): SavedGeometry? =
-        taskGeometryMemory[taskId] ?: pkgGeometryMemory[packageName]
+    fun getMemorizedGeometry(taskId: Int, packageName: String): SavedGeometry? {
+        val land = isCurrentLandscape()
+        return taskGeometryMemory[land to taskId] ?: pkgGeometryMemory[land to packageName]
+    }
 
     fun attachOrganizerIfNeeded(organizer: Any) {
         bridge.attachShellTaskOrganizer(organizer)
@@ -236,11 +424,38 @@ object StageNativeRuntime {
     }
 
     private fun ensureCommandReceiverRegistered() {
-        if (!receiverRegistered.compareAndSet(false, true)) return
         val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+        if (ctx != null && displayListenerRegistered.compareAndSet(false, true)) {
+            runCatching {
+                val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+                dm?.registerDisplayListener(
+                    object : DisplayManager.DisplayListener {
+                        override fun onDisplayAdded(displayId: Int) = Unit
+                        override fun onDisplayRemoved(displayId: Int) = Unit
+                        override fun onDisplayChanged(displayId: Int) {
+                            if (displayId != Display.DEFAULT_DISPLAY || isDeviceLocked) return
+                            val m = ctx.resources.displayMetrics
+                            val key = "${m.widthPixels}x${m.heightPixels}"
+                            if (key != lastKnownDisplayKey) {
+                                HookGuard.info("LIFECYCLE DisplayListener size changed $lastKnownDisplayKey -> $key")
+                                handleDisplayGeometryChanged(ctx)
+                            }
+                        }
+                    },
+                    mainHandler,
+                )
+            }.onFailure {
+                displayListenerRegistered.set(false)
+            }
+        }
+        if (!receiverRegistered.compareAndSet(false, true)) return
         if (ctx == null) {
             receiverRegistered.set(false)
             return
+        }
+        val m = ctx.resources.displayMetrics
+        if (lastKnownDisplayKey.isEmpty()) {
+            lastKnownDisplayKey = "${m.widthPixels}x${m.heightPixels}"
         }
         try {
             val filter = IntentFilter().apply {
@@ -295,8 +510,11 @@ object StageNativeRuntime {
                     }
                     Intent.ACTION_CONFIGURATION_CHANGED -> {
                         if (!isDeviceLocked) {
-                            updateStripUi(registry.snapshot())
-                            HookGuard.info("LIFECYCLE config/rotation changed -> Recent Strip re-laid out")
+                            val c = context ?: AndroidAppHelper.currentApplication()?.applicationContext
+                            if (c != null) {
+                                handleDisplayGeometryChanged(c)
+                            }
+                            HookGuard.info("LIFECYCLE config/rotation changed -> Stage, Recent Strip, Dock & AppSearch re-laid out")
                         }
                     }
                 }
@@ -341,6 +559,7 @@ object StageNativeRuntime {
         val session: StageSession = when (cmd) {
             "dump" -> registry.snapshot()
             "launch" -> {
+                dockOverlay.dismissAppSearchIfShowing()
                 if (pkg.isNotBlank()) {
                     pendingLaunches[pkg] = false to System.currentTimeMillis()
                     dockController.onDockAppClicked(pkg)
@@ -349,6 +568,7 @@ object StageNativeRuntime {
                 }
             }
             "merge" -> {
+                dockOverlay.dismissAppSearchIfShowing()
                 when {
                     taskId > 0 -> {
                         val s = transitionController.mergeExistingTaskIntoActiveStage(taskId)
@@ -369,13 +589,17 @@ object StageNativeRuntime {
                 registry.snapshot()
             }
             "switch" -> {
+                dockOverlay.dismissAppSearchIfShowing()
                 if (stageId.isNotBlank()) {
                     recentController.onStageThumbnailClicked(stageId)
                 } else {
                     registry.snapshot()
                 }
             }
-            "switch_next" -> recentController.onFourFingerSwipeNext()
+            "switch_next" -> {
+                dockOverlay.dismissAppSearchIfShowing()
+                recentController.onFourFingerSwipeNext()
+            }
             "minimize" -> {
                 if (taskId > 0) dockController.onWindowMenuMinimize(taskId) else registry.snapshot()
             }
@@ -481,6 +705,7 @@ object StageNativeRuntime {
         if (isTaskFocused(taskInfo)) {
             transitionController.onNativeTaskFocused(taskInfo.taskId)
         }
+        session.activeStageId?.let { stageOrientedLandscape[it] = isCurrentLandscape() }
 
         // Only auto-tile regular merged windows; Smart Sidebar / mini floating windows keep their
         // own floating position & scale on top of the workspace without disturbing tiled windows.
@@ -526,7 +751,12 @@ object StageNativeRuntime {
                 tuckedFloatHandleTaskIds.remove(taskInfo.taskId)
                 val sc = extractFlexibleScale(taskInfo)
                 if (!stageTask.bounds.isEmpty) {
-                    taskGeometryMemory[taskInfo.taskId] = SavedGeometry(stageTask.bounds, sc, userCustomized = true)
+                    val land = isCurrentLandscape()
+                    val fitsViewport = stageTask.bounds.right <= (dm?.widthPixels ?: 2520) + 80 &&
+                        stageTask.bounds.bottom <= (dm?.heightPixels ?: 1680) + 80
+                    if (fitsViewport) {
+                        taskGeometryMemory[land to taskInfo.taskId] = SavedGeometry(stageTask.bounds, sc, userCustomized = true)
+                    }
                 }
             }
         }
@@ -617,7 +847,8 @@ object StageNativeRuntime {
             HookGuard.info("ON_VANISHED ignored for tucked FloatHandle task=${taskInfo.taskId} pkg=$pkg")
             return
         }
-        taskGeometryMemory.remove(taskInfo.taskId)
+        taskGeometryMemory.remove(true to taskInfo.taskId)
+        taskGeometryMemory.remove(false to taskInfo.taskId)
         taskAppearedAtMs.remove(taskInfo.taskId)
         val session = transitionController.onNativeTaskVanished(taskInfo.taskId)
         logSession("ON_VANISHED(t=${taskInfo.taskId})", session)
@@ -631,7 +862,8 @@ object StageNativeRuntime {
     }
 
     fun onNativeMenuClose(taskId: Int) {
-        taskGeometryMemory.remove(taskId)
+        taskGeometryMemory.remove(true to taskId)
+        taskGeometryMemory.remove(false to taskId)
         taskAppearedAtMs.remove(taskId)
         val session = transitionController.onNativeTaskVanished(taskId)
         logSession("ON_NATIVE_MENU_CLOSE(t=$taskId)", session)
@@ -759,6 +991,7 @@ object StageNativeRuntime {
         val active = session.activeStage ?: return
         val regularTasks = active.tasks.filterNot { it.isMiniFloating }
         val count = regularTasks.size
+        stageOrientedLandscape[active.stageId] = isCurrentLandscape()
         if (count < 2) return
         if (count in 2..3) {
             val taskIds = regularTasks.map { it.taskId }
@@ -910,8 +1143,10 @@ object StageNativeRuntime {
 
     private fun toStageTask(taskInfo: ActivityManager.RunningTaskInfo, pkg: String): StageTask {
         val bounds = extractBounds(taskInfo)
+        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
+        val sw = dm?.widthPixels ?: 2520
         // Ignore off-screen parked bounds (e.g. Rect(-2520, 0 - 0, 1680)) so original on-screen bounds are preserved.
-        val validBounds = if (bounds.right > 0 && bounds.left < 2450 && bounds.width() > 0 && bounds.height() > 0) {
+        val validBounds = if (bounds.right > 0 && bounds.left < sw - 60 && bounds.width() > 0 && bounds.height() > 0) {
             WindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
         } else {
             WindowBounds.EMPTY

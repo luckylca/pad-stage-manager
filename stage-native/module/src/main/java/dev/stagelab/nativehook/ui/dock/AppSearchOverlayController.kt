@@ -3,6 +3,7 @@ package dev.stagelab.nativehook.ui.dock
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.PixelFormat
@@ -59,6 +60,8 @@ class AppSearchOverlayController(
     private val onStartAppDrag: (packageName: String, icon: Drawable, rawX: Float, rawY: Float) -> Unit = { _, _, _, _ -> },
     private val onMoveAppDrag: (packageName: String, rawX: Float, rawY: Float) -> Unit = { _, _, _ -> },
     private val onEndAppDrag: (packageName: String, rawX: Float, rawY: Float, cancelled: Boolean) -> Unit = { _, _, _, _ -> },
+    private val findRecentStageAtPoint: (rawX: Float, rawY: Float) -> String? = { _, _ -> null },
+    private val onRecentStageTapped: (stageId: String) -> Unit = {},
 ) {
     private data class LaunchableApp(
         val packageName: String,
@@ -160,7 +163,12 @@ class AppSearchOverlayController(
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
         windowManager = wm
 
-        val root = FrameLayout(context).apply {
+        val root = object : FrameLayout(context) {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                super.onConfigurationChanged(newConfig)
+                onDisplayConfigChanged(context)
+            }
+        }.apply {
             setBackgroundColor(Color.TRANSPARENT)
             clipChildren = false
             clipToPadding = false
@@ -174,8 +182,14 @@ class AppSearchOverlayController(
             setOnTouchListener { _, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
                     if (targetProgress > 0.5f) {
-                        HookGuard.info("APP_SEARCH scrim ACTION_DOWN interrupt -> close (pos=${"%.2f".format(springPos)})")
+                        val hitStageId = findRecentStageAtPoint(event.rawX, event.rawY)
+                        HookGuard.info(
+                            "APP_SEARCH scrim ACTION_DOWN interrupt -> close (pos=${"%.2f".format(springPos)} hitStage=$hitStageId)",
+                        )
                         dismiss()
+                        if (hitStageId != null) {
+                            mainHandler.post { onRecentStageTapped(hitStageId) }
+                        }
                     }
                     true
                 } else {
@@ -294,10 +308,9 @@ class AppSearchOverlayController(
         val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         lastLayoutKey = "${dm.widthPixels}x${dm.heightPixels}"
         grid.columnCount = metrics.searchGridColumns
-        val scrollHeight = (dm.heightPixels * 0.42f).toInt().coerceIn(dp(context, 240), dp(context, 420))
         panel.addView(
             scroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, scrollHeight).apply {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, metrics.searchScrollHeightPx).apply {
                 topMargin = dp(context, 8)
             },
         )
@@ -451,6 +464,20 @@ class AppSearchOverlayController(
         } else {
             applySpringTransform(springPos)
             ensureSpringRunning()
+        }
+    }
+
+    fun dismissIfShowing(): Boolean {
+        if (!isShowing) return false
+        dismiss()
+        return true
+    }
+
+    fun onDisplayConfigChanged(context: Context) {
+        mainHandler.post {
+            if (!isAttached) return@post
+            anchorRef?.get()?.let { updateAnchorView(it) }
+            syncResponsiveLayoutIfNeeded(context)
         }
     }
 
@@ -620,15 +647,30 @@ class AppSearchOverlayController(
             width = metrics.searchPanelWidthPx
         }
         panel.cameraDistance = 6800f * dm.density
-        grid.columnCount = metrics.searchGridColumns
-        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 280))
-        val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 78))
-        for (cell in cachedCells) {
-            (cell.view.layoutParams as? GridLayout.LayoutParams)?.width = itemWidth
-        }
-        val scrollH = (dm.heightPixels * 0.42f).toInt().coerceIn(dp(context, 240), dp(context, 420))
         scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
-            height = scrollH
+            height = metrics.searchScrollHeightPx
+        }
+
+        // Rebuild GridLayout columns cleanly with fresh UNDEFINED row/col specs so cached cells
+        // NEVER collide or carry stale GridLayout.Spec indices across portrait <-> landscape switches.
+        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 280))
+        val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 72))
+        grid.removeAllViews()
+        grid.columnCount = metrics.searchGridColumns
+        for (cell in cachedCells) {
+            cell.view.layoutParams = GridLayout.LayoutParams(
+                GridLayout.spec(GridLayout.UNDEFINED),
+                GridLayout.spec(GridLayout.UNDEFINED),
+            ).apply {
+                width = itemWidth
+                height = ViewGroup.LayoutParams.WRAP_CONTENT
+            }
+        }
+        populateGrid(searchInputView?.text?.toString().orEmpty())
+        panel.post {
+            if (springPos > 0.01f) {
+                applySpringTransform(springPos)
+            }
         }
     }
 
@@ -637,7 +679,7 @@ class AppSearchOverlayController(
         val dm = context.resources.displayMetrics
         val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 280))
-        val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 78))
+        val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 72))
         val radiusPx = dp(context, 14).toFloat()
         val iconPx = dp(context, 50)
         val dragSlopPx = dp(context, 14).toFloat()
@@ -778,7 +820,15 @@ class AppSearchOverlayController(
         }
         for (cell in filtered.take(60)) {
             (cell.view.parent as? ViewGroup)?.removeView(cell.view)
-            grid.addView(cell.view)
+            val prevW = cell.view.layoutParams?.width ?: GridLayout.LayoutParams.WRAP_CONTENT
+            val lp = GridLayout.LayoutParams(
+                GridLayout.spec(GridLayout.UNDEFINED),
+                GridLayout.spec(GridLayout.UNDEFINED),
+            ).apply {
+                width = prevW
+                height = GridLayout.LayoutParams.WRAP_CONTENT
+            }
+            grid.addView(cell.view, lp)
         }
     }
 

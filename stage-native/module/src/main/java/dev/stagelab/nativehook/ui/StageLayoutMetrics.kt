@@ -29,6 +29,7 @@ object StageLayoutMetrics {
         val multiColGap3Px: Int,
         val cornerRadiusPx: Float,
         val searchPanelWidthPx: Int,
+        val searchScrollHeightPx: Int,
         val searchGridColumns: Int,
     ) {
         val mainStageBounds: WindowBounds
@@ -71,9 +72,16 @@ object StageLayoutMetrics {
         val rightPx = (safeW - sideGapPx).coerceAtLeast(leftPx + (320f * safeDensity).toInt())
         val bottomPx = (safeH - bottomReservedPx).coerceAtLeast(topPx + (320f * safeDensity).toInt())
 
-        val searchPanelWidthPx = (safeW * (if (isLandscape) 0.56f else 0.84f))
+        val searchPanelWidthPx = (safeW * (if (isLandscape) 0.56f else 0.86f))
             .toInt()
             .coerceIn((360f * safeDensity).toInt(), (740f * safeDensity).toInt())
+        val searchScrollHeightPx = if (isLandscape) {
+            (safeH - bottomReservedPx - (165f * safeDensity).toInt())
+                .coerceIn((180f * safeDensity).toInt(), (330f * safeDensity).toInt())
+        } else {
+            (safeH * 0.39f).toInt()
+                .coerceIn((260f * safeDensity).toInt(), (450f * safeDensity).toInt())
+        }
         val searchGridColumns = if (isLandscape) {
             (shortEdgeDp / 106f).toInt().coerceIn(5, 8)
         } else {
@@ -95,9 +103,40 @@ object StageLayoutMetrics {
             multiColGap3Px = (8f * safeDensity).toInt(),
             cornerRadiusPx = 26f * safeDensity,
             searchPanelWidthPx = searchPanelWidthPx,
+            searchScrollHeightPx = searchScrollHeightPx,
             searchGridColumns = searchGridColumns,
         )
     }
+
+    /**
+     * Computes clean, non-overlapping tiled window rects inside [metrics.mainStageRect]:
+     * - Landscape: equal side-by-side columns (wide tablet canvas).
+     * - Portrait: full-width stacked rows so windows NEVER squish into narrow vertical slivers.
+     */
+    fun computeTiledRects(metrics: Metrics, count: Int): List<Rect> {
+        val stage = metrics.mainStageRect
+        val n = count.coerceIn(1, 3)
+        if (n == 1) return listOf(Rect(stage))
+        val gap = if (n == 2) metrics.multiColGap2Px else metrics.multiColGap3Px
+        return if (metrics.isLandscape) {
+            val colW = ((stage.width() - gap * (n - 1)) / n).coerceAtLeast((140f * metrics.density).toInt())
+            List(n) { i ->
+                val l = stage.left + i * (colW + gap)
+                val r = if (i == n - 1) stage.right else l + colW
+                Rect(l, stage.top, r, stage.bottom)
+            }
+        } else {
+            val rowH = ((stage.height() - gap * (n - 1)) / n).coerceAtLeast((160f * metrics.density).toInt())
+            List(n) { i ->
+                val t = stage.top + i * (rowH + gap)
+                val b = if (i == n - 1) stage.bottom else t + rowH
+                Rect(stage.left, t, stage.right, b)
+            }
+        }
+    }
+
+    fun computeTiledBounds(metrics: Metrics, count: Int): List<WindowBounds> =
+        computeTiledRects(metrics, count).map { WindowBounds(it.left, it.top, it.right, it.bottom) }
 
     /**
      * Fallback density estimation when called inside `system_server` without a DisplayMetrics instance.

@@ -2,6 +2,7 @@ package dev.stagelab.nativehook.ui.dock
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.PixelFormat
@@ -41,13 +42,20 @@ class StageDockOverlayController(
     private val onDockAppDroppedOnStage: (packageName: String, stageId: String) -> Unit = { pkg, _ -> onDockAppDraggedToCenter(pkg) },
     private val findRecentStageAtPoint: (rawX: Float, rawY: Float) -> String? = { _, _ -> null },
     private val onHoverRecentStage: (stageId: String?) -> Unit = {},
+    private val onRecentStageClickedFromSearch: (stageId: String) -> Unit = {},
     private val onBottomSwipeReveal: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var appContextRef: Context? = null
-    private val appSearchOverlay = AppSearchOverlayController(
-        onAppSelectedLaunch = onDockAppClicked,
-        onAppSelectedMerge = onDockAppDraggedToCenter,
+    private val appSearchOverlay: AppSearchOverlayController = AppSearchOverlayController(
+        onAppSelectedLaunch = { pkg ->
+            appSearchOverlay.dismiss()
+            onDockAppClicked(pkg)
+        },
+        onAppSelectedMerge = { pkg ->
+            appSearchOverlay.dismiss()
+            onDockAppDraggedToCenter(pkg)
+        },
         onStartAppDrag = { pkg, icon, rawX, rawY ->
             appContextRef?.let { ctx -> beginUnifiedDrag(ctx, icon, rawX, rawY, sourceIsPinnedDock = false) }
         },
@@ -57,6 +65,8 @@ class StageDockOverlayController(
         onEndAppDrag = { pkg, rawX, rawY, cancelled ->
             appContextRef?.let { ctx -> finishUnifiedDragDrop(ctx, pkg, rawX, rawY, sourceIsPinnedDock = false, cancelled = cancelled) }
         },
+        findRecentStageAtPoint = findRecentStageAtPoint,
+        onRecentStageTapped = onRecentStageClickedFromSearch,
     )
 
     private var windowManager: WindowManager? = null
@@ -118,6 +128,17 @@ class StageDockOverlayController(
             ensureAttached(context)
             appSearchOverlay.prewarm(context)
             render(context, session)
+        }
+    }
+
+    fun dismissAppSearchIfShowing(): Boolean = appSearchOverlay.dismissIfShowing()
+
+    fun onDisplayConfigChanged(context: Context) {
+        mainHandler.post {
+            appSearchOverlay.onDisplayConfigChanged(context)
+            if (isAttached) {
+                render(context, lastSession)
+            }
         }
     }
 
@@ -229,7 +250,12 @@ class StageDockOverlayController(
         // strictly ABOVE StageLabAppSearch in Z-order and stays clickable to interrupt open/close!
         appSearchOverlay.ensureWindowAttached(context)
 
-        val root = FrameLayout(context).apply {
+        val root = object : FrameLayout(context) {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                super.onConfigurationChanged(newConfig)
+                onDisplayConfigChanged(context)
+            }
+        }.apply {
             clipChildren = false
             clipToPadding = false
             setBackgroundColor(Color.TRANSPARENT)
@@ -334,18 +360,55 @@ class StageDockOverlayController(
 
         capsule.removeAllViews()
         pinnedSlotViews.clear()
-        val recentsToShow = recentPackages.filterNot { pinnedPackages.contains(it) }.take(MAX_RECENT_ICONS)
-        val iconGapPx = if (pinnedPackages.size + recentsToShow.size >= 9) dp(context, 6) else dp(context, 10)
+        val allCandidateRecents = recentPackages.filterNot { pinnedPackages.contains(it) }
+        val screenW = context.resources.displayMetrics.widthPixels
+        val maxCapsuleW = (screenW - dp(context, 36)).coerceAtLeast(dp(context, 300))
+
+        // Adapt icon size, spacing, and visible recent slots cleanly so portrait <-> landscape rotations
+        // NEVER overflow screen edges or squish Dock icons together.
+        var recentsToShow = allCandidateRecents.take(MAX_RECENT_ICONS)
+        var iconDp = 48
+        var gapDp = if (pinnedPackages.size + recentsToShow.size >= 9) 7 else 10
+        var padHdp = 14
+
+        fun estimateWidth(iconSizeDp: Int, spacingDp: Int, padDp: Int, recentCount: Int): Int {
+            val totalIcons = 1 + pinnedPackages.size + recentCount
+            val dividers = if (recentCount > 0) 2 else 1
+            val gaps = (totalIcons - 1 - dividers) + dividers * 2
+            return dp(context, padDp * 2 + totalIcons * iconSizeDp + gaps * spacingDp + dividers * 3)
+        }
+
+        if (estimateWidth(iconDp, gapDp, padHdp, recentsToShow.size) > maxCapsuleW) {
+            iconDp = 44
+            gapDp = 6
+            padHdp = 12
+        }
+        if (estimateWidth(iconDp, gapDp, padHdp, recentsToShow.size) > maxCapsuleW) {
+            iconDp = 40
+            gapDp = 5
+            padHdp = 10
+        }
+        while (recentsToShow.isNotEmpty() && estimateWidth(iconDp, gapDp, padHdp, recentsToShow.size) > maxCapsuleW) {
+            recentsToShow = recentsToShow.dropLast(1)
+        }
+        if (estimateWidth(iconDp, gapDp, padHdp, recentsToShow.size) > maxCapsuleW) {
+            iconDp = 36
+            gapDp = 4
+        }
+
+        capsule.setPadding(dp(context, padHdp), dp(context, 10), dp(context, padHdp), dp(context, 10))
+        val iconPx = dp(context, iconDp)
+        val iconGapPx = dp(context, gapDp)
 
         // 0. App Search / App Library button on the left of the Dock
-        val searchButton = buildAppSearchButton(context)
+        val searchButton = buildAppSearchButton(context, iconPx)
         capsule.addView(searchButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         val leftDivider = View(context).apply {
             setBackgroundColor(Color.argb(72, 28, 27, 31))
         }
         capsule.addView(
             leftDivider,
-            LinearLayout.LayoutParams(dp(context, 1), dp(context, 34)).apply {
+            LinearLayout.LayoutParams(dp(context, 1), (iconPx * 0.72f).toInt()).apply {
                 leftMargin = iconGapPx
                 rightMargin = iconGapPx
             },
@@ -359,6 +422,7 @@ class StageDockOverlayController(
                 isPinned = true,
                 isActive = activePkgs.contains(pkg),
                 isOpen = livePkgs.contains(pkg),
+                iconPx = iconPx,
             )
             pinnedSlotViews.add(pkg to item)
             capsule.addView(
@@ -379,7 +443,7 @@ class StageDockOverlayController(
             }
             capsule.addView(
                 divider,
-                LinearLayout.LayoutParams(dp(context, 1), dp(context, 34)).apply {
+                LinearLayout.LayoutParams(dp(context, 1), (iconPx * 0.72f).toInt()).apply {
                     leftMargin = iconGapPx + dp(context, 2)
                     rightMargin = iconGapPx + dp(context, 2)
                 },
@@ -392,6 +456,7 @@ class StageDockOverlayController(
                     isPinned = false,
                     isActive = activePkgs.contains(pkg),
                     isOpen = livePkgs.contains(pkg),
+                    iconPx = iconPx,
                 )
                 capsule.addView(
                     item,
@@ -407,15 +472,14 @@ class StageDockOverlayController(
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    private fun buildAppSearchButton(context: Context): View {
-        val btnSize = dp(context, 48)
+    private fun buildAppSearchButton(context: Context, btnSize: Int = dp(context, 48)): View {
         val col = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
         }
         val circle = TextView(context).apply {
             text = "⌕"
-            textSize = 24f
+            textSize = if (btnSize < dp(context, 42)) 20f else 24f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(103, 80, 164))
             background = GradientDrawable().apply {
@@ -459,9 +523,9 @@ class StageDockOverlayController(
         isPinned: Boolean,
         isActive: Boolean,
         isOpen: Boolean,
+        iconPx: Int = dp(context, 48),
     ): View {
-        val iconPx = dp(context, 48)
-        val radiusPx = dp(context, 13).toFloat()
+        val radiusPx = (iconPx * 0.27f)
 
         val col = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -522,6 +586,7 @@ class StageDockOverlayController(
                     val dy = event.rawY - downY
                     if (!isDragging && hypot(dx.toDouble(), dy.toDouble()) > dragSlopPx) {
                         isDragging = true
+                        appSearchOverlay.dismissIfShowing()
                         v.animate().cancel()
                         v.scaleX = 0.92f
                         v.scaleY = 0.92f
@@ -541,6 +606,7 @@ class StageDockOverlayController(
                         isDragging = false
                         finishUnifiedDragDrop(context, pkg, event.rawX, event.rawY, sourceIsPinnedDock = isPinned, cancelled = false)
                     } else if (hypot(dx.toDouble(), dy.toDouble()) <= dragSlopPx) {
+                        appSearchOverlay.dismissIfShowing()
                         HookGuard.info("STAGE_DOCK tap launch pkg=$pkg")
                         onDockAppClicked(pkg)
                     }

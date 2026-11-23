@@ -2,6 +2,7 @@ package dev.stagelab.nativehook.ui.strip
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.PixelFormat
@@ -26,6 +27,7 @@ import dev.stagelab.nativehook.xposed.HookGuard
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
  * N5 Left Recent Strip integrated directly inside `com.android.systemui`.
@@ -53,6 +55,8 @@ class RecentStripOverlayController(
     private var rootContainer: FrameLayout? = null
     private var stripColumn: LinearLayout? = null
     private var edgeRevealHandle: View? = null
+    private var windowLp: WindowManager.LayoutParams? = null
+    private var lastLayoutKey: String = ""
     private var isAttached = false
 
     private var lastSession: StageSession = StageSession.EMPTY
@@ -77,6 +81,14 @@ class RecentStripOverlayController(
         }
     }
 
+    /**
+     * Ensures `StageLabRecentStrip` attaches cleanly BEFORE `StageLabAppSearch` & `StageLabDock`
+     * so its permanent Z-order always remains strictly below App Search and Dock.
+     */
+    fun ensurePersistentAttached(context: Context) {
+        ensureAttached(context)
+    }
+
     fun update(context: Context, session: StageSession, hidden: Boolean, tempRevealed: Boolean) {
         appContextRef = context.applicationContext
         lastSession = session
@@ -88,13 +100,24 @@ class RecentStripOverlayController(
                 detach()
                 return@post
             }
+            ensureAttached(context)
+            syncWindowPositionIfNeeded(context)
+
+            val root = rootContainer ?: return@post
             val recent = session.visibleRecentStages
             if (recent.isEmpty()) {
-                detach()
+                root.visibility = View.GONE
+                lastRenderedSignature = ""
+                thumbImageViews.clear()
+                stageCardViews.clear()
+                hoveredStageId = null
                 return@post
             }
-            ensureAttached(context)
-            val sig = buildSignature(recent, hidden, tempRevealed)
+
+            if (root.visibility != View.VISIBLE) {
+                root.visibility = View.VISIBLE
+            }
+            val sig = buildSignature(context, recent, hidden, tempRevealed)
             if (sig != lastRenderedSignature) {
                 lastRenderedSignature = sig
                 render(context, recent)
@@ -106,10 +129,24 @@ class RecentStripOverlayController(
         }
     }
 
-    private fun buildSignature(stages: List<Stage>, hidden: Boolean, tempRevealed: Boolean): String =
-        "$hidden|$tempRevealed|" + stages.joinToString(";") { st ->
+    fun onDisplayConfigChanged(context: Context) {
+        mainHandler.post {
+            if (!isAttached) return@post
+            syncWindowPositionIfNeeded(context)
+            val recent = lastSession.visibleRecentStages
+            if (recent.isNotEmpty() && rootContainer?.visibility == View.VISIBLE) {
+                lastRenderedSignature = buildSignature(context, recent, hiddenBySetting, temporarilyRevealed)
+                render(context, recent)
+            }
+        }
+    }
+
+    private fun buildSignature(context: Context, stages: List<Stage>, hidden: Boolean, tempRevealed: Boolean): String {
+        val dm = context.resources.displayMetrics
+        return "${dm.widthPixels}x${dm.heightPixels}|$hidden|$tempRevealed|" + stages.joinToString(";") { st ->
             "${st.stageId}:${st.tasks.joinToString(",") { it.taskId.toString() }}"
         }
+    }
 
     fun refreshSnapshotsForTasks(context: Context, tasks: List<StageTask>) {
         if (tasks.isEmpty()) return
@@ -141,12 +178,14 @@ class RecentStripOverlayController(
             }
             isAttached = false
             lastRenderedSignature = ""
+            lastLayoutKey = ""
             thumbImageViews.clear()
             stageCardViews.clear()
             hoveredStageId = null
             rootContainer = null
             stripColumn = null
             edgeRevealHandle = null
+            windowLp = null
         }
     }
 
@@ -155,10 +194,16 @@ class RecentStripOverlayController(
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
         windowManager = wm
 
-        val root = FrameLayout(context).apply {
+        val root = object : FrameLayout(context) {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                super.onConfigurationChanged(newConfig)
+                onDisplayConfigChanged(context)
+            }
+        }.apply {
             clipChildren = false
             clipToPadding = false
             setBackgroundColor(Color.TRANSPARENT)
+            visibility = View.GONE
         }
 
         val column = LinearLayout(context).apply {
@@ -166,7 +211,7 @@ class RecentStripOverlayController(
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
             clipChildren = false
             clipToPadding = false
-            setPadding(dp(context, 4), dp(context, 24), dp(context, 24), dp(context, 24))
+            setPadding(dp(context, 4), dp(context, 20), dp(context, 24), dp(context, 20))
         }
 
         val edgeHandle = createEdgeRevealHandle(context)
@@ -187,6 +232,9 @@ class RecentStripOverlayController(
             ),
         )
 
+        val dm = context.resources.displayMetrics
+        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
+        lastLayoutKey = "${dm.widthPixels}x${dm.heightPixels}"
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -198,9 +246,9 @@ class RecentStripOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            val dm = context.resources.displayMetrics
-            // Responsive left Back-gesture safe zone (~28dp) across any tablet DPI
-            x = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density).backSafePx
+            // Responsive left Back-gesture safe zone (~28dp) & subtle upward bias to stay clear of Dock
+            x = metrics.backSafePx
+            y = -dp(context, 34)
             title = "StageLabRecentStrip"
         }
 
@@ -209,11 +257,26 @@ class RecentStripOverlayController(
             rootContainer = root
             stripColumn = column
             edgeRevealHandle = edgeHandle
+            windowLp = lp
             isAttached = true
             HookGuard.info("RECENT_STRIP attached to SystemUI WindowManager")
         }.onFailure {
             HookGuard.warn("RECENT_STRIP failed to attach", it)
         }
+    }
+
+    private fun syncWindowPositionIfNeeded(context: Context) {
+        val wm = windowManager ?: return
+        val root = rootContainer ?: return
+        val lp = windowLp ?: return
+        val dm = context.resources.displayMetrics
+        val key = "${dm.widthPixels}x${dm.heightPixels}"
+        if (key == lastLayoutKey) return
+        lastLayoutKey = key
+        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
+        lp.x = metrics.backSafePx
+        lp.y = -dp(context, 34)
+        runCatching { wm.updateViewLayout(root, lp) }
     }
 
     private fun render(context: Context, recentStages: List<Stage>) {
@@ -234,11 +297,20 @@ class RecentStripOverlayController(
         val total = maxCards.size
         val dm = context.resources.displayMetrics
         val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
+
+        val baseGap = dp(context, if (metrics.isLandscape) 12 else 16)
+        val availableH = (dm.heightPixels - dp(context, 180)).coerceAtLeast(dp(context, 280))
+        val neededH = total * metrics.stripCardHeightPx + (total - 1).coerceAtLeast(0) * baseGap
+        val scale = if (neededH > availableH) (availableH.toFloat() / neededH.toFloat()).coerceIn(0.62f, 1.0f) else 1.0f
+        val cardW = (metrics.stripCardWidthPx * scale).toInt()
+        val cardH = (metrics.stripCardHeightPx * scale).toInt()
+        val gap = (baseGap * scale).toInt().coerceAtLeast(dp(context, 8))
+
         maxCards.forEachIndexed { index, stage ->
-            val card = buildStageThumbnailCard(context, stage, index, total, metrics.stripCardWidthPx, metrics.stripCardHeightPx)
+            val card = buildStageThumbnailCard(context, stage, index, total, cardW, cardH)
             stageCardViews[stage.stageId] = card
-            val params = LinearLayout.LayoutParams(metrics.stripCardWidthPx, metrics.stripCardHeightPx).apply {
-                if (index > 0) topMargin = dp(context, 16)
+            val params = LinearLayout.LayoutParams(cardW, cardH).apply {
+                if (index > 0) topMargin = gap
             }
             column.addView(card, params)
         }
@@ -249,7 +321,9 @@ class RecentStripOverlayController(
      * so users can freely drag a Dock app directly onto any workspace in the left strip!
      */
     fun findStageIdAtScreenPoint(rawX: Float, rawY: Float): String? {
-        if (!isAttached) return null
+        if (!isAttached || rootContainer?.visibility != View.VISIBLE || stripColumn?.visibility != View.VISIBLE) {
+            return null
+        }
         val loc = IntArray(2)
         val slop = 36
         for ((stageId, view) in stageCardViews) {

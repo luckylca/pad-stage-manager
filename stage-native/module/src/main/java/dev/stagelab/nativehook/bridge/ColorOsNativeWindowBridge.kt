@@ -145,6 +145,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 HookGuard.info("BRIDGE.SWITCH_PARK park=${visibleOutgoing.map { it.taskId }}")
             }
 
+            val orientationOverrides = StageNativeRuntime.computeIncomingStageOrientationOverrides(visibleIncoming)
+
             val executeShowIncoming = {
                 val wctShow = newWindowContainerTransaction()
                 var wctOps = 0
@@ -163,10 +165,19 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 if (wctShow != null && wctOps > 0) {
                     runCatching { applyTransaction(organizer, wctShow) }
                 }
-                for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
+                for (t in fallbackShow) {
+                    restoreSingleFlexibleTask(organizer, t, boundsOverride = orientationOverrides[t.taskId])
+                }
+                if (orientationOverrides.isNotEmpty()) {
+                    for ((tid, targetB) in orientationOverrides) {
+                        adjustFlexibleTaskFrame(tid, targetB, 1.0f)
+                    }
+                    StageNativeRuntime.markIncomingStageOriented(visibleIncoming)
+                }
                 HookGuard.info(
                     "BRIDGE.SWITCH_SHOW show=${visibleIncoming.map { it.taskId }} " +
-                        "skippedTucked=${orderedShow.map { it.taskId } - visibleIncoming.map { it.taskId }.toSet()}",
+                        "skippedTucked=${orderedShow.map { it.taskId } - visibleIncoming.map { it.taskId }.toSet()}" +
+                        if (orientationOverrides.isNotEmpty()) " reoriented=${orientationOverrides.keys}" else "",
                 )
             }
 
@@ -176,7 +187,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             if (ctx != null && (visibleOutgoing.isNotEmpty() || visibleIncoming.isNotEmpty())) {
                 StageNativeRuntime.markMagicAnimationBusy(460L)
                 val outPairs = visibleOutgoing.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
-                val inPairs = visibleIncoming.map { t -> t to resolveLiveOrFallbackBounds(organizer, t) }
+                val inPairs = visibleIncoming.map { t ->
+                    t to (orientationOverrides[t.taskId] ?: resolveLiveOrFallbackBounds(organizer, t))
+                }
                 StageMagicTransitionOverlay.playStageSwitch(
                     context = ctx,
                     outgoingTasks = outPairs,
@@ -338,7 +351,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
-     * Compute equal-height multi-column non-overlapping bounds for 2 or 3 windows in an Active Stage.
+     * Compute orientation-aware non-overlapping tiled bounds for 2 or 3 windows in an Active Stage:
+     * side-by-side columns in Landscape, stacked full-width rows in Portrait.
      */
     fun computeMultiColumnBounds(count: Int, stripVisible: Boolean = true): List<WindowBounds> {
         val dm = appContext()?.resources?.displayMetrics
@@ -346,16 +360,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val screenH = dm?.heightPixels ?: 1680
         val density = dm?.density ?: StageLayoutMetrics.inferDensity(screenW, screenH)
         val metrics = StageLayoutMetrics.compute(screenW, screenH, density, stripVisible)
-        val stage = metrics.mainStageBounds
-        val n = count.coerceIn(1, 3)
-        if (n == 1) return listOf(stage)
-        val gap = if (n == 2) metrics.multiColGap2Px else metrics.multiColGap3Px
-        val colW = ((stage.width - gap * (n - 1)) / n).coerceAtLeast((140f * density).toInt())
-        return List(n) { i ->
-            val l = stage.left + i * (colW + gap)
-            val r = if (i == n - 1) stage.right else l + colW
-            WindowBounds(l, stage.top, r, stage.bottom)
-        }
+        return StageLayoutMetrics.computeTiledBounds(metrics, count)
     }
 
     private fun isTaskLiveVisible(organizer: Any, taskId: Int): Boolean = runCatching {
@@ -592,12 +597,17 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         }
     }
 
-    private fun restoreSingleFlexibleTask(organizer: Any, task: StageTask) {
+    private fun restoreSingleFlexibleTask(
+        organizer: Any,
+        task: StageTask,
+        boundsOverride: WindowBounds? = null,
+    ) {
         val memorized = StageNativeRuntime.getMemorizedGeometry(task.taskId, task.packageName)
-        val targetBounds = memorized?.bounds?.takeIf { !it.isEmpty }
+        val targetBounds = boundsOverride?.takeIf { !it.isEmpty }
+            ?: memorized?.bounds?.takeIf { !it.isEmpty }
             ?: task.bounds.takeIf { !it.isEmpty }
             ?: computePrimaryStageBounds(stripVisible = !StageNativeRuntime.recentController.isHiddenByUserSetting)
-        val targetScale = memorized?.scale ?: 1.0f
+        val targetScale = if (boundsOverride != null) 1.0f else (memorized?.scale ?: 1.0f)
 
         val restored = runCatching {
             val options = ActivityOptions.makeBasic()

@@ -493,12 +493,13 @@ object SystemServerFlexibleHook {
                         if (isIgnoredSystemPkg(pkg)) return@safeRun
 
                         val (screenW, screenH) = extractDisplaySizeFromArgs(param.args)
+                        val orientPrefix = orientKeyPrefix(screenW, screenH)
                         val isMiniOrSidebar = isSidebarOrMiniLaunch(param.args, info)
 
                         if (isMiniOrSidebar) {
                             notifySystemUiSidebarMiniHint(param.thisObject, pkg)
-                            val stageMiniKey = "$MINI_MEMORY_PREFIX$currentActiveStageId:$pkg"
-                            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$pkg"
+                            val stageMiniKey = "$MINI_MEMORY_PREFIX$orientPrefix$currentActiveStageId:$pkg"
+                            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$orientPrefix$pkg"
                             val miniMemorized = (memoryMap[stageMiniKey] ?: memoryMap[fallbackMiniKey])?.takeIf { frame ->
                                 isValidMiniGeometry(frame.toRect(), frame.scale, screenW, screenH)
                             }
@@ -514,13 +515,14 @@ object SystemServerFlexibleHook {
                             return@safeRun
                         }
 
-                        val memorized = memoryMap[pkg]?.takeIf { frame ->
+                        val memKey = "$orientPrefix$pkg"
+                        val memorized = memoryMap[memKey]?.takeIf { frame ->
                             if (isValidVisualGeometry(frame.toRect(), frame.scale, screenW, screenH)) {
                                 true
                             } else {
-                                memoryMap.remove(pkg)
+                                memoryMap.remove(memKey)
                                 saveMemoryToDisk()
-                                HookGuard.info("SYS.MEMORY_PURGED_INVALID pkg=$pkg rect=${frame.toRect()} scale=${frame.scale}")
+                                HookGuard.info("SYS.MEMORY_PURGED_INVALID key=$memKey rect=${frame.toRect()} scale=${frame.scale}")
                                 false
                             }
                         }
@@ -837,21 +839,22 @@ object SystemServerFlexibleHook {
         }.getOrDefault(1.0f to 1)
 
         val (screenW, screenH) = extractDisplaySizeFromArgs(arrayOf(taskObj))
+        val orientPrefix = orientKeyPrefix(screenW, screenH)
 
-        // Persist mini/sidebar floating windows per-Stage ("mini:<stageId>:<pkg>") AND fallback ("mini:<pkg>")
-        // so every workspace remembers its own distinct mini-window positions & scales independently!
+        // Persist mini/sidebar floating windows per-orientation & per-Stage ("mini:land:<stageId>:<pkg>")
+        // so every orientation and workspace remembers its own distinct mini-window positions & scales independently!
         if (zoomState == 2 || scale < 0.72f) {
             val clampedMiniScale = scale.coerceIn(0.25f, 1.0f)
             if (!isValidMiniGeometry(bounds, clampedMiniScale, screenW, screenH)) return
             val miniFrame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedMiniScale)
-            val stageMiniKey = "$MINI_MEMORY_PREFIX$currentActiveStageId:$pkg"
-            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$pkg"
+            val stageMiniKey = "$MINI_MEMORY_PREFIX$orientPrefix$currentActiveStageId:$pkg"
+            val fallbackMiniKey = "$MINI_MEMORY_PREFIX$orientPrefix$pkg"
             val prevMini = memoryMap[stageMiniKey]
             if (prevMini != miniFrame) {
                 memoryMap[stageMiniKey] = miniFrame
                 memoryMap[fallbackMiniKey] = miniFrame
                 saveMemoryToDisk()
-                HookGuard.info("SYS.MINI_MEMORY_SAVED stage=$currentActiveStageId pkg=$pkg rect=${miniFrame.toRect()} scale=$clampedMiniScale state=$zoomState")
+                HookGuard.info("SYS.MINI_MEMORY_SAVED key=$stageMiniKey rect=${miniFrame.toRect()} scale=$clampedMiniScale state=$zoomState")
             }
             return
         }
@@ -859,12 +862,13 @@ object SystemServerFlexibleHook {
         val clampedScale = scale.coerceIn(0.45f, 1.0f)
         if (!isValidVisualGeometry(bounds, clampedScale, screenW, screenH)) return
 
+        val memKey = "$orientPrefix$pkg"
         val frame = MemorizedFrame(bounds.left, bounds.top, bounds.right, bounds.bottom, clampedScale)
-        val prev = memoryMap[pkg]
+        val prev = memoryMap[memKey]
         if (prev != frame) {
-            memoryMap[pkg] = frame
+            memoryMap[memKey] = frame
             saveMemoryToDisk()
-            HookGuard.info("SYS.MEMORY_SAVED pkg=$pkg rect=${frame.toRect()} scale=$clampedScale")
+            HookGuard.info("SYS.MEMORY_SAVED key=$memKey rect=${frame.toRect()} scale=$clampedScale")
         }
     }
 
@@ -969,10 +973,14 @@ object SystemServerFlexibleHook {
         return null
     }
 
+    private fun orientKeyPrefix(screenW: Int, screenH: Int): String =
+        if (screenW >= screenH) "land:" else "port:"
+
     private fun extractDisplaySizeFromArgs(args: Array<Any?>?): Pair<Int, Int> {
         if (args != null) {
             for (arg in args) {
-                if (arg != null && arg.javaClass.name.endsWith("DisplayContent")) {
+                if (arg == null) continue
+                if (arg.javaClass.name.endsWith("DisplayContent")) {
                     val rect = runCatching {
                         XposedHelpers.callMethod(arg, "getBounds") as? Rect
                     }.getOrNull()
@@ -980,7 +988,25 @@ object SystemServerFlexibleHook {
                         return rect.width() to rect.height()
                     }
                 }
+                if (arg.javaClass.name.endsWith(".Task") || arg.javaClass.name.endsWith("WindowContainer")) {
+                    val dc = runCatching { XposedHelpers.callMethod(arg, "getDisplayContent") }.getOrNull()
+                    val rect = dc?.let {
+                        runCatching { XposedHelpers.callMethod(it, "getBounds") as? Rect }.getOrNull()
+                    }
+                    if (rect != null && rect.width() > 0 && rect.height() > 0) {
+                        return rect.width() to rect.height()
+                    }
+                }
             }
+        }
+        val dm = runCatching {
+            val atCls = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atCls, "currentActivityThread")
+            val ctx = XposedHelpers.callMethod(at, "getSystemContext") as? Context
+            ctx?.resources?.displayMetrics
+        }.getOrNull()
+        if (dm != null && dm.widthPixels > 0 && dm.heightPixels > 0) {
+            return dm.widthPixels to dm.heightPixels
         }
         return 2520 to 1680
     }

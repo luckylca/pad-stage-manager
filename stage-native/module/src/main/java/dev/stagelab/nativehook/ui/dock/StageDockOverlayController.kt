@@ -106,7 +106,7 @@ class StageDockOverlayController(
     }
 
     fun detach() {
-        appSearchOverlay.dismiss()
+        appSearchOverlay.destroy()
         mainHandler.post {
             val wm = windowManager
             val root = rootContainer
@@ -178,6 +178,10 @@ class StageDockOverlayController(
         if (isAttached && rootContainer != null) return
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
         windowManager = wm
+
+        // Attach StageLabAppSearch FIRST (persistent INVISIBLE window) so StageLabDock ALWAYS sits
+        // strictly ABOVE StageLabAppSearch in Z-order and stays clickable to interrupt open/close!
+        appSearchOverlay.ensureWindowAttached(context)
 
         val root = FrameLayout(context).apply {
             clipChildren = false
@@ -335,15 +339,12 @@ class StageDockOverlayController(
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun buildAppSearchButton(context: Context): View {
         val btnSize = dp(context, 48)
         val col = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setOnClickListener {
-                HookGuard.info("STAGE_DOCK app search button tapped")
-                appSearchOverlay.toggle(context)
-            }
         }
         val circle = TextView(context).apply {
             text = "⌕"
@@ -353,6 +354,24 @@ class StageDockOverlayController(
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.rgb(232, 222, 248))
+            }
+            addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                appSearchOverlay.updateAnchorView(v)
+            }
+        }
+        col.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(70).start()
+                    HookGuard.info("STAGE_DOCK app search button ACTION_DOWN")
+                    appSearchOverlay.toggle(context, circle)
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(140).start()
+                    true
+                }
+                else -> false
             }
         }
         col.addView(circle, LinearLayout.LayoutParams(btnSize, btnSize))

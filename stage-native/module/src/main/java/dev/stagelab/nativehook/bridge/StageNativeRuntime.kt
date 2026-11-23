@@ -150,6 +150,12 @@ object StageNativeRuntime {
             val session = registry.snapshot()
             val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
             if (ctx != null) {
+                stripOverlay.update(
+                    context = ctx,
+                    session = session,
+                    hidden = recentController.isHiddenByUserSetting,
+                    tempRevealed = recentController.isTemporarilyRevealed,
+                )
                 // In-place snapshot refresh (zero removeAllViews flash!)
                 val recentTasks = session.visibleRecentStages.flatMap { it.tasks }
                 stripOverlay.refreshSnapshotsForTasks(ctx, recentTasks)

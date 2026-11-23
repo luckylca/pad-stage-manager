@@ -114,7 +114,11 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
             val visibleIncoming = orderedShow.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
-            val visibleOutgoing = tasksToPark.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
+            // NEVER skip parking a task that is actually visible on screen (even if it recently exited
+            // FloatHandle mini-window mode), so NO window can ever bleed across two workspaces!
+            val visibleOutgoing = tasksToPark.filter { task ->
+                isTaskLiveVisible(organizer, task.taskId) || !isTaskTuckedAsFloatHandle(organizer, task.taskId)
+            }
 
             // Always park outgoing tasks cleanly with atomic WCT.setHidden(token, true) + reorder(false).
             // Never use offscreen SurfaceControl leash hacks (-6000, 0), because any rotation or WMS
@@ -353,6 +357,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             WindowBounds(l, stage.top, r, stage.bottom)
         }
     }
+
+    private fun isTaskLiveVisible(organizer: Any, taskId: Int): Boolean = runCatching {
+        val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", taskId)
+            as? ActivityManager.RunningTaskInfo ?: return false
+        StageNativeRuntime.isTaskVisible(info)
+    }.getOrDefault(false)
 
     /**
      * Detects whether [taskId] is currently tucked to the screen edge as a ColorOS `FloatHandle`

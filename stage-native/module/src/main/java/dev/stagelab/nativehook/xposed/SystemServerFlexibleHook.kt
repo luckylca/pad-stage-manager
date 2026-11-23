@@ -152,6 +152,14 @@ object SystemServerFlexibleHook {
                     }
                 }
             }
+            val removeTuckedHook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        purgeExitedFloatHandlesFromAllStages(param.thisObject)
+                        broadcastTuckedTaskIds(param.thisObject)
+                    }
+                }
+            }
             OplusCompatAdapter.hookMethodAny(
                 probeKey = "sys.float.addSync",
                 cls = floatCls,
@@ -163,7 +171,7 @@ object SystemServerFlexibleHook {
                 cls = floatCls,
                 nameCandidates = listOf("removeFloatHandle", "removeFloatHandleInfo", "removeFloatHandleByTaskId"),
                 fuzzyKeyword = "removeFloatHandle",
-                hook = syncTuckedHook,
+                hook = removeTuckedHook,
             )
         }
 
@@ -307,6 +315,23 @@ object SystemServerFlexibleHook {
             broadcastTuckedTaskIds(controller)
         }.onFailure {
             HookGuard.warn("SYS.FLOAT_HANDLE_STAGE_SWAP failed", it)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun purgeExitedFloatHandlesFromAllStages(controllerObj: Any?) {
+        runCatching {
+            val liveList = controllerObj?.let {
+                XposedHelpers.getObjectField(it, "mFloatHandleInfoList") as? List<Any>
+            }.orEmpty()
+            val liveIds = HashSet<Int>()
+            for (info in liveList) {
+                val tid = runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1)
+                if (tid > 0) liveIds.add(tid)
+            }
+            // Update current stage's saved list to match liveList immediately, and remove any
+            // exited task that is no longer in liveList from currentActiveStageId!
+            stageFloatHandles[currentActiveStageId] = ArrayList(liveList)
         }
     }
 

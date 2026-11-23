@@ -118,6 +118,7 @@ class RecentStripOverlayController(
             for (t in tasks) {
                 val res = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
                 val bmp = res.bitmap ?: continue
+                StageMagicTransitionOverlay.updateCachedPreview(t.taskId, bmp, res.appIcon)
                 mainHandler.post {
                     thumbImageViews[t.taskId]?.let { iv ->
                         if (!bmp.isRecycled) {

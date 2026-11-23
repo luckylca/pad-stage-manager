@@ -68,6 +68,12 @@ object StageMagicTransitionOverlay {
         val preview: CachedPreview,
     )
 
+    fun updateCachedPreview(taskId: Int, bitmap: Bitmap?, icon: Drawable?) {
+        if (bitmap != null && !bitmap.isRecycled) {
+            previewCache[taskId] = CachedPreview(prepareGpuBitmap(bitmap), icon)
+        }
+    }
+
     fun playStageSwitch(
         context: Context,
         outgoingTasks: List<Pair<StageTask, WindowBounds>>,
@@ -87,9 +93,12 @@ object StageMagicTransitionOverlay {
         val validOut = outgoingTasks.filter { !it.second.isEmpty }
         val validIn = incomingTasks.filter { !it.second.isEmpty }
 
-        // Fast path: if all tasks already have a cached preview or live in-flight card, retarget
-        // SYNCHRONOUSLY on the main thread with zero bgExecutor delay and zero removeAllViews flash!
-        val allCached = (validOut + validIn).all { (t, _) ->
+        // Only use the synchronous cached fast-path when interrupting a mid-flight animation
+        // (`activeCards.isNotEmpty()`). For normal switches, always capture a FRESH snapshot
+        // (`forceRefresh = true`, ~5-8ms) so the gliding mask shows the EXACT latest content
+        // instead of flashing from a stale initial-launch screenshot!
+        val isMidFlightInterrupt = activeCards.isNotEmpty()
+        val allCached = isMidFlightInterrupt && (validOut + validIn).all { (t, _) ->
             activeCards.containsKey(t.taskId) || previewCache.containsKey(t.taskId)
         }
 
@@ -104,31 +113,29 @@ object StageMagicTransitionOverlay {
                 if (seq != animationSeq) return@post
                 runInPlaceInterruptibleTransition(context, outPrepared, inPrepared, seq, onParkOutgoing, onShowIncoming)
             }
-            // Refresh outgoing snapshots asynchronously for next time
-            bgExecutor.execute {
-                for ((t, _) in validOut) {
-                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
-                    previewCache[t.taskId] = CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon)
-                }
-            }
             return
         }
 
-        // Cold path (first time seeing a task): fetch snapshots off-thread, then animate
+        // Fresh-snapshot path: force-refresh both outgoing (currently live on screen) and incoming
+        // snapshots off-thread (~6ms) so the Magic Move mask matches the latest real content 1:1!
         bgExecutor.execute {
             val outPrepared = validOut.map { (t, b) ->
-                val cached = previewCache[t.taskId] ?: run {
-                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
+                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+                val fresh = if (p.bitmap != null) {
                     CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
+                } else {
+                    previewCache[t.taskId] ?: CachedPreview(null, p.appIcon)
                 }
-                PreparedCard(t, b, cached)
+                PreparedCard(t, b, fresh)
             }
             val inPrepared = validIn.map { (t, b) ->
-                val cached = previewCache[t.taskId] ?: run {
-                    val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = false)
+                val p = snapshotLoader.loadPreview(context, t.taskId, t.packageName, forceRefresh = true)
+                val fresh = if (p.bitmap != null) {
                     CachedPreview(prepareGpuBitmap(p.bitmap), p.appIcon).also { previewCache[t.taskId] = it }
+                } else {
+                    previewCache[t.taskId] ?: CachedPreview(null, p.appIcon)
                 }
-                PreparedCard(t, b, cached)
+                PreparedCard(t, b, fresh)
             }
 
             mainHandler.post {

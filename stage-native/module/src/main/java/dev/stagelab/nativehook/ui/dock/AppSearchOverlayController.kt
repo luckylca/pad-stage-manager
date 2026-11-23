@@ -36,6 +36,7 @@ import dev.stagelab.nativehook.xposed.HookGuard
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Ultra-low-latency (<2ms open), 120fps physics-spring Apple "Magic Bloom" App Search & App Library.
@@ -55,6 +56,9 @@ import kotlin.math.abs
 class AppSearchOverlayController(
     private val onAppSelectedLaunch: (packageName: String) -> Unit,
     private val onAppSelectedMerge: (packageName: String) -> Unit,
+    private val onStartAppDrag: (packageName: String, icon: Drawable, rawX: Float, rawY: Float) -> Unit = { _, _, _, _ -> },
+    private val onMoveAppDrag: (packageName: String, rawX: Float, rawY: Float) -> Unit = { _, _, _ -> },
+    private val onEndAppDrag: (packageName: String, rawX: Float, rawY: Float, cancelled: Boolean) -> Unit = { _, _, _, _ -> },
 ) {
     private data class LaunchableApp(
         val packageName: String,
@@ -101,7 +105,7 @@ class AppSearchOverlayController(
     private var springVel = 0f
     private var lastFrameNanos = 0L
     private var springRunning = false
-    private var pendingFocusRestore = false
+    private var isDraggingOutGlobal = false
 
     private val choreographer: Choreographer by lazy { Choreographer.getInstance() }
     private val frameCallback = object : Choreographer.FrameCallback {
@@ -214,7 +218,7 @@ class AppSearchOverlayController(
         }
 
         val searchInput = EditText(context).apply {
-            hint = "搜索应用（点击打开 · 长按加入当前 Stage）"
+            hint = "搜索应用（点击打开 · 长按拖动放入 Dock 或工作区）"
             setHintTextColor(Color.argb(145, 73, 69, 79))
             setTextColor(Color.rgb(28, 27, 31))
             textSize = 15f
@@ -410,6 +414,7 @@ class AppSearchOverlayController(
         val panel = panelView ?: return
         val wm = windowManager ?: return
         val lp = windowLp ?: return
+        isDraggingOutGlobal = false
 
         anchorRef?.get()?.let { updateAnchorView(it) }
         syncResponsiveLayoutIfNeeded(context)
@@ -451,10 +456,13 @@ class AppSearchOverlayController(
 
     fun dismiss() {
         mainHandler.post {
+            isDraggingOutGlobal = false
             val root = rootFrame ?: return@post
             val wm = windowManager ?: return@post
             val lp = windowLp ?: return@post
-            if (targetProgress <= 0f && springPos <= 0.01f) return@post
+            if (targetProgress <= 0f && springPos <= 0.01f && (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                return@post
+            }
 
             // Clear focusable + touchable IMMEDIATELY on dismiss so underlying Stage apps & Dock
             // become interactive right away even while the card flies back into the Dock icon!
@@ -478,6 +486,25 @@ class AppSearchOverlayController(
             targetProgress = 0f
             ensureSpringRunning()
         }
+    }
+
+    /**
+     * Visually shrinks the App Search panel out of the way when an icon lifts into a free drag,
+     * while intentionally keeping touch delivery active on `rootFrame` until `ACTION_UP` completes.
+     */
+    private fun shrinkVisualsOnlyForDrag() {
+        isDraggingOutGlobal = true
+        searchInputView?.let { input ->
+            if (input.isFocused) {
+                val imm = input.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(input.windowToken, 0)
+            }
+            input.clearFocus()
+            input.isFocusableInTouchMode = false
+            input.isFocusable = false
+        }
+        targetProgress = 0f
+        ensureSpringRunning()
     }
 
     fun destroy() {
@@ -526,7 +553,7 @@ class AppSearchOverlayController(
         // the underlying Surface (mDrawState stays HAS_DRAWN for instant zero-lag next open)!
         scrimBackdrop?.alpha = 0f
         panelView?.alpha = 0f
-        if (!searchInputView?.text.isNullOrEmpty()) {
+        if (!isDraggingOutGlobal && !searchInputView?.text.isNullOrEmpty()) {
             searchInputView?.setText("")
         }
     }
@@ -605,6 +632,7 @@ class AppSearchOverlayController(
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun buildPooledCells(context: Context, apps: List<LaunchableApp>): List<CachedCell> {
         val dm = context.resources.displayMetrics
         val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
@@ -612,20 +640,13 @@ class AppSearchOverlayController(
         val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 78))
         val radiusPx = dp(context, 14).toFloat()
         val iconPx = dp(context, 50)
+        val dragSlopPx = dp(context, 14).toFloat()
+
         return apps.map { app ->
             val cell = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(dp(context, 6), dp(context, 10), dp(context, 6), dp(context, 10))
-                setOnClickListener {
-                    dismiss()
-                    onAppSelectedLaunch(app.packageName)
-                }
-                setOnLongClickListener {
-                    dismiss()
-                    onAppSelectedMerge(app.packageName)
-                    true
-                }
             }
             val iconView = ImageView(context).apply {
                 setImageDrawable(app.icon)
@@ -656,6 +677,90 @@ class AppSearchOverlayController(
                 width = itemWidth
                 height = GridLayout.LayoutParams.WRAP_CONTENT
             }
+
+            var downX = 0f
+            var downY = 0f
+            var lastRawX = 0f
+            var lastRawY = 0f
+            var isDraggingOut = false
+            var gestureAborted = false
+            val liftRunnable = Runnable {
+                if (!gestureAborted && targetProgress > 0.5f) {
+                    isDraggingOut = true
+                    cell.parent?.requestDisallowInterceptTouchEvent(true)
+                    runCatching { cell.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS) }
+                    cell.animate().scaleX(1.06f).scaleY(1.06f).setDuration(80).start()
+                    shrinkVisualsOnlyForDrag()
+                    onStartAppDrag(app.packageName, app.icon, lastRawX, lastRawY)
+                    HookGuard.info("APP_SEARCH lift free-drag pkg=${app.packageName}")
+                }
+            }
+
+            cell.setOnTouchListener { v, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.rawX
+                        downY = event.rawY
+                        lastRawX = downX
+                        lastRawY = downY
+                        isDraggingOut = false
+                        gestureAborted = false
+                        v.animate().scaleX(0.92f).scaleY(0.92f).setDuration(80).start()
+                        mainHandler.postDelayed(liftRunnable, DRAG_LIFT_HOLD_MS)
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        lastRawX = event.rawX
+                        lastRawY = event.rawY
+                        if (isDraggingOut) {
+                            onMoveAppDrag(app.packageName, lastRawX, lastRawY)
+                            true
+                        } else if (!gestureAborted &&
+                            hypot((lastRawX - downX).toDouble(), (lastRawY - downY).toDouble()) > dragSlopPx
+                        ) {
+                            // Vertical scroll before 200ms hold completes: hand off cleanly to ScrollView
+                            gestureAborted = true
+                            mainHandler.removeCallbacks(liftRunnable)
+                            v.animate().scaleX(1f).scaleY(1f).setDuration(90).start()
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        mainHandler.removeCallbacks(liftRunnable)
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(110).start()
+                        if (isDraggingOut) {
+                            isDraggingOut = false
+                            dismiss()
+                            onEndAppDrag(app.packageName, event.rawX, event.rawY, false)
+                            true
+                        } else if (!gestureAborted &&
+                            hypot((event.rawX - downX).toDouble(), (event.rawY - downY).toDouble()) <= dragSlopPx
+                        ) {
+                            dismiss()
+                            onAppSelectedLaunch(app.packageName)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        mainHandler.removeCallbacks(liftRunnable)
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(100).start()
+                        if (isDraggingOut) {
+                            isDraggingOut = false
+                            dismiss()
+                            onEndAppDrag(app.packageName, lastRawX, lastRawY, true)
+                        } else {
+                            gestureAborted = true
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+
             CachedCell(app, cell)
         }
     }
@@ -705,5 +810,6 @@ class AppSearchOverlayController(
         private const val OPEN_DAMPING = 32.8f    // ~0.84 damping ratio: silky spring bloom with crisp settle
         private const val CLOSE_STIFFNESS = 520f
         private const val CLOSE_DAMPING = 43.8f   // ~0.96 damping ratio: snappy critically-damped return
+        private const val DRAG_LIFT_HOLD_MS = 200L
     }
 }

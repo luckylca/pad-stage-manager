@@ -44,24 +44,41 @@ class StageDockOverlayController(
     private val onBottomSwipeReveal: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var appContextRef: Context? = null
     private val appSearchOverlay = AppSearchOverlayController(
         onAppSelectedLaunch = onDockAppClicked,
         onAppSelectedMerge = onDockAppDraggedToCenter,
+        onStartAppDrag = { pkg, icon, rawX, rawY ->
+            appContextRef?.let { ctx -> beginUnifiedDrag(ctx, icon, rawX, rawY, sourceIsPinnedDock = false) }
+        },
+        onMoveAppDrag = { pkg, rawX, rawY ->
+            appContextRef?.let { ctx -> updateUnifiedDragMove(ctx, pkg, rawX, rawY, sourceIsPinnedDock = false) }
+        },
+        onEndAppDrag = { pkg, rawX, rawY, cancelled ->
+            appContextRef?.let { ctx -> finishUnifiedDragDrop(ctx, pkg, rawX, rawY, sourceIsPinnedDock = false, cancelled = cancelled) }
+        },
     )
 
     private var windowManager: WindowManager? = null
     private var rootContainer: FrameLayout? = null
     private var dockCapsule: LinearLayout? = null
     private var bottomEdgeHandle: View? = null
+    private var insertBarView: View? = null
     private var dragGhostRoot: FrameLayout? = null
     private var dragGhostIcon: ImageView? = null
+    private var unpinPillView: TextView? = null
     private var isAttached = false
 
-    private var pinnedPackages: List<String> = emptyList()
+    private val pinnedPackages = ArrayList<String>()
+    private var pinnedLoadedFromPrefs = false
     private val recentPackages = ArrayList<String>()
+    private val pinnedSlotViews = ArrayList<Pair<String, View>>()
     private var lastSession: StageSession = StageSession.EMPTY
     private var hiddenBySetting = false
     private var temporarilyRevealed = false
+    private var lastHoveredStageId: String? = null
+    private var activePreviewInsertIdx: Int = -1
+    private var unpinPillHovered = false
 
     fun update(
         context: Context,
@@ -70,13 +87,12 @@ class StageDockOverlayController(
         hidden: Boolean,
         tempRevealed: Boolean,
     ) {
+        appContextRef = context.applicationContext
         lastSession = session
         hiddenBySetting = hidden
         temporarilyRevealed = tempRevealed
 
-        if (pinnedPackages.isEmpty()) {
-            pinnedPackages = resolveDefaultPinnedPackages(context)
-        }
+        ensurePinnedLoaded(context)
 
         // Collect recent app packages from active & recent stages (excluding pinned apps to prevent duplicates)
         val latestPkgs = buildList {
@@ -120,8 +136,11 @@ class StageDockOverlayController(
             rootContainer = null
             dockCapsule = null
             bottomEdgeHandle = null
+            insertBarView = null
             dragGhostRoot = null
             dragGhostIcon = null
+            unpinPillView = null
+            pinnedSlotViews.clear()
         }
     }
 
@@ -148,6 +167,32 @@ class StageDockOverlayController(
         }
         ghostRoot.addView(ghostIcon, FrameLayout.LayoutParams(ghostSize, ghostSize, Gravity.TOP or Gravity.START))
 
+        val unpinPill = TextView(context).apply {
+            text = "拖到此处移出 Dock"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(73, 69, 79))
+            setPadding(dp(context, 22), dp(context, 10), dp(context, 22), dp(context, 10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(context, 999).toFloat()
+                setColor(Color.argb(242, 243, 237, 247))
+                setStroke(dp(context, 1), Color.argb(120, 121, 116, 126))
+            }
+            elevation = dp(context, 10).toFloat()
+            visibility = View.GONE
+        }
+        ghostRoot.addView(
+            unpinPill,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+            ).apply {
+                topMargin = dp(context, 34)
+            },
+        )
+
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -170,6 +215,7 @@ class StageDockOverlayController(
             wm.addView(ghostRoot, lp)
             dragGhostRoot = ghostRoot
             dragGhostIcon = ghostIcon
+            unpinPillView = unpinPill
             ghostIcon
         }.getOrNull()
     }
@@ -229,6 +275,22 @@ class StageDockOverlayController(
             ),
         )
 
+        val insertBar = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(context, 999).toFloat()
+                setColor(Color.rgb(103, 80, 164))
+            }
+            visibility = View.INVISIBLE
+        }
+        root.addView(
+            insertBar,
+            FrameLayout.LayoutParams(dp(context, 4), dp(context, 44), Gravity.BOTTOM or Gravity.START).apply {
+                bottomMargin = dp(context, 29)
+            },
+        )
+        insertBarView = insertBar
+
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -271,6 +333,9 @@ class StageDockOverlayController(
         }
 
         capsule.removeAllViews()
+        pinnedSlotViews.clear()
+        val recentsToShow = recentPackages.filterNot { pinnedPackages.contains(it) }.take(MAX_RECENT_ICONS)
+        val iconGapPx = if (pinnedPackages.size + recentsToShow.size >= 9) dp(context, 6) else dp(context, 10)
 
         // 0. App Search / App Library button on the left of the Dock
         val searchButton = buildAppSearchButton(context)
@@ -281,8 +346,8 @@ class StageDockOverlayController(
         capsule.addView(
             leftDivider,
             LinearLayout.LayoutParams(dp(context, 1), dp(context, 34)).apply {
-                leftMargin = dp(context, 10)
-                rightMargin = dp(context, 10)
+                leftMargin = iconGapPx
+                rightMargin = iconGapPx
             },
         )
 
@@ -291,22 +356,23 @@ class StageDockOverlayController(
             val item = buildDockIconItem(
                 context = context,
                 pkg = pkg,
+                isPinned = true,
                 isActive = activePkgs.contains(pkg),
                 isOpen = livePkgs.contains(pkg),
             )
+            pinnedSlotViews.add(pkg to item)
             capsule.addView(
                 item,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ).apply {
-                    if (idx > 0) leftMargin = dp(context, 10)
+                    if (idx > 0) leftMargin = iconGapPx
                 },
             )
         }
 
         // 2. Divider + Recent apps
-        val recentsToShow = recentPackages.filterNot { pinnedPackages.contains(it) }.take(MAX_RECENT_ICONS)
         if (recentsToShow.isNotEmpty()) {
             val divider = View(context).apply {
                 setBackgroundColor(Color.argb(72, 28, 27, 31))
@@ -314,8 +380,8 @@ class StageDockOverlayController(
             capsule.addView(
                 divider,
                 LinearLayout.LayoutParams(dp(context, 1), dp(context, 34)).apply {
-                    leftMargin = dp(context, 12)
-                    rightMargin = dp(context, 12)
+                    leftMargin = iconGapPx + dp(context, 2)
+                    rightMargin = iconGapPx + dp(context, 2)
                 },
             )
 
@@ -323,6 +389,7 @@ class StageDockOverlayController(
                 val item = buildDockIconItem(
                     context = context,
                     pkg = pkg,
+                    isPinned = false,
                     isActive = activePkgs.contains(pkg),
                     isOpen = livePkgs.contains(pkg),
                 )
@@ -332,7 +399,7 @@ class StageDockOverlayController(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                     ).apply {
-                        if (idx > 0) leftMargin = dp(context, 10)
+                        if (idx > 0) leftMargin = iconGapPx
                     },
                 )
             }
@@ -389,6 +456,7 @@ class StageDockOverlayController(
     private fun buildDockIconItem(
         context: Context,
         pkg: String,
+        isPinned: Boolean,
         isActive: Boolean,
         isOpen: Boolean,
     ): View {
@@ -437,10 +505,7 @@ class StageDockOverlayController(
         var downX = 0f
         var downY = 0f
         var isDragging = false
-        var lastHoveredStageId: String? = null
         val dragSlopPx = dp(context, 14).toFloat()
-        val ghostHalfPx = dp(context, 58) / 2f
-        val dockCancelMarginPx = dp(context, 110)
 
         col.setOnTouchListener { v, event ->
             when (event.actionMasked) {
@@ -448,7 +513,6 @@ class StageDockOverlayController(
                     downX = event.rawX
                     downY = event.rawY
                     isDragging = false
-                    lastHoveredStageId = null
                     ensureDragGhost(context)
                     v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(90).start()
                     true
@@ -462,28 +526,10 @@ class StageDockOverlayController(
                         v.scaleX = 0.92f
                         v.scaleY = 0.92f
                         v.alpha = 0.28f
-                        val ghost = ensureDragGhost(context)
-                        if (ghost != null) {
-                            ghost.setImageDrawable(iconView.drawable)
-                            ghost.scaleX = 1.08f
-                            ghost.scaleY = 1.08f
-                            ghost.elevation = dp(context, 12).toFloat()
-                            ghost.translationX = event.rawX - ghostHalfPx
-                            ghost.translationY = event.rawY - ghostHalfPx
-                            dragGhostRoot?.visibility = View.VISIBLE
-                        }
+                        beginUnifiedDrag(context, iconView.drawable, event.rawX, event.rawY, sourceIsPinnedDock = isPinned)
                     }
                     if (isDragging) {
-                        // Direct GPU translation on hardware-layered fullscreen ghost: zero layout/WM IPC, locked 120fps
-                        dragGhostIcon?.let { ghost ->
-                            ghost.translationX = event.rawX - ghostHalfPx
-                            ghost.translationY = event.rawY - ghostHalfPx
-                        }
-                        val hoveredId = findRecentStageAtPoint(event.rawX, event.rawY)
-                        if (hoveredId != lastHoveredStageId) {
-                            lastHoveredStageId = hoveredId
-                            onHoverRecentStage(hoveredId)
-                        }
+                        updateUnifiedDragMove(context, pkg, event.rawX, event.rawY, sourceIsPinnedDock = isPinned)
                     }
                     true
                 }
@@ -493,35 +539,18 @@ class StageDockOverlayController(
                     v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(140).start()
                     if (isDragging) {
                         isDragging = false
-                        dragGhostRoot?.visibility = View.INVISIBLE
-                        onHoverRecentStage(null)
-                        val targetStageId = findRecentStageAtPoint(event.rawX, event.rawY)
-                        val screenH = context.resources.displayMetrics.heightPixels
-                        when {
-                            targetStageId != null -> {
-                                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> recentStage=$targetStageId")
-                                onDockAppDroppedOnStage(pkg, targetStageId)
-                            }
-                            event.rawY < screenH - dockCancelMarginPx -> {
-                                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> activeStage")
-                                onDockAppDraggedToCenter(pkg)
-                            }
-                            else -> {
-                                HookGuard.info("STAGE_DOCK free-drop cancelled in dock zone pkg=$pkg")
-                            }
-                        }
+                        finishUnifiedDragDrop(context, pkg, event.rawX, event.rawY, sourceIsPinnedDock = isPinned, cancelled = false)
                     } else if (hypot(dx.toDouble(), dy.toDouble()) <= dragSlopPx) {
                         HookGuard.info("STAGE_DOCK tap launch pkg=$pkg")
                         onDockAppClicked(pkg)
                     }
-                    lastHoveredStageId = null
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    isDragging = false
-                    lastHoveredStageId = null
-                    dragGhostRoot?.visibility = View.INVISIBLE
-                    onHoverRecentStage(null)
+                    if (isDragging) {
+                        isDragging = false
+                        finishUnifiedDragDrop(context, pkg, event.rawX, event.rawY, sourceIsPinnedDock = isPinned, cancelled = true)
+                    }
                     v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120).start()
                     true
                 }
@@ -530,6 +559,322 @@ class StageDockOverlayController(
         }
 
         return col
+    }
+
+    /**
+     * Unified 120fps drag-and-drop engine shared between Dock icons & App Search icons.
+     */
+    private fun beginUnifiedDrag(
+        context: Context,
+        icon: Drawable?,
+        rawX: Float,
+        rawY: Float,
+        sourceIsPinnedDock: Boolean,
+    ) {
+        val ghost = ensureDragGhost(context) ?: return
+        val ghostHalfPx = dp(context, 58) / 2f
+        lastHoveredStageId = null
+        activePreviewInsertIdx = -1
+        unpinPillHovered = false
+
+        ghost.setImageDrawable(icon)
+        ghost.scaleX = 1.08f
+        ghost.scaleY = 1.08f
+        ghost.elevation = dp(context, 12).toFloat()
+        ghost.translationX = rawX - ghostHalfPx
+        ghost.translationY = rawY - ghostHalfPx
+
+        unpinPillView?.let { pill ->
+            pill.visibility = if (sourceIsPinnedDock) View.VISIBLE else View.GONE
+            if (sourceIsPinnedDock) {
+                pill.alpha = 0f
+                pill.translationY = -dp(context, 16).toFloat()
+                updateUnpinPillStyle(pill, hovered = false)
+                pill.animate().alpha(1f).translationY(0f).scaleX(1f).scaleY(1f).setDuration(160).start()
+            }
+        }
+        dragGhostRoot?.visibility = View.VISIBLE
+    }
+
+    private fun updateUnifiedDragMove(
+        context: Context,
+        @Suppress("UNUSED_PARAMETER") pkg: String,
+        rawX: Float,
+        rawY: Float,
+        sourceIsPinnedDock: Boolean,
+    ) {
+        val ghostHalfPx = dp(context, 58) / 2f
+        dragGhostIcon?.let { ghost ->
+            ghost.translationX = rawX - ghostHalfPx
+            ghost.translationY = rawY - ghostHalfPx
+        }
+
+        val inUnpinPill = sourceIsPinnedDock && isPointInTopUnpinPill(context, rawX, rawY)
+        val inSideUnpinZone = sourceIsPinnedDock && isPointInSideUnpinBottomZone(context, rawX, rawY)
+        val inDockZone = isPointInDockDropZone(context, rawX, rawY)
+        val hoveredStage = if (!inUnpinPill && !inDockZone) findRecentStageAtPoint(rawX, rawY) else null
+
+        if (inUnpinPill != unpinPillHovered) {
+            unpinPillHovered = inUnpinPill
+            unpinPillView?.let { updateUnpinPillStyle(it, hovered = inUnpinPill) }
+        }
+        dragGhostIcon?.alpha = if (inUnpinPill || inSideUnpinZone) 0.55f else 1.0f
+
+        if (inDockZone && !inUnpinPill && !inSideUnpinZone) {
+            val insertIdx = computeDockInsertIndex(rawX)
+            applyDockInsertPreview(context, insertIdx)
+        } else {
+            clearDockInsertPreview(context)
+        }
+
+        if (hoveredStage != lastHoveredStageId) {
+            lastHoveredStageId = hoveredStage
+            onHoverRecentStage(hoveredStage)
+        }
+    }
+
+    private fun finishUnifiedDragDrop(
+        context: Context,
+        rawPkg: String,
+        rawX: Float,
+        rawY: Float,
+        sourceIsPinnedDock: Boolean,
+        cancelled: Boolean,
+    ) {
+        val pkg = normalizePackageName(rawPkg)
+        dragGhostRoot?.visibility = View.INVISIBLE
+        dragGhostIcon?.alpha = 1.0f
+        unpinPillView?.visibility = View.GONE
+        unpinPillHovered = false
+        clearDockInsertPreview(context)
+        if (lastHoveredStageId != null) {
+            lastHoveredStageId = null
+            onHoverRecentStage(null)
+        }
+        if (cancelled) return
+
+        val dropUnpinTop = sourceIsPinnedDock && isPointInTopUnpinPill(context, rawX, rawY)
+        val dropUnpinSide = sourceIsPinnedDock && isPointInSideUnpinBottomZone(context, rawX, rawY)
+        val dropDock = isPointInDockDropZone(context, rawX, rawY)
+        val targetStageId = if (!dropDock) findRecentStageAtPoint(rawX, rawY) else null
+        val screenH = context.resources.displayMetrics.heightPixels
+
+        when {
+            dropUnpinTop || dropUnpinSide -> {
+                unpinPackageFromDock(context, pkg)
+            }
+            dropDock -> {
+                val insertIdx = computeDockInsertIndex(rawX)
+                pinOrReorderInDock(context, pkg, insertIdx)
+            }
+            targetStageId != null -> {
+                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> recentStage=$targetStageId")
+                onDockAppDroppedOnStage(pkg, targetStageId)
+            }
+            rawY < screenH - dp(context, 118) -> {
+                HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> activeStage")
+                onDockAppDraggedToCenter(pkg)
+            }
+            else -> {
+                HookGuard.info("STAGE_DOCK free-drop cancelled in bottom zone pkg=$pkg")
+            }
+        }
+    }
+
+    private fun updateUnpinPillStyle(pill: TextView, hovered: Boolean) {
+        val bg = pill.background as? GradientDrawable ?: return
+        if (hovered) {
+            pill.text = "松手移出 Dock"
+            pill.setTextColor(Color.rgb(186, 26, 26))
+            bg.setColor(Color.argb(248, 255, 218, 214))
+            bg.setStroke(dp(pill.context, 1), Color.argb(200, 186, 26, 26))
+            pill.animate().scaleX(1.08f).scaleY(1.08f).setDuration(120).start()
+        } else {
+            pill.text = "拖到此处移出 Dock"
+            pill.setTextColor(Color.rgb(73, 69, 79))
+            bg.setColor(Color.argb(242, 243, 237, 247))
+            bg.setStroke(dp(pill.context, 1), Color.argb(120, 121, 116, 126))
+            pill.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+        }
+    }
+
+    private fun isPointInTopUnpinPill(context: Context, rawX: Float, rawY: Float): Boolean {
+        val screenW = context.resources.displayMetrics.widthPixels
+        return rawY <= dp(context, 112) && abs(rawX - screenW * 0.5f) <= dp(context, 160)
+    }
+
+    private fun isPointInSideUnpinBottomZone(context: Context, rawX: Float, rawY: Float): Boolean {
+        val capsule = dockCapsule ?: return false
+        val screenH = context.resources.displayMetrics.heightPixels
+        if (rawY < screenH - dp(context, 132)) return false
+        val loc = IntArray(2)
+        capsule.getLocationOnScreen(loc)
+        val margin = dp(context, 78)
+        return rawX < loc[0] - margin || rawX > loc[0] + capsule.width + margin
+    }
+
+    private fun isPointInDockDropZone(context: Context, rawX: Float, rawY: Float): Boolean {
+        val capsule = dockCapsule ?: return false
+        if (capsule.visibility != View.VISIBLE || capsule.width <= 0) return false
+        val screenH = context.resources.displayMetrics.heightPixels
+        val loc = IntArray(2)
+        capsule.getLocationOnScreen(loc)
+        val padX = dp(context, 38)
+        val dockTop = (loc[1] - dp(context, 44)).coerceAtMost(screenH - dp(context, 125))
+        return rawY >= dockTop && rawX >= loc[0] - padX && rawX <= loc[0] + capsule.width + padX
+    }
+
+    private fun computeDockInsertIndex(rawX: Float): Int {
+        if (pinnedSlotViews.isEmpty()) return 0
+        val loc = IntArray(2)
+        pinnedSlotViews.forEachIndexed { idx, (_, view) ->
+            view.getLocationOnScreen(loc)
+            val centerX = loc[0] + view.width * 0.5f
+            if (rawX < centerX) return idx
+        }
+        return pinnedSlotViews.size
+    }
+
+    private fun applyDockInsertPreview(context: Context, insertIdx: Int) {
+        if (insertIdx == activePreviewInsertIdx) return
+        activePreviewInsertIdx = insertIdx
+
+        val shiftPx = dp(context, 6).toFloat()
+        pinnedSlotViews.forEachIndexed { idx, (_, view) ->
+            val targetShift = if (idx < insertIdx) -shiftPx else shiftPx
+            view.animate().translationX(targetShift).setDuration(110).start()
+        }
+
+        val root = rootContainer ?: return
+        val bar = insertBarView ?: return
+        val rootLoc = IntArray(2)
+        root.getLocationOnScreen(rootLoc)
+
+        val boundaryScreenX: Float = when {
+            pinnedSlotViews.isEmpty() -> {
+                val cap = dockCapsule
+                if (cap != null) {
+                    val cLoc = IntArray(2)
+                    cap.getLocationOnScreen(cLoc)
+                    cLoc[0] + dp(context, 80).toFloat()
+                } else {
+                    rootLoc[0] + root.width * 0.5f
+                }
+            }
+            insertIdx <= 0 -> {
+                val loc = IntArray(2)
+                pinnedSlotViews.first().second.getLocationOnScreen(loc)
+                loc[0] - dp(context, 6).toFloat()
+            }
+            insertIdx >= pinnedSlotViews.size -> {
+                val last = pinnedSlotViews.last().second
+                val loc = IntArray(2)
+                last.getLocationOnScreen(loc)
+                loc[0] + last.width + dp(context, 6).toFloat()
+            }
+            else -> {
+                val leftView = pinnedSlotViews[insertIdx - 1].second
+                val rightView = pinnedSlotViews[insertIdx].second
+                val lLoc = IntArray(2)
+                val rLoc = IntArray(2)
+                leftView.getLocationOnScreen(lLoc)
+                rightView.getLocationOnScreen(rLoc)
+                ((lLoc[0] + leftView.width) + rLoc[0]) * 0.5f
+            }
+        }
+        bar.translationX = boundaryScreenX - rootLoc[0] - bar.width * 0.5f
+        bar.visibility = View.VISIBLE
+
+        (dockCapsule?.background as? GradientDrawable)?.setStroke(dp(context, 2), Color.argb(210, 103, 80, 164))
+    }
+
+    private fun clearDockInsertPreview(context: Context) {
+        if (activePreviewInsertIdx == -1) return
+        activePreviewInsertIdx = -1
+        insertBarView?.visibility = View.INVISIBLE
+        pinnedSlotViews.forEach { (_, view) ->
+            view.animate().translationX(0f).setDuration(120).start()
+        }
+        (dockCapsule?.background as? GradientDrawable)?.setStroke(dp(context, 1), Color.argb(145, 255, 255, 255))
+    }
+
+    private fun pinOrReorderInDock(context: Context, rawPkg: String, rawInsertIdx: Int) {
+        val pkg = normalizePackageName(rawPkg)
+        val oldIdx = pinnedPackages.indexOf(pkg)
+        if (oldIdx >= 0) {
+            val targetIdx = (if (rawInsertIdx > oldIdx) rawInsertIdx - 1 else rawInsertIdx)
+                .coerceIn(0, (pinnedPackages.size - 1).coerceAtLeast(0))
+            if (targetIdx != oldIdx) {
+                pinnedPackages.removeAt(oldIdx)
+                pinnedPackages.add(targetIdx, pkg)
+                savePinnedPackages(context)
+                render(context, lastSession)
+                HookGuard.info("STAGE_DOCK reordered pkg=$pkg $oldIdx -> $targetIdx")
+            }
+            return
+        }
+
+        val maxCap = maxPinnedCapacity(context)
+        while (pinnedPackages.size >= maxCap && pinnedPackages.isNotEmpty()) {
+            pinnedPackages.removeAt(pinnedPackages.lastIndex)
+        }
+        val insertIdx = rawInsertIdx.coerceIn(0, pinnedPackages.size)
+        pinnedPackages.add(insertIdx, pkg)
+        recentPackages.remove(pkg)
+        savePinnedPackages(context)
+        render(context, lastSession)
+        HookGuard.info("STAGE_DOCK pinned pkg=$pkg at idx=$insertIdx (total=${pinnedPackages.size})")
+    }
+
+    private fun unpinPackageFromDock(context: Context, rawPkg: String) {
+        val pkg = normalizePackageName(rawPkg)
+        if (pinnedPackages.remove(pkg)) {
+            savePinnedPackages(context)
+            val isLive = lastSession.activeStage?.tasks?.any { normalizePackageName(it.packageName) == pkg } == true ||
+                lastSession.allRecentStages.any { st -> st.tasks.any { normalizePackageName(it.packageName) == pkg } }
+            if (isLive && !recentPackages.contains(pkg)) {
+                recentPackages.add(0, pkg)
+                while (recentPackages.size > MAX_RECENT_ICONS) recentPackages.removeAt(recentPackages.lastIndex)
+            }
+            render(context, lastSession)
+            HookGuard.info("STAGE_DOCK unpinned pkg=$pkg (remaining=${pinnedPackages.size})")
+        }
+    }
+
+    private fun maxPinnedCapacity(context: Context): Int {
+        val dm = context.resources.displayMetrics
+        return if (dm.widthPixels >= dm.heightPixels) MAX_PINNED_LANDSCAPE else MAX_PINNED_PORTRAIT
+    }
+
+    private fun prefsContext(context: Context): Context {
+        return if (context.isDeviceProtectedStorage) {
+            context
+        } else {
+            runCatching { context.createDeviceProtectedStorageContext() }.getOrDefault(context)
+        }
+    }
+
+    private fun ensurePinnedLoaded(context: Context) {
+        if (pinnedLoadedFromPrefs) return
+        pinnedLoadedFromPrefs = true
+        val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        pinnedPackages.clear()
+        if (prefs.contains(KEY_PINNED_PACKAGES)) {
+            val saved = prefs.getString(KEY_PINNED_PACKAGES, "").orEmpty()
+                .split(',')
+                .map { normalizePackageName(it.trim()) }
+                .filter { it.isNotBlank() }
+                .distinct()
+            pinnedPackages.addAll(saved)
+        } else {
+            pinnedPackages.addAll(resolveDefaultPinnedPackages(context))
+            savePinnedPackages(context)
+        }
+    }
+
+    private fun savePinnedPackages(context: Context) {
+        val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_PINNED_PACKAGES, pinnedPackages.joinToString(",")).apply()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -586,7 +931,11 @@ class StageDockOverlayController(
         ).toInt()
 
     companion object {
+        private const val PREFS_NAME = "stagelab_dock_prefs"
+        private const val KEY_PINNED_PACKAGES = "pinned_packages_v1"
         private const val MAX_PINNED_ICONS = 6
+        private const val MAX_PINNED_LANDSCAPE = 10
+        private const val MAX_PINNED_PORTRAIT = 7
         private const val MAX_RECENT_ICONS = 3
     }
 }

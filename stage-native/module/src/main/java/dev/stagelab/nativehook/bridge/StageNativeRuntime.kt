@@ -222,6 +222,7 @@ object StageNativeRuntime {
             val filter = IntentFilter().apply {
                 addAction(ACTION_STAGE_CMD)
                 addAction(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_SIDEBAR_MINI_HINT)
+                addAction(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_TUCKED_TASKS_SYNC)
             }
             ctx.registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
 
@@ -277,6 +278,15 @@ object StageNativeRuntime {
                     pendingMiniLaunches[miniPkg] = System.currentTimeMillis()
                     HookGuard.info("SIDEBAR_MINI_HINT received pkg=$miniPkg")
                 }
+                return
+            }
+            if (action == dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_TUCKED_TASKS_SYNC) {
+                val ids = intent.getIntArrayExtra("tuckedTaskIds") ?: IntArray(0)
+                tuckedFloatHandleTaskIds.clear()
+                for (id in ids) {
+                    if (id > 0) tuckedFloatHandleTaskIds.add(id)
+                }
+                HookGuard.info("TUCKED_TASKS_SYNC updated ids=${ids.toList()}")
                 return
             }
             if (action != ACTION_STAGE_CMD) return

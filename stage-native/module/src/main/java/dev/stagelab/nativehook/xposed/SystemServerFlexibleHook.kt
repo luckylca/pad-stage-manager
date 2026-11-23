@@ -39,6 +39,7 @@ object SystemServerFlexibleHook {
     const val KEY_FORCE_ADJUST = "stagelab.force_adjust"
     const val ACTION_SIDEBAR_MINI_HINT = "dev.stagelab.nativehook.ACTION_SIDEBAR_MINI_HINT"
     const val ACTION_ACTIVE_STAGE_CHANGED = "dev.stagelab.nativehook.ACTION_ACTIVE_STAGE_CHANGED"
+    const val ACTION_TUCKED_TASKS_SYNC = "dev.stagelab.nativehook.ACTION_TUCKED_TASKS_SYNC"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
     private const val MINI_MEMORY_PREFIX = "mini:"
 
@@ -142,6 +143,27 @@ object SystemServerFlexibleHook {
                         }
                     }
                 },
+            )
+            // Keep SystemUI 100% in sync with which taskIds are currently tucked as edge FloatHandles
+            val syncTuckedHook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (HookGuard.isActive()) {
+                        broadcastTuckedTaskIds(param.thisObject)
+                    }
+                }
+            }
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.float.addSync",
+                cls = floatCls,
+                nameCandidates = listOf("addFloatHandle"),
+                hook = syncTuckedHook,
+            )
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.float.removeSync",
+                cls = floatCls,
+                nameCandidates = listOf("removeFloatHandle", "removeFloatHandleInfo", "removeFloatHandleByTaskId"),
+                fuzzyKeyword = "removeFloatHandle",
+                hook = syncTuckedHook,
             )
         }
 
@@ -282,8 +304,47 @@ object SystemServerFlexibleHook {
             HookGuard.info(
                 "SYS.FLOAT_HANDLE_STAGE_SWAP thread=${Thread.currentThread().name} $prevStageId(${stageFloatHandles[prevStageId]?.size ?: 0}) -> $nextStageId(${incoming.size})",
             )
+            broadcastTuckedTaskIds(controller)
         }.onFailure {
             HookGuard.warn("SYS.FLOAT_HANDLE_STAGE_SWAP failed", it)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun broadcastTuckedTaskIds(controllerObj: Any?) {
+        val ids = LinkedHashSet<Int>()
+        runCatching {
+            val liveList = controllerObj?.let {
+                XposedHelpers.getObjectField(it, "mFloatHandleInfoList") as? List<Any>
+            }.orEmpty()
+            for (info in liveList) {
+                val tid = runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1)
+                if (tid > 0) ids.add(tid)
+            }
+            for (list in stageFloatHandles.values) {
+                for (info in list) {
+                    val tid = runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1)
+                    if (tid > 0) ids.add(tid)
+                }
+            }
+        }
+        val idArray = ids.toIntArray()
+        mainHandler.post {
+            runCatching {
+                val ctx = runCatching {
+                    controllerObj?.let { XposedHelpers.getObjectField(it, "mContext") as? Context }
+                }.getOrNull() ?: runCatching {
+                    val atCls = Class.forName("android.app.ActivityThread")
+                    val at = XposedHelpers.callStaticMethod(atCls, "currentActivityThread")
+                    XposedHelpers.callMethod(at, "getSystemContext") as? Context
+                }.getOrNull() ?: return@runCatching
+                ctx.sendBroadcast(
+                    Intent(ACTION_TUCKED_TASKS_SYNC).apply {
+                        setPackage("com.android.systemui")
+                        putExtra("tuckedTaskIds", idArray)
+                    },
+                )
+            }
         }
     }
 

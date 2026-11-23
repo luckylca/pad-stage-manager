@@ -115,28 +115,18 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
             val visibleIncoming = orderedShow.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
             val visibleOutgoing = tasksToPark.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
-            val liveMode = StageNativeRuntime.livePreviewEnabled
 
+            // Always park outgoing tasks cleanly with atomic WCT.setHidden(token, true) + reorder(false).
+            // Never use offscreen SurfaceControl leash hacks (-6000, 0), because any rotation or WMS
+            // relayout snaps offscreen visible tasks right back onto the screen behind the active stage!
             val executeParkOutgoing = {
                 val wctPark = newWindowContainerTransaction()
-                val scTx = SurfaceControl.Transaction()
-                var scOps = 0
                 var wctOps = 0
                 val fallbackPark = mutableListOf<StageTask>()
 
                 for (task in visibleOutgoing) {
                     val token = resolveTaskToken(organizer, task.taskId)
-                    val leash = StageNativeRuntime.getTaskLeash(task.taskId)
-                    // Mini floating windows MUST be parked via setHidden(true), not offscreen leash move,
-                    // because ColorOS's adjustMiniFinishRectIfOffScreen pulls offscreen mini-windows back on-screen!
-                    if (liveMode && !task.isMiniFloating && token != null && leash != null && leash.isValid && wctPark != null) {
-                        val rawOrigin = resolveRawLeashOrigin(organizer, task)
-                        offscreenParkedOrigins[task.taskId] = rawOrigin
-                        scTx.setPosition(leash, -6000f, 0f)
-                        scOps++
-                        XposedHelpers.callMethod(wctPark, "reorder", token, false)
-                        wctOps++
-                    } else if (token != null && wctPark != null) {
+                    if (token != null && wctPark != null) {
                         runCatching { XposedHelpers.callMethod(wctPark, "setHidden", token, true) }
                         XposedHelpers.callMethod(wctPark, "reorder", token, false)
                         wctOps++
@@ -144,47 +134,34 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                         fallbackPark.add(task)
                     }
                 }
-                if (scOps > 0) runCatching { scTx.apply() }
-                scTx.close()
                 if (wctPark != null && wctOps > 0) {
                     runCatching { applyTransaction(organizer, wctPark) }
                 }
                 for (t in fallbackPark) parkSingleFlexibleTask(t.taskId)
-                HookGuard.info("BRIDGE.SWITCH_PARK live=$liveMode park=${visibleOutgoing.map { it.taskId }}")
+                HookGuard.info("BRIDGE.SWITCH_PARK park=${visibleOutgoing.map { it.taskId }}")
             }
 
             val executeShowIncoming = {
                 val wctShow = newWindowContainerTransaction()
-                val scTx = SurfaceControl.Transaction()
-                var scOps = 0
                 var wctOps = 0
                 val fallbackShow = mutableListOf<StageTask>()
 
                 for (task in visibleIncoming) {
                     val token = resolveTaskToken(organizer, task.taskId)
-                    val leash = StageNativeRuntime.getTaskLeash(task.taskId)
                     if (token != null && wctShow != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
                         runCatching { XposedHelpers.callMethod(wctShow, "setHidden", token, false) }
                         XposedHelpers.callMethod(wctShow, "reorder", token, true)
                         wctOps++
-                        val savedOrigin = offscreenParkedOrigins.remove(task.taskId)
-                        if (leash != null && leash.isValid && savedOrigin != null) {
-                            scTx.setPosition(leash, savedOrigin.first, savedOrigin.second)
-                            scOps++
-                        }
                     } else {
-                        offscreenParkedOrigins.remove(task.taskId)
                         fallbackShow.add(task)
                     }
                 }
                 if (wctShow != null && wctOps > 0) {
                     runCatching { applyTransaction(organizer, wctShow) }
                 }
-                if (scOps > 0) runCatching { scTx.apply() }
-                scTx.close()
                 for (t in fallbackShow) restoreSingleFlexibleTask(organizer, t)
                 HookGuard.info(
-                    "BRIDGE.SWITCH_SHOW live=$liveMode show=${visibleIncoming.map { it.taskId }} " +
+                    "BRIDGE.SWITCH_SHOW show=${visibleIncoming.map { it.taskId }} " +
                         "skippedTucked=${orderedShow.map { it.taskId } - visibleIncoming.map { it.taskId }.toSet()}",
                 )
             }

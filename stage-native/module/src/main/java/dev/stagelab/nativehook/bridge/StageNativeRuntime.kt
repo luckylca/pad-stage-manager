@@ -783,13 +783,9 @@ object StageNativeRuntime {
     }
 
     private fun isMiniTaskInfo(taskInfo: ActivityManager.RunningTaskInfo): Boolean {
-        val extra = extractOplusExtraBundle(taskInfo)
-        if (extra != null) {
-            if (extra.getBoolean("is_mini_state", false)) return true
-            if (extra.getInt("flexible_state", 1) == 2) return true
-        }
-        val scale = extractFlexibleScale(taskInfo)
-        return scale in 0.20f..0.72f
+        val extra = extractOplusExtraBundle(taskInfo) ?: return false
+        return extra.getBoolean("is_mini_state", false) ||
+            extra.getInt("flexible_state", 1) == 2
     }
 
     private fun consumePendingMiniFlag(pkg: String): Boolean {

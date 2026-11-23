@@ -514,6 +514,23 @@ object StageNativeRuntime {
             }
         }
 
+        // Safety net: if a visible focused Flexible Task is not owned by ANY Stage (e.g. a tucked
+        // FloatHandle mini-window popped back open without onTaskAppeared), re-adopt it immediately
+        // into the current Active Stage so it NEVER becomes a global orphan floating across all workspaces!
+        if (stageTask.isVisible && isTaskFocused(taskInfo) &&
+            registry.findStageIdForTask(taskInfo.taskId) == null &&
+            !isTaskTuckedFloatHandle(taskInfo.taskId)
+        ) {
+            val hasActive = registry.getActiveStage() != null
+            val adopted = transitionController.onNativeTaskAppeared(
+                stageTask.copy(isMiniFloating = hasActive),
+                mergeIntoActive = hasActive,
+            )
+            logSession("ON_CHANGED_READOPT(t=${taskInfo.taskId},pkg=$pkg)", adopted)
+            updateStripUi(adopted)
+            return
+        }
+
         var session = transitionController.onNativeTaskInfoChanged(stageTask)
         if (isTaskFocused(taskInfo)) {
             session = transitionController.onNativeTaskFocused(taskInfo.taskId)
@@ -555,6 +572,11 @@ object StageNativeRuntime {
         val pkg = resolvePkg(taskInfo)
         taskLeashes.remove(taskInfo.taskId)
         if (!isManagedUserApp(pkg)) return
+        // Tucked edge FloatHandle tasks remain alive inside their owning Stage; never orphan them on vanish!
+        if (isTaskTuckedFloatHandle(taskInfo.taskId) || isTuckedFloatHandleTaskInfo(taskInfo)) {
+            HookGuard.info("ON_VANISHED ignored for tucked FloatHandle task=${taskInfo.taskId} pkg=$pkg")
+            return
+        }
         taskGeometryMemory.remove(taskInfo.taskId)
         taskAppearedAtMs.remove(taskInfo.taskId)
         val session = transitionController.onNativeTaskVanished(taskInfo.taskId)

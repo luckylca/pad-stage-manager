@@ -106,6 +106,24 @@ object StageNativeRuntime {
     @Volatile
     private var stageManagerEnabled = true
 
+    fun isStageManagerEnabled(): Boolean = stageManagerEnabled
+
+    @Volatile
+    private var lastSyncedSysEnabled: Boolean? = null
+
+    private fun syncSystemServerStageMode(context: Context?, enabled: Boolean) {
+        if (context == null || lastSyncedSysEnabled == enabled) return
+        lastSyncedSysEnabled = enabled
+        runCatching {
+            context.sendBroadcast(
+                Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_STAGE_MODE_SYNC).apply {
+                    putExtra("enabled", enabled)
+                },
+            )
+            HookGuard.info("SYS_STAGE_MODE_SYNC sent enabled=$enabled")
+        }
+    }
+
     /** Experimental real-time live SurfaceControl mirroring in the left Recent Strip (default ON). */
     @Volatile
     var livePreviewEnabled = true
@@ -429,6 +447,7 @@ object StageNativeRuntime {
     }
 
     fun onNativeTaskAppeared(taskInfo: ActivityManager.RunningTaskInfo) {
+        if (!stageManagerEnabled) return
         val pkg = resolvePkg(taskInfo)
         if (!isManagedUserApp(pkg)) return
 
@@ -467,6 +486,7 @@ object StageNativeRuntime {
     }
 
     fun onNativeTaskInfoChanged(taskInfo: ActivityManager.RunningTaskInfo) {
+        if (!stageManagerEnabled) return
         val pkg = resolvePkg(taskInfo)
 
         // In desktop-replacement mode (stageManagerEnabled == true), Launcher is our blurred Stage canvas
@@ -577,6 +597,7 @@ object StageNativeRuntime {
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
         taskLeashes.remove(taskInfo.taskId)
+        if (!stageManagerEnabled) return
         if (!isManagedUserApp(pkg)) return
         // Tucked edge FloatHandle tasks remain alive inside their owning Stage; never orphan them on vanish!
         if (isTaskTuckedFloatHandle(taskInfo.taskId) || isTuckedFloatHandleTaskInfo(taskInfo)) {
@@ -663,6 +684,7 @@ object StageNativeRuntime {
             bridge.setSystemNavigationLocked(false)
             bridge.notifyLauncherBackdrop(false)
             if (!stageManagerEnabled && ctx != null) {
+                syncSystemServerStageMode(ctx, false)
                 syncAppState(ctx, false)
             }
             return
@@ -674,6 +696,7 @@ object StageNativeRuntime {
         bridge.setSystemNavigationLocked(true)
 
         if (ctx == null) return
+        syncSystemServerStageMode(ctx, true)
         syncAppState(ctx, true)
         notifySystemServerActiveStage(ctx, session.activeStageId)
         // Skip Strip/Dock view rebuilds & snapshot IPC while 580ms Magic Move is animating at 120fps

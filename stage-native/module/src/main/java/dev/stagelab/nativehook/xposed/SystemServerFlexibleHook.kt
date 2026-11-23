@@ -40,6 +40,7 @@ object SystemServerFlexibleHook {
     const val ACTION_SIDEBAR_MINI_HINT = "dev.stagelab.nativehook.ACTION_SIDEBAR_MINI_HINT"
     const val ACTION_ACTIVE_STAGE_CHANGED = "dev.stagelab.nativehook.ACTION_ACTIVE_STAGE_CHANGED"
     const val ACTION_TUCKED_TASKS_SYNC = "dev.stagelab.nativehook.ACTION_TUCKED_TASKS_SYNC"
+    const val ACTION_STAGE_MODE_SYNC = "dev.stagelab.nativehook.ACTION_STAGE_MODE_SYNC"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
     private const val MINI_MEMORY_PREFIX = "mini:"
 
@@ -60,6 +61,10 @@ object SystemServerFlexibleHook {
     private var currentActiveStageId: String = "stage-default"
     @Volatile
     private var cachedClassLoader: ClassLoader? = null
+    @Volatile
+    private var stageManagerEnabled: Boolean = true
+
+    private fun isEnabled(): Boolean = HookGuard.isActive() && stageManagerEnabled
 
     data class MemorizedFrame(
         val left: Int,
@@ -116,7 +121,7 @@ object SystemServerFlexibleHook {
                 fuzzyKeyword = "MaxFlexible",
                 hook = object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (HookGuard.isActive()) {
+                        if (isEnabled()) {
                             param.result = UNLIMITED_WINDOW_CAP
                         }
                     }
@@ -138,7 +143,7 @@ object SystemServerFlexibleHook {
                 fuzzyKeyword = "LimitMaxFloat",
                 hook = object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (HookGuard.isActive()) {
+                        if (isEnabled()) {
                             param.result = UNLIMITED_WINDOW_CAP
                         }
                     }
@@ -147,14 +152,14 @@ object SystemServerFlexibleHook {
             // Keep SystemUI 100% in sync with which taskIds are currently tucked as edge FloatHandles
             val syncTuckedHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         broadcastTuckedTaskIds(param.thisObject)
                     }
                 }
             }
             val removeTuckedHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         purgeExitedFloatHandlesFromAllStages(param.thisObject)
                         broadcastTuckedTaskIds(param.thisObject)
                     }
@@ -187,7 +192,7 @@ object SystemServerFlexibleHook {
                 nameCandidates = listOf("pickFlexibleTaskToRemoveWhenExceedLimit"),
                 hook = object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (HookGuard.isActive()) {
+                        if (isEnabled()) {
                             param.result = null
                         }
                     }
@@ -210,13 +215,24 @@ object SystemServerFlexibleHook {
         runCatching {
             val filter = IntentFilter().apply {
                 addAction(ACTION_ACTIVE_STAGE_CHANGED)
+                addAction(ACTION_STAGE_MODE_SYNC)
                 addAction("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG")
             }
             ctx.registerReceiver(
                 object : BroadcastReceiver() {
                     override fun onReceive(context: Context?, intent: Intent?) {
                         when (intent?.action) {
+                            ACTION_STAGE_MODE_SYNC -> {
+                                val enabled = intent.getBooleanExtra("enabled", false)
+                                stageManagerEnabled = enabled
+                                if (!enabled) {
+                                    allowWideStageRect.remove()
+                                    stageFloatHandles.clear()
+                                }
+                                HookGuard.info("SYS.STAGE_MODE_SYNC enabled=$enabled")
+                            }
                             ACTION_ACTIVE_STAGE_CHANGED -> {
+                                if (!stageManagerEnabled) return
                                 val nextStageId = intent.getStringExtra("stageId").orEmpty().ifBlank { "stage-default" }
                                 postOnAndroidUiThread { swapFloatHandlesForStage(nextStageId) }
                             }
@@ -388,7 +404,7 @@ object SystemServerFlexibleHook {
                 Bundle::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!HookGuard.isActive()) return
+                        if (!isEnabled()) return
                         try {
                             val bundle = param.args[0] as? Bundle ?: return
                             if (bundle.getBoolean(KEY_FORCE_ADJUST, false)) {
@@ -424,7 +440,7 @@ object SystemServerFlexibleHook {
             fuzzyKeyword = "ExceedLimitFlexible",
             hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         param.result = false
                     }
                 }
@@ -438,6 +454,7 @@ object SystemServerFlexibleHook {
             nameCandidates = listOf("collectFlexibleTaskInfo"),
             hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskController.collectFlexibleTaskInfo") {
                         ensureStageReceiverRegistered(param.thisObject)
                         val info = param.result ?: return@safeRun
@@ -520,7 +537,7 @@ object SystemServerFlexibleHook {
             })
             XposedBridge.hookAllMethods(cls, "isValidAdjustEndRect", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (allowWideStageRect.get() == true && HookGuard.isActive()) {
+                    if (allowWideStageRect.get() == true && isEnabled()) {
                         param.result = true
                     }
                 }
@@ -535,14 +552,14 @@ object SystemServerFlexibleHook {
         try {
             XposedBridge.hookAllMethods(cls, "canFullscreenTask", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         param.result = false
                     }
                 }
             })
             XposedBridge.hookAllMethods(cls, "stopScaleAndToFullScreen", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskController.stopScaleAndToFullScreen") {
                         param.result = false
                         val taskObj = param.args.firstOrNull() ?: return@safeRun
@@ -552,7 +569,7 @@ object SystemServerFlexibleHook {
             })
             XposedBridge.hookAllMethods(cls, "exitFlexibleTaskWindowInnerLocked", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskController.exitFlexibleTaskWindowInnerLocked") {
                         val strategy = param.args.firstOrNull() ?: return@safeRun
                         val strategyName = strategy.javaClass.simpleName
@@ -599,7 +616,7 @@ object SystemServerFlexibleHook {
             val scaleMgrCls = XposedHelpers.findClass("com.android.server.wm.FlexibleTaskScaleManager", classLoader)
             val returnFalseHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         param.result = false
                     }
                 }
@@ -608,14 +625,14 @@ object SystemServerFlexibleHook {
             XposedBridge.hookAllMethods(scaleMgrCls, "isInWaitMaxingState", returnFalseHook)
             XposedBridge.hookAllMethods(scaleMgrCls, "startFlexibleTaskMaximizedAnimation", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (HookGuard.isActive()) {
+                    if (isEnabled()) {
                         param.result = null
                     }
                 }
             })
             val blockFullScreenScaleHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskScaleManager.blockFullScreenScale") {
                         param.result = null
                         val mgr = param.thisObject
@@ -648,6 +665,7 @@ object SystemServerFlexibleHook {
         //    AND auto-snap to Main Stage default max bounds when the user stretches a window near max size!
         val persistHook = object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
+                if (!isEnabled()) return
                 HookGuard.safeRun("FlexibleTaskController.persistGeometry") {
                     val taskObj = param.args.firstOrNull { it != null && it.javaClass.name.endsWith(".Task") } ?: return@safeRun
                     val isResizeMethod = param.method.name != "finishMovingFlexibleTask"

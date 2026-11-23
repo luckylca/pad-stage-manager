@@ -35,7 +35,7 @@ object FlexibleMenuHook {
             fuzzyKeyword = "MenuEvent",
             hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!HookGuard.isActive() || !StageNativeRuntime.isStageManagerEnabled()) return
                     HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent.before") {
                         val event = param.args.firstOrNull() as? Int ?: return@safeRun
                         if (event == EVENT_SPLIT) {
@@ -49,6 +49,7 @@ object FlexibleMenuHook {
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!HookGuard.isActive() || !StageNativeRuntime.isStageManagerEnabled()) return
                     HookGuard.safeRun("FlexibleMenuManager.notifySystemMenuEvent") {
                         val event = param.args.firstOrNull() as? Int ?: return@safeRun
                         if (event == EVENT_SPLIT) return@safeRun

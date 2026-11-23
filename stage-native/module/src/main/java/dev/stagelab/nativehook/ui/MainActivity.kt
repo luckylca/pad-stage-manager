@@ -204,6 +204,11 @@ class MainActivity : ComponentActivity() {
                     onToggleEnabled = { next ->
                         moduleEnabledState.value = next
                         prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, next).apply()
+                        sendBroadcast(
+                            Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_STAGE_MODE_SYNC).apply {
+                                putExtra("enabled", next)
+                            },
+                        )
                         if (!next) {
                             StageModeNotificationHelper.cancelExitNotification(this@MainActivity)
                             sendStageCmd("disable_module")

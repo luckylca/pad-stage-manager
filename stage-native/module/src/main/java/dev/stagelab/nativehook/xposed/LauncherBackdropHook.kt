@@ -85,6 +85,7 @@ object LauncherBackdropHook {
             HookGuard.safeRun("LauncherBackdropReceiver.onReceive") {
                 val visible = intent.getBooleanExtra("visible", false)
                 backdropActive = visible
+                LauncherDockHook.setEnabled(visible)
                 val activity = launcherRef?.get() ?: return@safeRun
                 activity.runOnUiThread {
                     applyBackdropState(activity, visible)

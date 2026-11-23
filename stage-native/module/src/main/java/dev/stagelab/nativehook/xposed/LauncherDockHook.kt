@@ -24,6 +24,15 @@ object LauncherDockHook {
     private const val TASKBAR_DRAG_CONTROLLER = "com.android.launcher3.taskbar.TaskbarDragController"
     private const val OPLUS_ITEM_CLICK_HANDLER = "com.android.launcher3.touch.OplusItemClickHandler"
 
+    @Volatile
+    private var stageManagerEnabled: Boolean = false
+
+    fun setEnabled(enabled: Boolean) {
+        stageManagerEnabled = enabled
+    }
+
+    private fun isActive(): Boolean = HookGuard.isActive() && stageManagerEnabled
+
     fun install(classLoader: ClassLoader) {
         hookTaskbarItemClick(classLoader)
         hookWorkspaceIconClick(classLoader)
@@ -41,7 +50,7 @@ object LauncherDockHook {
         try {
             XposedBridge.hookAllMethods(cls, "onClick", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!isActive()) return
                     try {
                         val view = param.args.firstOrNull() as? View ?: return
                         val tag = view.tag ?: return
@@ -87,7 +96,7 @@ object LauncherDockHook {
         try {
             XposedBridge.hookAllMethods(cls, "startItemInfoActivity", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookGuard.isActive()) return
+                    if (!isActive()) return
                     try {
                         val ctx = param.thisObject as? Context ?: return
                         val itemInfo = param.args.getOrNull(1) ?: return
@@ -128,6 +137,7 @@ object LauncherDockHook {
         try {
             XposedBridge.hookAllMethods(cls, "startDragOnLongClick", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!isActive()) return
                     HookGuard.safeRun("TaskbarDragController.startDragOnLongClick") {
                         val view = param.args.firstOrNull() as? View ?: return@safeRun
                         val tag = view.tag ?: return@safeRun

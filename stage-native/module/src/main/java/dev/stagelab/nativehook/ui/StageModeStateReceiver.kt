@@ -22,6 +22,13 @@ class StageModeStateReceiver : BroadcastReceiver() {
                 prefs.edit().putBoolean(StageModeNotificationHelper.KEY_ENABLED, false).apply()
                 StageModeNotificationHelper.cancelExitNotification(context)
 
+                // Immediately disable system_server FlexibleTaskController hooks (zero residual hooks!)
+                context.sendBroadcast(
+                    Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_STAGE_MODE_SYNC).apply {
+                        putExtra("enabled", false)
+                    },
+                )
+
                 // Notify SystemUI to disable Stage Manager and unlock navigation gestures.
                 context.sendBroadcast(
                     Intent(StageNativeRuntime.ACTION_STAGE_CMD).apply {

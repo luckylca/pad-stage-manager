@@ -31,12 +31,13 @@ jobs:
           packages: "platforms;android-37 build-tools;37.0.0"
 
       - name: Decode optional release keystore
-        if: env.STAGELAB_KEYSTORE_BASE64 != ''
         env:
           STAGELAB_KEYSTORE_BASE64: ${{ secrets.STAGELAB_KEYSTORE_BASE64 }}
         run: |
-          echo "$STAGELAB_KEYSTORE_BASE64" | base64 -d > stage-native/release.jks
-          echo "STAGELAB_KEYSTORE_FILE=$GITHUB_WORKSPACE/stage-native/release.jks" >> "$GITHUB_ENV"
+          if [ -n "$STAGELAB_KEYSTORE_BASE64" ]; then
+            echo "$STAGELAB_KEYSTORE_BASE64" | base64 -d > stage-native/release.jks
+            echo "STAGELAB_KEYSTORE_FILE=$GITHUB_WORKSPACE/stage-native/release.jks" >> "$GITHUB_ENV"
+          fi
 
       - name: Run Core unit tests and assemble Debug/Release APKs
         working-directory: stage-native

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="stage-native/module/src/main/res/drawable/ic_launcher_foreground.xml" width="108" alt="StageLab Native Icon" />
+  <img src="docs/native/icon.svg" width="108" alt="StageLab Native Icon" />
   <h1>StageLab Native</h1>
   <p><strong>iPadOS-style Stage Manager Xposed Module for Android Tablets &amp; Foldables</strong></p>
   <p>

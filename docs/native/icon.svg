@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="128" height="128" role="img" aria-label="StageLab Native Icon">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="18" y="18" width="72" height="72" rx="18" />
+    </clipPath>
+    <linearGradient id="bgBase" gradientUnits="userSpaceOnUse" x1="8" y1="6" x2="100" y2="102">
+      <stop offset="0" stop-color="#523B8E" />
+      <stop offset="0.52" stop-color="#6750A4" />
+      <stop offset="1" stop-color="#49327F" />
+    </linearGradient>
+    <radialGradient id="bgGlowTR" gradientUnits="userSpaceOnUse" cx="84" cy="20" r="62">
+      <stop offset="0" stop-color="#D0BCFF" stop-opacity="0.4" />
+      <stop offset="0.55" stop-color="#E8DEF8" stop-opacity="0.13" />
+      <stop offset="1" stop-color="#E8DEF8" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="bgGlowBL" gradientUnits="userSpaceOnUse" cx="22" cy="88" r="56">
+      <stop offset="0" stop-color="#9A6376" stop-opacity="0.35" />
+      <stop offset="0.6" stop-color="#7D5260" stop-opacity="0.1" />
+      <stop offset="1" stop-color="#7D5260" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="stripFront" gradientUnits="userSpaceOnUse" x1="27" y1="43" x2="40" y2="66">
+      <stop offset="0" stop-color="#F5EEFF" />
+      <stop offset="1" stop-color="#E0D0FB" />
+    </linearGradient>
+    <linearGradient id="stageCard" gradientUnits="userSpaceOnUse" x1="41" y1="29" x2="80" y2="66">
+      <stop offset="0" stop-color="#FFFBFE" />
+      <stop offset="1" stop-color="#F3EDF7" />
+    </linearGradient>
+    <linearGradient id="dockCard" gradientUnits="userSpaceOnUse" x1="32" y1="71" x2="76" y2="79">
+      <stop offset="0" stop-color="#FFFBFE" stop-opacity="0.95" />
+      <stop offset="1" stop-color="#E8DEF8" stop-opacity="0.92" />
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="0" y="0" width="108" height="108" fill="url(#bgBase)" />
+    <rect x="0" y="0" width="108" height="108" fill="url(#bgGlowTR)" />
+    <rect x="0" y="0" width="108" height="108" fill="url(#bgGlowBL)" />
+
+    <path fill="#120A24" fill-opacity="0.16"
+      d="M46,31 L77,31 Q81,31 81,35 L81,64 Q81,68 77,68 L46,68 Q42,68 42,64 L42,35 Q42,31 46,31 Z" />
+    <path fill="#120A24" fill-opacity="0.13"
+      d="M34,74 L74,74 Q77.5,74 77.5,77.5 Q77.5,81 74,81 L34,81 Q30.5,81 30.5,77.5 Q30.5,74 34,74 Z" />
+
+    <path fill="#E8DEF8" fill-opacity="0.48"
+      d="M26.5,35.5 L35,37.8 Q37,38.3 37,40.4 L37,50.5 Q37,52.5 35,52.9 L26.5,54.6 Q25,54.9 25,53.2 L25,37.2 Q25,35.2 26.5,35.5 Z" />
+
+    <path fill="url(#stripFront)" stroke="#FFFFFF" stroke-opacity="0.7" stroke-width="0.7"
+      d="M28.5,43.5 L37.8,45.6 Q39.8,46.1 39.8,48.2 L39.8,61.6 Q39.8,63.7 37.8,64.2 L28.5,66.4 Q26.8,66.8 26.8,64.8 L26.8,45.2 Q26.8,43.1 28.5,43.5 Z" />
+    <circle cx="33.3" cy="52.8" r="2.2" fill="#7D5260" />
+
+    <path fill="url(#stageCard)" stroke="#FFFFFF" stroke-opacity="0.8" stroke-width="0.8"
+      d="M45,29 L76,29 Q80,29 80,33 L80,62 Q80,66 76,66 L45,66 Q41,66 41,62 L41,33 Q41,29 45,29 Z" />
+    <circle cx="57.5" cy="33.2" r="1" fill="#9A8F99" />
+    <circle cx="60.5" cy="33.2" r="1" fill="#9A8F99" />
+    <circle cx="63.5" cy="33.2" r="1" fill="#9A8F99" />
+
+    <path fill="#E8DEF8"
+      d="M45.8,37.2 L58.6,37.2 Q60.2,37.2 60.2,38.8 L60.2,60.2 Q60.2,61.8 58.6,61.8 L45.8,61.8 Q44.2,61.8 44.2,60.2 L44.2,38.8 Q44.2,37.2 45.8,37.2 Z" />
+    <path fill="#6750A4"
+      d="M47.6,41 L56.8,41 Q57.8,41 57.8,42 L57.8,46 Q57.8,47 56.8,47 L47.6,47 Q46.6,47 46.6,46 L46.6,42 Q46.6,41 47.6,41 Z" />
+    <path fill="#B69DF8"
+      d="M47.6,50 L56.8,50 Q57.6,50 57.6,50.8 L57.6,52.2 Q57.6,53 56.8,53 L47.6,53 Q46.6,53 46.6,52.2 L46.6,50.8 Q46.6,50 47.6,50 Z" />
+
+    <path fill="#E8EDF5"
+      d="M64.2,37.2 L75.2,37.2 Q76.8,37.2 76.8,38.8 L76.8,60.2 Q76.8,61.8 75.2,61.8 L64.2,61.8 Q62.6,61.8 62.6,60.2 L62.6,38.8 Q62.6,37.2 64.2,37.2 Z" />
+    <path fill="#7D5260"
+      d="M65.8,41 L73.6,41 Q74.5,41 74.5,41.9 L74.5,48.5 Q74.5,49.4 73.6,49.4 L65.8,49.4 Q64.9,49.4 64.9,48.5 L64.9,41.9 Q64.9,41 65.8,41 Z" />
+    <path fill="#D0BCFF"
+      d="M65.8,52.2 L73.6,52.2 Q74.4,52.2 74.4,53 L74.4,57.4 Q74.4,58.2 73.6,58.2 L65.8,58.2 Q65,58.2 65,57.4 L65,53 Q65,52.2 65.8,52.2 Z" />
+
+    <path fill="url(#dockCard)" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="0.7"
+      d="M35.5,71.2 L72.5,71.2 Q76.5,71.2 76.5,75.2 Q76.5,79.2 72.5,79.2 L35.5,79.2 Q31.5,79.2 31.5,75.2 Q31.5,71.2 35.5,71.2 Z" />
+    <circle cx="37.5" cy="75.2" r="2.3" fill="#D0BCFF" />
+    <path fill="#6750A4"
+      d="M45.8,73.1 L48.4,73.1 Q49.6,73.1 49.6,74.3 L49.6,76.1 Q49.6,77.3 48.4,77.3 L45.8,77.3 Q44.6,77.3 44.6,76.1 L44.6,74.3 Q44.6,73.1 45.8,73.1 Z" />
+    <path fill="#7D5260"
+      d="M54.3,73.1 L56.9,73.1 Q58.1,73.1 58.1,74.3 L58.1,76.1 Q58.1,77.3 56.9,77.3 L54.3,77.3 Q53.1,77.3 53.1,76.1 L53.1,74.3 Q53.1,73.1 54.3,73.1 Z" />
+    <path fill="#4F378B"
+      d="M62.8,73.1 L65.4,73.1 Q66.6,73.1 66.6,74.3 L66.6,76.1 Q66.6,77.3 65.4,77.3 L62.8,77.3 Q61.6,77.3 61.6,76.1 L61.6,74.3 Q61.6,73.1 62.8,73.1 Z" />
+    <circle cx="71.3" cy="75.2" r="1.9" fill="#9A82DB" />
+  </g>
+</svg>

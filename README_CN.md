@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="stage-native/module/src/main/res/drawable/ic_launcher_foreground.xml" width="108" alt="StageLab Native 图标" />
+  <img src="docs/native/icon.svg" width="108" alt="StageLab Native 图标" />
   <h1>StageLab Native（原生台前调度）</h1>
   <p><strong>面向 Android 平板与折叠屏的原生级 iPad Stage Manager LSPosed 模块</strong></p>
   <p>

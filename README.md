@@ -58,7 +58,7 @@ StageLab Native brings a native, 120fps iPadOS-style **Stage Manager** experienc
 
 ## Installation
 
-1. Download the latest APK from [GitHub Releases](../../releases) (or the LSPosed Module Repository once listed).
+1. Download the latest APK from [GitHub Releases](https://github.com/luckylca/pad-stage-manager/releases) (or the LSPosed Module Repository once listed).
 2. Install the APK on your device.
 3. Open **LSPosed / Vector**, enable **StageLab Native (`dev.stagelab.nativehook`)**, and verify the target scope includes:
    - `system` (System Framework)

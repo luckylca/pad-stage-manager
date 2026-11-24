@@ -52,7 +52,7 @@ StageLab Native 基于系统原生 `ShellTaskOrganizer`、`WindowContainerTransa
 
 ## 安装与使用
 
-1. 前往 [GitHub Releases](../../releases)（或 LSPosed 模块仓库）下载最新版 APK 并安装。
+1. 前往 [GitHub Releases](https://github.com/luckylca/pad-stage-manager/releases)（或 LSPosed 模块仓库）下载最新版 APK 并安装。
 2. 打开 **LSPosed / Vector**，勾选启用 **StageLab Native (`dev.stagelab.nativehook`)**，确认作用域已勾选：
    - `system`（系统框架）
    - `com.android.systemui`（系统界面）

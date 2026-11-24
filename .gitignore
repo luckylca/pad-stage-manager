@@ -18,8 +18,10 @@ captures/
 *.hprof
 
 # Signing material and secrets
+keystore/
 *.jks
 *.keystore
+*.apk
 keystore.properties
 secrets.properties
 .env

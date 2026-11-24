@@ -1,117 +1,116 @@
-# StageLab — an iPad style Stage Manager for Android
+<div align="center">
+  <img src="stage-native/module/src/main/res/drawable/ic_launcher_foreground.xml" width="108" alt="StageLab Native Icon" />
+  <h1>StageLab Native</h1>
+  <p><strong>iPadOS-style Stage Manager Xposed Module for Android Tablets &amp; Foldables</strong></p>
+  <p>
+    <a href="README_CN.md">简体中文</a> ·
+    <a href="#features">Features</a> ·
+    <a href="#compatibility">Compatibility</a> ·
+    <a href="#installation">Installation</a> ·
+    <a href="#building">Building</a>
+  </p>
+</div>
 
-StageLab is a **mode switch**: off, the app is one switch; on, it becomes a full Stage Manager
-workspace with a recent-groups rail on the left, free floating application windows in the middle and
-an iPad style dock at the bottom.
+---
 
-It is **not** a launcher with screenshots. There is no MediaProjection, no WebView fake, no
-periodic bitmap capture. Every window, including the rail previews, is a real Android task surface
-composited by SurfaceFlinger.
+StageLab Native brings a native, 120fps iPadOS-style **Stage Manager** experience to Android 13–17 tablets and foldables using real system window orchestration (`ShellTaskOrganizer`, `WindowContainerTransaction`, and ColorOS Flexible Window — never fake WebViews, MediaProjection clones, or accessibility-service overlays).
 
-Verified on **OPPO Pad mini (OPD2515)**, ColorOS 17.0.0.103, Android 17 / SDK 37, 1680×2520 @ 120 Hz.
+> Turning the module switch **OFF** (`enable/disable`) disables all active hooks immediately without lingering side effects, restores normal ColorOS/Android desktop & navigation behavior, and lets you safely recover anytime via the companion control panel or exit notification.
 
-| OFF | ON |
-|---|---|
-| ![off](docs/m1-control.png) | ![on](docs/m2-windows.png) |
+## Showcase
 
-| recent-group rail (live preview) | drag / resize chrome |
-|---|---|
-| ![rail](docs/m2-rail.png) | ![drag](docs/m4-drag.png) |
-
-## Product model
-
-* **OFF** — a single switch, a status line, and (only on first use) the Shizuku grant. No task
-  list, no diagnostics, no developer buttons.
-* **ON** — immersive workspace: left recent-group rail with live previews, overlapping real app
-  windows with traffic-light title bars, bottom dock with real app icons.
-* Turning the mode off restores every staged task to full screen and leaves the user on the
-  foreground application; no app is killed, and the global settings StageLab changed are restored
-  (only if the user did not change them meanwhile).
-
-## What works today (device verified)
-
-* **Multiple real tasks on screen at once**, freely positioned and overlapping.
-* **Live rail previews** — the rail tiles are the real parked task windows, not screenshots.
-* **Groups** — create a group, switch groups from the rail, each group keeps its own windows and
-  geometry, persisted across restarts.
-* **Real gestures** — drag a window by its title bar, resize from the corner/edges, minimize
-  (traffic light), restore from the minimized tray, close, tap a dock icon to open.
-* **Native input / IME / Back** stay with the application: the chrome is a thin overlay, everything
-  else is the app's own window.
-* **Self healing** — dropped Shizuku UserService reconnects with backoff; orphan tasks are adopted
-  instead of duplicating windows.
-
-## Permission tiers
-
-StageLab always tries the lowest privilege that can do the job.
-
-| Tier | Requirement | What it can do |
+| Control Panel & Diagnostics | Side-by-Side Stage & 3D Strip | 120fps Magic Bloom App Search |
 |---|---|---|
-| Level 1 | nothing | launch apps, show the chrome. Cannot host or arrange other apps' tasks (platform restriction). |
-| Level 2 | **Shizuku** (Shell UID 2000) | full stage: create FREEFORM tasks, move/resize/focus/close them, live previews, IME. |
-| Level 3 | **KernelSU / root** | same engine running as UID 0. Requires KernelSU to allow `su` for StageLab. |
+| ![Control Panel](docs/native/control-panel.png) | ![Stage Landscape](docs/native/stage-landscape.png) | ![App Search](docs/native/app-search.png) |
 
-The privileged engine is identical for every tier — only the transport differs
-(Shizuku UserService / KernelSU `app_process` service / ADB loopback service).
+## Features
 
-## Quick start
+- **Real Multi-Window Stages**: Launch or merge apps into workspaces (`Stage`), run unlimited windows + per-Stage edge-tucked mini/sidebar windows (`FloatHandle`), and tile 2–3 active windows automatically with zero overlap.
+- **Orientation-Adaptive Layouts**:
+  - **Landscape**: Side-by-side multi-column tiling with full-height workspace canvases.
+  - **Portrait**: Full-width stacked horizontal rows so windows remain crisp and readable without collapsing into narrow vertical strips.
+  - **Seamless Portrait ↔ Landscape Rotation**: Live display listener & post-transition scale recalibration keep windows, Dock, Left Recent Strip, and App Search aligned with notch/cutout and navigation-bar safe insets.
+- **3D Slanted Left Recent Strip & Magic Move**:
+  - Real `TaskSnapshotManager` / `ActivityTaskManager` live thumbnails with `FLAG_SECURE` awareness.
+  - 120fps Choreographer two-phase Stage switch animation (`StageMagicTransitionOverlay`) supporting tap-to-switch and drag-to-merge.
+- **Unified Floating Dock & App Search (`⌕`)**:
+  - Pre-warmed, zero-stutter physics-spring (`Choreographer`) App Search sheet with instant scrim/Dock touch interruption at any animation frame.
+  - **Unified 120fps Free Drag & Drop**: Long-press (~200ms) any app in App Search or drag icons directly from the Dock to:
+    - Pin into exact Dock slots with live sibling spacing & insertion bar preview (persisted across reboots),
+    - Reorder pinned Dock icons horizontally,
+    - Unpin by dragging to the top remove pill or past Dock side edges,
+    - Merge directly into the Active Stage or drop onto any Left Recent Strip workspace card.
+  - Auto-dismisses App Search smoothly whenever a workspace switch is initiated via Dock or exposed Recent Strip cards.
+- **Built-in Compatibility Diagnostics**: Real-time inspection of every `system_server` & `SystemUI` hook probe (`HIT` / `FALLBACK` / `MISSING`) plus one-tap clipboard report copy inside `MainActivity`.
+
+## Compatibility
+
+| Component / Tier | Support Scope |
+|---|---|
+| **Android Versions** | **Android 13 – 17** (API 33 – 37), `minSdk = 33`, `targetSdk = 36` |
+| **Framework** | **LSPosed / Vector** (`xposedminversion = 82`) |
+| **Xposed Scope** | `system` (Android System), `com.android.systemui`, `com.android.launcher` |
+| **ROM Integration** | **ColorOS 13 – 17 / OxygenOS / realme UI** (native Flexible Window tier) + **AOSP Freeform** (`WCT#setBounds` / `WINDOWING_MODE_FREEFORM` fallback) |
+| **Form Factors** | Foldables (`Compact`), 8.8" Mini Tablets (`OPPO Pad mini`), 11"–12.1" Standard Tablets, 13.2"+ Pro Tablets |
+| **Live Verified Hardware** | OPPO Pad mini (`OPD2515`), ColorOS `V17.0.0`, Android 17 (API 37), `1680×2520 @ 120 Hz` |
+
+> Note: On non-ColorOS or AOSP builds where `FlexibleWindowManager` is absent, StageLab automatically falls back to standard `WindowContainerTransaction#setBounds` + `WINDOWING_MODE_FREEFORM`. Check the **Diagnostics** card inside the app to inspect active probes on your ROM.
+
+## Installation
+
+1. Download the latest APK from [GitHub Releases](../../releases) (or the LSPosed Module Repository once listed).
+2. Install the APK on your device.
+3. Open **LSPosed / Vector**, enable **StageLab Native (`dev.stagelab.nativehook`)**, and verify the target scope includes:
+   - `system` (System Framework)
+   - `com.android.systemui` (System UI)
+   - `com.android.launcher` (System Launcher)
+4. Reboot (or soft-reboot via KernelSU/LSPosed) once after enabling or updating the module.
+5. Open **StageLab Native** and toggle **Enable Stage Manager** (notification permission allows the quick one-tap exit notification).
+
+### Emergency Disable / Recovery
+
+If anything unexpected occurs on an untested ROM:
+
+```bash
+# Disable Stage Manager mode cleanly via ADB
+adb shell am broadcast -a dev.stagelab.nativehook.ACTION_STAGE_CMD --es cmd disable_module -p com.android.systemui
+
+# Or disable the Xposed module completely via Vector/LSPosed CLI and restart SystemUI/Launcher
+adb shell su -c "/data/adb/lspd/cli modules disable dev.stagelab.nativehook"
+adb shell su -c "pkill -f com.android.systemui; pkill -f com.android.launcher"
+```
+
+See [stage-native/docs/SAFE_RECOVERY.md](stage-native/docs/SAFE_RECOVERY.md) for additional recovery steps.
+
+## Building
 
 ```powershell
-# build
-./gradlew :app:assembleRelease
-
-# install (ColorOS asks you to confirm the side-loaded APK once)
-adb install -r app/build/outputs/apk/release/app-release.apk
-
-# start Shizuku once per boot (root or the official adb starter)
-adb shell /data/app/*/moe.shizuku.privileged.api*/lib/arm64/libshizuku.so
-
-# run the acceptance scenario on the device
-./scripts/device-smoke-test.ps1
+cd stage-native
+.\gradlew.bat :core:test :module:assembleDebug :module:assembleRelease
 ```
 
-Then open StageLab → “连接 Shizuku” → allow → press **＋** and pick apps, or press **演示** to open
-the counter / motion / video test windows.
+APKs are written to:
+- `stage-native/module/build/outputs/apk/debug/module-debug.apk`
+- `stage-native/module/build/outputs/apk/release/module-release.apk`
 
-## How it works (short version)
+For custom release signing, either define environment variables (`STAGELAB_KEYSTORE_FILE`, `STAGELAB_KEYSTORE_PASSWORD`, `STAGELAB_KEY_ALIAS`, `STAGELAB_KEY_PASSWORD`) or place an ignored `keystore.properties` file in `stage-native/`.
 
-1. The app asks the privileged service to start an app with
-   `ActivityOptions#setLaunchBounds` + `setLaunchWindowingMode(FREEFORM)`.
-2. The service (Shell UID) calls `IActivityTaskManager.startActivityAsUser`, then keeps the task
-   list fresh through `getTasks`.
-3. Geometry is applied with `IActivityTaskManager.resizeTask`; focus with `setFocusedTask`;
-   closing with `removeTask`.
-4. The stage UI is a full-screen, non-focusable window *behind* the tasks. It draws the desk,
-   focus halos, top bar and dock; the task windows are composited above it by the system.
-5. When the user taps a rail window, WindowManager focuses it. StageLab notices the focus change
-   and swaps the rail and main rectangles — the task itself never restarts.
+## Repository Structure
 
-Details, including the AOSP references and the hidden API surface, are in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Measured results are in
-[docs/TEST_REPORT.md](docs/TEST_REPORT.md), and the per-tier truth table is in
-[docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md).
-
-## Known limitations (measured, not guessed)
-
-* Freeform tasks have a system minimum size (~220 dp on this build). The rail is sized above it;
-  extra windows are **parked behind the main window** instead of being squeezed out of the screen.
-* Rotating to landscape leaves room for one preview, so the second preview is parked.
-* Third-party apps may be recreated by Android when their window is resized. StageLab keeps the
-  task and process, and the demo targets declare `configChanges` so their counters keep running.
-* Launching a non-exported activity needs `START_ANY_ACTIVITY`, which Shell does not hold; the
-  app picker therefore lists exported launcher activities only.
-* KernelSU blocks `su` exec for `untrusted_app` until the user grants root to StageLab. The root
-  engine itself is verified (see the test report).
-
-## Repository layout
-
+```text
+pad-stage-manager/
+├── stage-native/                 # Active LSPosed / Xposed implementation (Android 13–17)
+│   ├── core/                     # Pure Kotlin Stage state machine & unit tests
+│   └── module/                   # Android module APK (hooks, bridge, overlays, Material You UI)
+├── app/                          # Archived v1 standalone Shizuku Freeform prototype
+├── docs/
+│   └── native/                   # Showcase screenshots & stage-native verification docs
+├── .github/workflows/build.yml   # CI tests + release APK workflow
+├── LICENSE                       # GNU General Public License v3.0
+├── README.md                     # English documentation (LSPosed Repo)
+└── README_CN.md                  # 简体中文文档
 ```
-app/src/main/java/dev/stagelab/android/
-  core/privileged/   engine that runs as Shell/Root: TaskMutations, StageEngine, organizers
-  core/ipc/          transports (Shizuku UserService, KernelSU root, ADB loopback)
-  core/stage/        layout engine + StageRuntime (state, polling, geometry sync)
-  ui/                Compose stage, app picker, diagnostics
-  demo/              live counter / motion / video test targets
-scripts/             hidden API stubs, device smoke test, ADB service launcher
-docs/                architecture, test report, capability matrix, device notes
-```
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for details.

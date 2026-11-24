@@ -357,6 +357,10 @@ class AppSearchOverlayController(
             gridContainer = grid
             windowLp = lp
             isAttached = true
+            if (allApps.isNotEmpty()) {
+                cachedCells = buildPooledCells(context.applicationContext, allApps)
+                populateGrid("")
+            }
             HookGuard.info("APP_SEARCH persistent window pre-attached")
         }.onFailure {
             HookGuard.warn("APP_SEARCH persistent attach failed", it)
@@ -432,7 +436,9 @@ class AppSearchOverlayController(
         syncResponsiveLayoutIfNeeded(context)
         if (cachedCells.isEmpty() && allApps.isNotEmpty()) {
             cachedCells = buildPooledCells(context.applicationContext, allApps)
-            populateGrid("")
+        }
+        if ((gridContainer?.childCount ?: 0) == 0 && cachedCells.isNotEmpty()) {
+            populateGrid(searchInputView?.text?.toString().orEmpty())
         }
         prewarm(context)
 
@@ -549,6 +555,7 @@ class AppSearchOverlayController(
             scrollView = null
             gridContainer = null
             windowLp = null
+            cachedCells = emptyList()
             springPos = 0f
             springVel = 0f
             targetProgress = 0f

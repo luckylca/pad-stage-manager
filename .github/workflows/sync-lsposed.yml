@@ -1,0 +1,82 @@
+name: Sync LSPosed Repository
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['Build & Release StageLab Native']
+    types: [completed]
+permissions:
+  contents: read
+concurrency:
+  group: lsposed-repository-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: >-
+      github.repository == 'luckylca/pad-stage-manager' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')))
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
+      SRC: luckylca/pad-stage-manager
+      DST: Xposed-Modules-Repo/io.github.luckylca.stagelab
+    steps:
+      - name: Check mirror credentials
+        if: env.GH_TOKEN == ''
+        run: echo '::warning::Set the LSPOSED_REPO_TOKEN repository secret to enable synchronization.'
+      - uses: actions/checkout@v4
+        if: env.GH_TOKEN != ''
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Initialize and update official module metadata
+        if: env.GH_TOKEN != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git clone "https://github.com/$DST.git" "$RUNNER_TEMP/lsposed-module"
+          target="$RUNNER_TEMP/lsposed-module"
+          if git -C "$target" rev-parse --verify HEAD >/dev/null 2>&1; then
+            git -C "$target" checkout main
+          else
+            git -C "$target" symbolic-ref HEAD refs/heads/main
+          fi
+          cp LICENSE "$target/"
+          for file in README.md SUMMARY SCOPE SOURCE_URL; do
+            cp "docs/lsposed-repo/$file" "$target/$file"
+          done
+          git -C "$target" config user.name 'StageLab Release Bot'
+          git -C "$target" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$target" add LICENSE README.md SUMMARY SCOPE SOURCE_URL
+          if ! git -C "$target" diff --cached --quiet; then
+            git -C "$target" commit -m 'Sync StageLab module metadata'
+            git -C "$target" push origin HEAD:refs/heads/main
+          fi
+      - name: Mirror latest signed release
+        if: env.GH_TOKEN != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/stagelab-release"
+          mkdir -p "$work"
+          gh api "repos/$SRC/releases/latest" > "$work/upstream.json"
+          tag="$(jq -er '.tag_name' "$work/upstream.json")"
+          [[ "$tag" =~ ^[0-9]+-[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${tag#*-}"
+          asset="StageLab-Native-${version}.apk"
+          digest="$(jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest' "$work/upstream.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          if gh release view "$tag" --repo "$DST" >/dev/null 2>&1; then
+            existing="$(gh api "repos/$DST/releases/tags/$tag" | jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest')"
+            test "$existing" = "$digest"
+            echo "Release $tag already mirrored with matching SHA-256."
+            exit 0
+          fi
+          gh release download "$tag" --repo "$SRC" --pattern "$asset" --dir "$work"
+          printf '%s  %s\n' "${digest#sha256:}" "$work/$asset" | sha256sum -c -
+          jq -r '.body // empty' "$work/upstream.json" > "$work/release-notes.md"
+          test -s "$work/release-notes.md"
+          gh release create "$tag" "$work/$asset" --repo "$DST" --target main --title "$version" --notes-file "$work/release-notes.md"

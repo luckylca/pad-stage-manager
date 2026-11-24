@@ -1,0 +1,51 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - '*-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download and verify upstream APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#*-}"
+          ASSET="StageLab-Native-${VERSION}.apk"
+          RELEASE_API="https://api.github.com/repos/luckylca/pad-stage-manager/releases/tags/${TAG}"
+          DOWNLOAD_URL="https://github.com/luckylca/pad-stage-manager/releases/download/${TAG}/${ASSET}"
+
+          curl -fL --retry 5 --retry-all-errors -o "${ASSET}" "${DOWNLOAD_URL}"
+
+          EXPECTED_DIGEST="$(curl -fsSL --retry 5 --retry-all-errors "${RELEASE_API}" \
+            | jq -r --arg asset "${ASSET}" '.assets[] | select(.name == $asset) | .digest')"
+          test -n "${EXPECTED_DIGEST}" && test "${EXPECTED_DIGEST}" != "null"
+          echo "${EXPECTED_DIGEST#sha256:}  ${ASSET}" | sha256sum -c -
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
+
+      - name: Publish LSPosed release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE_API="https://api.github.com/repos/luckylca/pad-stage-manager/releases/tags/${GITHUB_REF_NAME}"
+          curl -fsSL --retry 5 --retry-all-errors "$RELEASE_API" | jq -r '.body // empty' > release-notes.md
+          test -s release-notes.md
+
+          gh release create "$GITHUB_REF_NAME" "$ASSET" \
+            --title "StageLab Native $VERSION" \
+            --notes-file release-notes.md \
+            --target "$GITHUB_SHA"

@@ -1,0 +1,1 @@
+面向 Android 13–17 平板与折叠屏的原生级 iPad Stage Manager（台前调度）LSPosed 模块，基于 ShellTaskOrganizer 与 ColorOS Flexible Window，支持横竖屏多窗自动平铺、左侧 3D 工作区切换与 120fps 应用搜索自由拖拽。

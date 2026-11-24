@@ -4,10 +4,10 @@
 
 ## 1. 源码仓库自动发版（已配置好）
 
-当 `luckylca/pad-stage-manager` 推送匹配 `<versionCode>-<versionName>` 的标签（例如 `4-1.1.1-native`）时，GitHub Actions 会自动：
+当 `luckylca/pad-stage-manager` 推送匹配 `<versionCode>-<versionName>` 的标签（例如 `1-1.0.0`）时，GitHub Actions 会自动：
 1. 执行 `:core:test`、`assembleDebug` 与 `assembleRelease`；
 2. 校验 Release APK 证书指纹与 `45a7a172c03d567cd910b304c2c83d43257c5fd988385712ad30589dd5661b70` 一致；
-3. 自动创建或更新 GitHub Release `4-1.1.1-native`，挂载 `StageLab-Native-1.1.1-native.apk` 与 `docs/releases/1.1.1-native.md` 发布说明。
+3. 自动创建或更新 GitHub Release `1-1.0.0`，挂载 `StageLab-Native-1.0.0.apk` 与 `docs/releases/1.0.0.md` 发布说明。
 
 ## 2. 提交官方仓库收录申请
 
@@ -36,6 +36,6 @@ git commit -m "init: LSPosed module metadata and release mirror workflow"
 git push -u origin main
 
 # 同步首个版本 Release（从上游 luckylca/pad-stage-manager 拉取并校验 SHA-256 后自动发布）
-git tag 4-1.1.1-native
-git push origin 4-1.1.1-native
+git tag 1-1.0.0
+git push origin 1-1.0.0
 ```

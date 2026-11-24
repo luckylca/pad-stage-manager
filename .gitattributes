@@ -11,7 +11,8 @@
 *.xml text eol=lf
 *.md text eol=lf
 *.toml text eol=lf
-*.properties text eol=lf*.java text eol=lf
+*.properties text eol=lf
+*.java text eol=lf
 *.aidl text eol=lf
 *.ps1 text eol=crlf
 gradlew text eol=lf

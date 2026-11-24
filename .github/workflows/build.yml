@@ -28,15 +28,25 @@ jobs:
       - name: Set up Android SDK (Compile SDK 37 / Build Tools 37.0.0)
         uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-37 build-tools;37.0.0"
+          packages: "platforms;android-37.0 build-tools;37.0.0"
 
-      - name: Decode optional release keystore
+      - name: Decode release keystore
         env:
           STAGELAB_KEYSTORE_BASE64: ${{ secrets.STAGELAB_KEYSTORE_BASE64 }}
+          STAGELAB_KEYSTORE_PASSWORD: ${{ secrets.STAGELAB_KEYSTORE_PASSWORD }}
+          STAGELAB_KEY_ALIAS: ${{ secrets.STAGELAB_KEY_ALIAS }}
+          STAGELAB_KEY_PASSWORD: ${{ secrets.STAGELAB_KEY_PASSWORD }}
         run: |
           if [ -n "$STAGELAB_KEYSTORE_BASE64" ]; then
-            echo "$STAGELAB_KEYSTORE_BASE64" | base64 -d > stage-native/release.jks
+            printf '%s' "$STAGELAB_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > stage-native/release.jks
             echo "STAGELAB_KEYSTORE_FILE=$GITHUB_WORKSPACE/stage-native/release.jks" >> "$GITHUB_ENV"
+          elif [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            echo "::error::Missing STAGELAB_KEYSTORE_BASE64 / signing secrets for tagged release. Refusing to publish a debug-signed Release APK."
+            exit 1
+          fi
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]] && { [ -z "$STAGELAB_KEYSTORE_PASSWORD" ] || [ -z "$STAGELAB_KEY_ALIAS" ] || [ -z "$STAGELAB_KEY_PASSWORD" ]; }; then
+            echo "::error::Missing STAGELAB_KEYSTORE_PASSWORD, STAGELAB_KEY_ALIAS, or STAGELAB_KEY_PASSWORD for tagged release."
+            exit 1
           fi
 
       - name: Run Core unit tests and assemble Debug/Release APKs
@@ -66,5 +76,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: "StageLab Native ${{ github.ref_name }}"
           generate_release_notes: true
-          files: dist/StageLab-Native-*.apk
+          files: "dist/StageLab-Native-${{ github.ref_name }}.apk"

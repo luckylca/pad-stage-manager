@@ -142,8 +142,8 @@ class RecentStripOverlayController(
     }
 
     private fun buildSignature(context: Context, stages: List<Stage>, hidden: Boolean, tempRevealed: Boolean): String {
-        val dm = context.resources.displayMetrics
-        return "${dm.widthPixels}x${dm.heightPixels}|$hidden|$tempRevealed|" + stages.joinToString(";") { st ->
+        val snap = StageLayoutMetrics.resolveDisplaySnapshot(context)
+        return "${snap.widthPx}x${snap.heightPx}|${snap.safeLeftPx}|${snap.safeBottomPx}|$hidden|$tempRevealed|" + stages.joinToString(";") { st ->
             "${st.stageId}:${st.tasks.joinToString(",") { it.taskId.toString() }}"
         }
     }
@@ -232,9 +232,8 @@ class RecentStripOverlayController(
             ),
         )
 
-        val dm = context.resources.displayMetrics
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
-        lastLayoutKey = "${dm.widthPixels}x${dm.heightPixels}"
+        val metrics = StageLayoutMetrics.fromContext(context)
+        lastLayoutKey = "${metrics.screenW}x${metrics.screenH}"
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -246,9 +245,9 @@ class RecentStripOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            // Responsive left Back-gesture safe zone (~28dp) & subtle upward bias to stay clear of Dock
+            // Responsive left Back-gesture & cutout safe zone + subtle upward bias to stay clear of Dock/nav bar
             x = metrics.backSafePx
-            y = -dp(context, 34)
+            y = -dp(context, 34) - metrics.extraNavBottomPx / 2
             title = "StageLabRecentStrip"
         }
 
@@ -269,13 +268,12 @@ class RecentStripOverlayController(
         val wm = windowManager ?: return
         val root = rootContainer ?: return
         val lp = windowLp ?: return
-        val dm = context.resources.displayMetrics
-        val key = "${dm.widthPixels}x${dm.heightPixels}"
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val key = "${metrics.screenW}x${metrics.screenH}|${metrics.safeLeftPx}|${metrics.extraNavBottomPx}"
         if (key == lastLayoutKey) return
         lastLayoutKey = key
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         lp.x = metrics.backSafePx
-        lp.y = -dp(context, 34)
+        lp.y = -dp(context, 34) - metrics.extraNavBottomPx / 2
         runCatching { wm.updateViewLayout(root, lp) }
     }
 
@@ -295,11 +293,10 @@ class RecentStripOverlayController(
         hoveredStageId = null
         val maxCards = recentStages.take(StageSession.MAX_VISIBLE_RECENT_STAGES)
         val total = maxCards.size
-        val dm = context.resources.displayMetrics
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
+        val metrics = StageLayoutMetrics.fromContext(context)
 
         val baseGap = dp(context, if (metrics.isLandscape) 12 else 16)
-        val availableH = (dm.heightPixels - dp(context, 180)).coerceAtLeast(dp(context, 280))
+        val availableH = (metrics.screenH - dp(context, 180) - metrics.safeTopPx - metrics.extraNavBottomPx).coerceAtLeast(dp(context, 260))
         val neededH = total * metrics.stripCardHeightPx + (total - 1).coerceAtLeast(0) * baseGap
         val scale = if (neededH > availableH) (availableH.toFloat() / neededH.toFloat()).coerceIn(0.62f, 1.0f) else 1.0f
         val cardW = (metrics.stripCardWidthPx * scale).toInt()

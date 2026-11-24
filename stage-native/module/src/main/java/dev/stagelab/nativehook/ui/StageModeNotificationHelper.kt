@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import dev.stagelab.nativehook.R
 
 /**
  * Standalone notification posted by `dev.stagelab.nativehook` (separate from SystemUI system notifications).
@@ -51,7 +52,8 @@ object StageModeNotificationHelper {
             )
 
             val notification = Notification.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setSmallIcon(R.drawable.ic_stagelab_notif)
+                .setColor(0xFF6750A4.toInt())
                 .setContentTitle("StageLab 台前调度运行中")
                 .setContentText("点击此处退出台前调度模式并恢复系统桌面")
                 .setOngoing(true)

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">StageLab Native</string>
-    <string name="xposed_description">ColorOS 17 iPad Stage Manager based on native Flexible Window &amp; ShellTaskOrganizer</string>
+    <string name="xposed_description">iPadOS Stage Manager for Android 13–17 tablets &amp; foldables (ColorOS / OxygenOS / realme UI / Freeform)</string>
     <string-array name="xposed_scope">
         <item>system</item>
         <item>com.android.systemui</item>

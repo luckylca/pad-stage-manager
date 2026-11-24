@@ -112,11 +112,13 @@ object SystemServerFlexibleHook {
             "sys.class.OplusAppStartupManager",
             classLoader,
             "com.android.server.am.OplusAppStartupManager",
+            "com.android.server.am.ColorAppStartupManager",
         ) ?: return
         OplusCompatAdapter.hookMethodAny(
             probeKey = "sys.startup.allowNotifSync",
             cls = cls,
-            nameCandidates = listOf("shouldPreventSendReceiver"),
+            nameCandidates = listOf("shouldPreventSendReceiver", "shouldPreventSendBroadcast"),
+            fuzzyKeyword = "PreventSend",
             hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!HookGuard.isActive()) return
@@ -421,47 +423,43 @@ object SystemServerFlexibleHook {
     }
 
     private fun hookPanoramaBypass(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(PANORAMA_CONTROLLER, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: class not found: $PANORAMA_CONTROLLER", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "sys.class.PanoramaController",
+            classLoader,
+            PANORAMA_CONTROLLER,
+            "com.android.server.wm.OplusPanoramaController",
+            "com.android.server.wm.OplusFlexibleWorkController",
+        ) ?: return
 
-        try {
-            XposedHelpers.findAndHookMethod(
-                cls,
-                "adjustFlexibleTask",
-                Bundle::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!isEnabled()) return
-                        try {
-                            val bundle = param.args[0] as? Bundle ?: return
-                            if (bundle.getBoolean(KEY_FORCE_ADJUST, false)) {
-                                allowWideStageRect.set(true)
-                                param.result = false
-                            }
-                        } catch (t: Throwable) {
-                            allowWideStageRect.remove()
-                            HookGuard.warn("SystemServerFlexibleHook.adjustFlexibleTask isolated error", t)
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.panorama.adjustFlexible",
+            cls = cls,
+            nameCandidates = listOf("adjustFlexibleTask"),
+            hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!isEnabled()) return
+                    try {
+                        val bundle = param.args.firstOrNull() as? Bundle ?: return
+                        if (bundle.getBoolean(KEY_FORCE_ADJUST, false)) {
+                            allowWideStageRect.set(true)
+                            param.result = false
                         }
+                    } catch (t: Throwable) {
+                        allowWideStageRect.remove()
+                        HookGuard.warn("SystemServerFlexibleHook.adjustFlexibleTask isolated error", t)
                     }
-                },
-            )
-            HookGuard.info("SystemServerFlexibleHook: hooked $PANORAMA_CONTROLLER#adjustFlexibleTask")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook $PANORAMA_CONTROLLER", t)
-        }
+                }
+            },
+        )
     }
 
     private fun hookFlexibleTaskController(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(FLEXIBLE_TASK_CONTROLLER, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: class not found: $FLEXIBLE_TASK_CONTROLLER", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "sys.class.FlexibleTaskController",
+            classLoader,
+            FLEXIBLE_TASK_CONTROLLER,
+            "com.android.server.wm.OplusFlexibleTaskController",
+        ) ?: return
 
         // 0. Never auto-evict or force-minimize existing Flexible/Mini tasks when opening more windows
         OplusCompatAdapter.hookMethodAny(
@@ -539,22 +537,25 @@ object SystemServerFlexibleHook {
                             HookGuard.info("SYS.LAUNCH_WIDE_STAGE pkg=$pkg rect=$targetRect scale=$targetScale (${screenW}x${screenH})")
                         }
 
-                        runCatching { XposedHelpers.setObjectField(info, "mLaunchBounds", Rect(targetRect)) }
-                        runCatching { XposedHelpers.setFloatField(info, "mScale", targetScale) }
+                        OplusCompatAdapter.setObjectFieldAny(info, Rect(targetRect), "mLaunchBounds", "mLaunchRect", "mBounds")
+                        OplusCompatAdapter.setFloatFieldAny(info, targetScale, "mScale", "mScaleRatio")
                         if (targetRect.height() > 0) {
                             val ratio = targetRect.width().toFloat() / targetRect.height().toFloat()
-                            runCatching { XposedHelpers.setFloatField(info, "mRatio", ratio) }
+                            OplusCompatAdapter.setFloatFieldAny(info, ratio, "mRatio")
                         }
-                        runCatching { XposedHelpers.setBooleanField(info, "mSkipPosInMemoryAdjust", true) }
-                        runCatching { XposedHelpers.setBooleanField(info, "mSkipMemoryRectToDefault", true) }
+                        OplusCompatAdapter.setBooleanFieldAny(info, true, "mSkipPosInMemoryAdjust")
+                        OplusCompatAdapter.setBooleanFieldAny(info, true, "mSkipMemoryRectToDefault")
                     }
                 }
             },
         )
 
         // 2. Allow wide stage bounds during stagelab.force_adjust and persist the adjusted bounds
-        try {
-            XposedBridge.hookAllMethods(cls, "adjustFlexibleTask", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.adjustTask",
+            cls = cls,
+            nameCandidates = listOf("adjustFlexibleTask"),
+            hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val wasForced = allowWideStageRect.get() == true
                     allowWideStageRect.remove()
@@ -567,30 +568,40 @@ object SystemServerFlexibleHook {
                         }
                     }
                 }
-            })
-            XposedBridge.hookAllMethods(cls, "isValidAdjustEndRect", object : XC_MethodHook() {
+            },
+        )
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.validAdjustRect",
+            cls = cls,
+            nameCandidates = listOf("isValidAdjustEndRect"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (allowWideStageRect.get() == true && isEnabled()) {
                         param.result = true
                     }
                 }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked adjustFlexibleTask & isValidAdjustEndRect")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook adjustFlexibleTask", t)
-        }
+            },
+        )
 
-        // 3. Block true 2520x1680 fullscreen exit on drag/scale-to-fullscreen (prevents frozen transition snapshot)
+        // 3. Block true fullscreen exit on drag/scale-to-fullscreen (prevents frozen transition snapshot)
         //    and instead snap the window cleanly to the widescreen Main Stage rect.
-        try {
-            XposedBridge.hookAllMethods(cls, "canFullscreenTask", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.canFullscreen",
+            cls = cls,
+            nameCandidates = listOf("canFullscreenTask"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (isEnabled()) {
                         param.result = false
                     }
                 }
-            })
-            XposedBridge.hookAllMethods(cls, "stopScaleAndToFullScreen", object : XC_MethodHook() {
+            },
+        )
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.stopScaleFullscreen",
+            cls = cls,
+            nameCandidates = listOf("stopScaleAndToFullScreen"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskController.stopScaleAndToFullScreen") {
@@ -599,8 +610,13 @@ object SystemServerFlexibleHook {
                         snapTaskObjToMainStage(taskObj, "stopScaleAndToFullScreen")
                     }
                 }
-            })
-            XposedBridge.hookAllMethods(cls, "exitFlexibleTaskWindowInnerLocked", object : XC_MethodHook() {
+            },
+        )
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.exitStrategy",
+            cls = cls,
+            nameCandidates = listOf("exitFlexibleTaskWindowInnerLocked", "exitFlexibleTaskWindowLocked"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!isEnabled()) return
                     HookGuard.safeRun("FlexibleTaskController.exitFlexibleTaskWindowInnerLocked") {
@@ -637,16 +653,18 @@ object SystemServerFlexibleHook {
                         }
                     }
                 }
-            })
-            HookGuard.info("SystemServerFlexibleHook: hooked canFullscreenTask, stopScaleAndToFullScreen & exitFlexibleTaskWindowInnerLocked")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook fullscreen guards", t)
-        }
+            },
+        )
 
         // 3b. Prevent FlexibleTaskScaleManager from EVER entering fullscreen-maximize preview/animation
         //     when dragging a window corner bigger — keeps resizing smooth & never leaves scale state stuck!
-        try {
-            val scaleMgrCls = XposedHelpers.findClass("com.android.server.wm.FlexibleTaskScaleManager", classLoader)
+        val scaleMgrCls = OplusCompatAdapter.findClassAny(
+            "sys.class.ScaleManager",
+            classLoader,
+            "com.android.server.wm.FlexibleTaskScaleManager",
+            "com.android.server.wm.OplusFlexibleTaskScaleManager",
+        )
+        if (scaleMgrCls != null) {
             val returnFalseHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (isEnabled()) {
@@ -654,15 +672,24 @@ object SystemServerFlexibleHook {
                     }
                 }
             }
-            XposedBridge.hookAllMethods(scaleMgrCls, "isInMaxingRegion", returnFalseHook)
-            XposedBridge.hookAllMethods(scaleMgrCls, "isInWaitMaxingState", returnFalseHook)
-            XposedBridge.hookAllMethods(scaleMgrCls, "startFlexibleTaskMaximizedAnimation", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (isEnabled()) {
-                        param.result = null
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.scale.maxingRegion",
+                cls = scaleMgrCls,
+                nameCandidates = listOf("isInMaxingRegion", "isInWaitMaxingState"),
+                hook = returnFalseHook,
+            )
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.scale.maxAnim",
+                cls = scaleMgrCls,
+                nameCandidates = listOf("startFlexibleTaskMaximizedAnimation"),
+                hook = object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (isEnabled()) {
+                            param.result = null
+                        }
                     }
-                }
-            })
+                },
+            )
             val blockFullScreenScaleHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!isEnabled()) return
@@ -682,16 +709,18 @@ object SystemServerFlexibleHook {
                         if (taskObj != null) {
                             snapTaskObjToMainStage(taskObj, "fullScreenByScale")
                         } else if (taskId > 0) {
-                            snapTaskIdToMainStage(taskId, 2520, 1680, "fullScreenByScale")
+                            val (sw, sh) = extractDisplaySizeFromArgs(arrayOf(mgr))
+                            snapTaskIdToMainStage(taskId, sw, sh, "fullScreenByScale")
                         }
                     }
                 }
             }
-            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScaleRatios", blockFullScreenScaleHook)
-            XposedBridge.hookAllMethods(scaleMgrCls, "fullScreenByScale", blockFullScreenScaleHook)
-            HookGuard.info("SystemServerFlexibleHook: hooked FlexibleTaskScaleManager maxing-region & fullscreen guards")
-        } catch (t: Throwable) {
-            HookGuard.warn("SystemServerFlexibleHook: failed to hook FlexibleTaskScaleManager", t)
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.scale.blockFullscreen",
+                cls = scaleMgrCls,
+                nameCandidates = listOf("fullScreenByScaleRatios", "fullScreenByScale"),
+                hook = blockFullScreenScaleHook,
+            )
         }
 
         // 4. Persist real user drag/resize bounds & scale directly inside system_server
@@ -715,12 +744,12 @@ object SystemServerFlexibleHook {
             "resizeTaskByVisibleBounds",
             "adjustMiniFinishRectIfOffScreen",
         )) {
-            try {
-                XposedBridge.hookAllMethods(cls, methodName, persistHook)
-                HookGuard.info("SystemServerFlexibleHook: hooked $FLEXIBLE_TASK_CONTROLLER#$methodName")
-            } catch (t: Throwable) {
-                HookGuard.warn("SystemServerFlexibleHook: optional hook $methodName unavailable", t)
-            }
+            OplusCompatAdapter.hookMethodAny(
+                probeKey = "sys.persist.$methodName",
+                cls = cls,
+                nameCandidates = listOf(methodName),
+                hook = persistHook,
+            )
         }
     }
 

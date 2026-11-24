@@ -10,10 +10,10 @@ android {
 
     defaultConfig {
         applicationId = "dev.stagelab.nativehook"
-        minSdk = 34
+        minSdk = 33
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.0.0-native"
+        versionCode = 3
+        versionName = "1.1.0-native"
     }
 
     buildFeatures {

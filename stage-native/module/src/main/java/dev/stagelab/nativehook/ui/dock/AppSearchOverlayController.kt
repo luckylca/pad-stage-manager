@@ -304,9 +304,8 @@ class AppSearchOverlayController(
             addView(grid, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         }
 
-        val dm = context.resources.displayMetrics
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
-        lastLayoutKey = "${dm.widthPixels}x${dm.heightPixels}"
+        val metrics = StageLayoutMetrics.fromContext(context)
+        lastLayoutKey = "${metrics.screenW}x${metrics.screenH}"
         grid.columnCount = metrics.searchGridColumns
         panel.addView(
             scroll,
@@ -314,7 +313,7 @@ class AppSearchOverlayController(
                 topMargin = dp(context, 8)
             },
         )
-        panel.cameraDistance = 6800f * dm.density
+        panel.cameraDistance = 6800f * metrics.density
 
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -637,23 +636,22 @@ class AppSearchOverlayController(
         val panel = panelView ?: return
         val grid = gridContainer ?: return
         val scroll = scrollView ?: return
-        val dm = context.resources.displayMetrics
-        val key = "${dm.widthPixels}x${dm.heightPixels}"
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val key = "${metrics.screenW}x${metrics.screenH}"
         if (key == lastLayoutKey) return
         lastLayoutKey = key
 
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
         panel.layoutParams = (panel.layoutParams as FrameLayout.LayoutParams).apply {
             width = metrics.searchPanelWidthPx
         }
-        panel.cameraDistance = 6800f * dm.density
+        panel.cameraDistance = 6800f * metrics.density
         scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
             height = metrics.searchScrollHeightPx
         }
 
         // Rebuild GridLayout columns cleanly with fresh UNDEFINED row/col specs so cached cells
         // NEVER collide or carry stale GridLayout.Spec indices across portrait <-> landscape switches.
-        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 280))
+        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 240))
         val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 72))
         grid.removeAllViews()
         grid.columnCount = metrics.searchGridColumns
@@ -676,9 +674,8 @@ class AppSearchOverlayController(
 
     @SuppressLint("ClickableViewAccessibility")
     private fun buildPooledCells(context: Context, apps: List<LaunchableApp>): List<CachedCell> {
-        val dm = context.resources.displayMetrics
-        val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, dm.density)
-        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 280))
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val innerWidth = (metrics.searchPanelWidthPx - dp(context, 44)).coerceAtLeast(dp(context, 240))
         val itemWidth = (innerWidth / metrics.searchGridColumns).coerceAtLeast(dp(context, 72))
         val radiusPx = dp(context, 14).toFloat()
         val iconPx = dp(context, 50)

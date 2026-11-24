@@ -5,9 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.view.View
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativehook.bridge.StageNativeRuntime
+import dev.stagelab.nativehook.compat.OplusCompatAdapter
 
 /**
  * N6 Native ColorOS Dock / Taskbar integration inside `com.android.launcher`.
@@ -40,15 +40,19 @@ object LauncherDockHook {
     }
 
     private fun hookWorkspaceIconClick(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(OPLUS_ITEM_CLICK_HANDLER, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: class not found: $OPLUS_ITEM_CLICK_HANDLER", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "launcher.class.ItemClickHandler",
+            classLoader,
+            OPLUS_ITEM_CLICK_HANDLER,
+            "com.android.launcher3.touch.ItemClickHandler",
+            "com.oplus.launcher.touch.OplusItemClickHandler",
+        ) ?: return
 
-        try {
-            XposedBridge.hookAllMethods(cls, "onClick", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "launcher.iconClick",
+            cls = cls,
+            nameCandidates = listOf("onClick", "onIconClick"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!isActive()) return
                     try {
@@ -78,28 +82,31 @@ object LauncherDockHook {
                         HookGuard.warn("LauncherDockHook.OplusItemClickHandler isolated failure", t)
                     }
                 }
-            })
-            HookGuard.info("LauncherDockHook: hooked $OPLUS_ITEM_CLICK_HANDLER#onClick")
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: failed to hook $OPLUS_ITEM_CLICK_HANDLER#onClick", t)
-        }
+            },
+        )
     }
 
     private fun hookTaskbarItemClick(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(TASKBAR_ACTIVITY_CONTEXT, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: class not found: $TASKBAR_ACTIVITY_CONTEXT", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "launcher.class.TaskbarContext",
+            classLoader,
+            TASKBAR_ACTIVITY_CONTEXT,
+            "com.android.launcher3.taskbar.OplusTaskbarActivityContext",
+        ) ?: return
 
-        try {
-            XposedBridge.hookAllMethods(cls, "startItemInfoActivity", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "launcher.taskbarClick",
+            cls = cls,
+            nameCandidates = listOf("startItemInfoActivity", "onTaskbarIconClicked", "launchAppShortcut"),
+            hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!isActive()) return
                     try {
-                        val ctx = param.thisObject as? Context ?: return
-                        val itemInfo = param.args.getOrNull(1) ?: return
+                        val ctx = (param.thisObject as? Context)
+                            ?: (param.args.firstOrNull() as? View)?.context
+                            ?: runCatching { XposedHelpers.callMethod(param.thisObject, "getContext") as? Context }.getOrNull()
+                            ?: return
+                        val itemInfo = param.args.firstOrNull { it != null && it !is View } ?: param.args.getOrNull(1) ?: return
                         val pkg = resolveItemPackage(itemInfo) ?: return
                         if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "dev.stagelab.nativehook") {
                             return
@@ -119,23 +126,23 @@ object LauncherDockHook {
                         HookGuard.warn("LauncherDockHook.startItemInfoActivity isolated failure", t)
                     }
                 }
-            })
-            HookGuard.info("LauncherDockHook: hooked $TASKBAR_ACTIVITY_CONTEXT#startItemInfoActivity")
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: failed to hook startItemInfoActivity", t)
-        }
+            },
+        )
     }
 
     private fun hookTaskbarDragMergeHint(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(TASKBAR_DRAG_CONTROLLER, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: class not found: $TASKBAR_DRAG_CONTROLLER", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "launcher.class.TaskbarDrag",
+            classLoader,
+            TASKBAR_DRAG_CONTROLLER,
+            "com.android.launcher3.taskbar.OplusTaskbarDragController",
+        ) ?: return
 
-        try {
-            XposedBridge.hookAllMethods(cls, "startDragOnLongClick", object : XC_MethodHook() {
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "launcher.taskbarDrag",
+            cls = cls,
+            nameCandidates = listOf("startDragOnLongClick", "startInternalDrag"),
+            hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!isActive()) return
                     HookGuard.safeRun("TaskbarDragController.startDragOnLongClick") {
@@ -153,11 +160,8 @@ object LauncherDockHook {
                         HookGuard.info("DOCK.DRAG sent S3 merge_hint for pkg=$pkg")
                     }
                 }
-            })
-            HookGuard.info("LauncherDockHook: hooked $TASKBAR_DRAG_CONTROLLER#startDragOnLongClick")
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherDockHook: failed to hook TaskbarDragController", t)
-        }
+            },
+        )
     }
 
     private fun resolveItemPackage(itemInfo: Any): String? {

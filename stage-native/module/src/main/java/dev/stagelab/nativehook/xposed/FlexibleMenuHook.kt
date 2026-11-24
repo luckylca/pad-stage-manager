@@ -26,6 +26,7 @@ object FlexibleMenuHook {
             classLoader,
             FLEXIBLE_MENU_MANAGER,
             "com.android.wm.shell.flexibletask.menu.FlexibleMenuManager",
+            "com.oplus.flexiblewindow.menu.FlexibleMenuManager",
         ) ?: return
 
         dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(

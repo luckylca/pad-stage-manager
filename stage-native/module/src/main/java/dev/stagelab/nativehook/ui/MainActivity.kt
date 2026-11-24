@@ -10,9 +10,11 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -155,8 +157,11 @@ class MainActivity : ComponentActivity() {
                 var sysDiagSnapshot by remember { mutableStateOf(loadDiagnosticsReport()) }
                 val diagHeaderText = remember(sysDiagSnapshot, sysColorOs) {
                     if (sysColorOs.isNotBlank()) {
-                        val dm = resources.displayMetrics
-                        "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\nColorOS: $sysColorOs\n屏幕: ${dm.widthPixels}×${dm.heightPixels} @ ${dm.densityDpi}dpi"
+                        val metrics = StageLayoutMetrics.fromContext(this@MainActivity)
+                        "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n" +
+                            "ROM: $sysColorOs · 形态: ${metrics.deviceTier.label}\n" +
+                            "屏幕: ${metrics.screenW}×${metrics.screenH} @ ${resources.displayMetrics.densityDpi}dpi " +
+                            "(SafeTop=${metrics.safeTopPx}px, ExtraNav=${metrics.extraNavBottomPx}px)"
                     } else {
                         sysDiagSnapshot.first
                     }
@@ -286,13 +291,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadDiagnosticsReport(): Pair<String, List<OplusCompatAdapter.ProbeRecord>> {
+        val metrics = StageLayoutMetrics.fromContext(this)
         val dm = resources.displayMetrics
         val colorOs = OplusCompatAdapter.getColorOsVersion()
         val header = buildString {
             append("${Build.MANUFACTURER} ${Build.MODEL}")
             append(" · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
-            append("ColorOS: $colorOs\n")
-            append("屏幕: ${dm.widthPixels}×${dm.heightPixels} @ ${dm.densityDpi}dpi")
+            append("ROM: $colorOs · 形态: ${metrics.deviceTier.label}\n")
+            append("屏幕: ${metrics.screenW}×${metrics.screenH} @ ${dm.densityDpi}dpi (SafeTop=${metrics.safeTopPx}px, ExtraNav=${metrics.extraNavBottomPx}px)")
         }
         val merged = LinkedHashMap<String, OplusCompatAdapter.ProbeRecord>()
         merged.putAll(OplusCompatAdapter.readProbesFromFile(OplusCompatAdapter.SYS_DIAG_PATH))
@@ -376,28 +382,46 @@ private fun SettingsScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(28.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = if (isModuleActive) MdSecondaryContainer else MdTertiary.copy(alpha = 0.16f),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
-                        Text(
-                            text = if (isModuleActive) "Vector / LSPosed 已激活 · ColorOS 17 原生小窗模式" else "请在 Vector / LSPosed 中启用本模块",
-                            color = if (isModuleActive) MdOnSecondaryContainer else MdTertiary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        AndroidView(
+                            factory = { ctx ->
+                                ImageView(ctx).apply {
+                                    scaleType = ImageView.ScaleType.FIT_CENTER
+                                    setImageResource(dev.stagelab.nativehook.R.mipmap.ic_launcher_round)
+                                }
+                            },
+                            modifier = Modifier
+                                .size(68.dp)
+                                .clip(RoundedCornerShape(20.dp)),
                         )
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = if (isModuleActive) MdSecondaryContainer else MdTertiary.copy(alpha = 0.16f),
+                            ) {
+                                Text(
+                                    text = if (isModuleActive) "Vector / LSPosed 已激活" else "请在 Vector / LSPosed 中启用本模块",
+                                    color = if (isModuleActive) MdOnSecondaryContainer else MdTertiary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                )
+                            }
+                            Text(
+                                text = "StageLab Native",
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MdOnSurface,
+                            )
+                        }
                     }
                     Text(
-                        text = "StageLab Native",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MdOnSurface,
-                    )
-                    Text(
-                        text = "基于 ColorOS 17 原生 Flexible Window、ShellTaskOrganizer 与原生 Dock 的 iPad 台前调度模块。",
+                        text = "基于原生窗口管理与 ShellTaskOrganizer 的 iPad 台前调度模块，适配 Android 13–17 / ColorOS 13–17 / OxygenOS / realme UI 多尺寸平板与折叠屏。",
                         fontSize = 15.sp,
                         lineHeight = 22.sp,
                         color = MdOnSurfaceVariant,
@@ -502,7 +526,7 @@ private fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        text = "ColorOS 环境兼容性诊断",
+                        text = "多设备与多版本兼容性诊断",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Medium,
                         color = MdOnSurface,

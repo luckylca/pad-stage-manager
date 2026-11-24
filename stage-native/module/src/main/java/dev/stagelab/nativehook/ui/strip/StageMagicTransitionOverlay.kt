@@ -238,10 +238,9 @@ object StageMagicTransitionOverlay {
                 }
             }
 
-            val dm = context.resources.displayMetrics
-            val density = dm.density
-            val screenH = dm.heightPixels
-            val metrics = StageLayoutMetrics.compute(dm.widthPixels, dm.heightPixels, density)
+            val metrics = StageLayoutMetrics.fromContext(context)
+            val density = metrics.density
+            val screenH = metrics.screenH
             val stripAnchorX = metrics.stripAnchorX
             val outgoingStripY = screenH * 0.34f
             val incomingStripY = screenH * 0.50f

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Base Material You atmospheric plum-violet gradient -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="100"
+                android:endY="102"
+                android:startX="8"
+                android:startY="6"
+                android:type="linear">
+                <item android:color="#523B8E" android:offset="0.0" />
+                <item android:color="#6750A4" android:offset="0.52" />
+                <item android:color="#49327F" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Top-right organic lavender radial glow -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="84"
+                android:centerY="20"
+                android:gradientRadius="62"
+                android:type="radial">
+                <item android:color="#66D0BCFF" android:offset="0.0" />
+                <item android:color="#22E8DEF8" android:offset="0.55" />
+                <item android:color="#00E8DEF8" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Bottom-left warm dusty rose Material You tertiary aura -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="22"
+                android:centerY="88"
+                android:gradientRadius="56"
+                android:type="radial">
+                <item android:color="#599A6376" android:offset="0.0" />
+                <item android:color="#1A7D5260" android:offset="0.6" />
+                <item android:color="#007D5260" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

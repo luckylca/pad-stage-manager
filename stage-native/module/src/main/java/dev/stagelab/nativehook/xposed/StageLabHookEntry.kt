@@ -5,7 +5,6 @@ import android.content.res.Configuration
 import android.view.SurfaceControl
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import dev.stagelab.nativehook.bridge.StageNativeRuntime
@@ -60,92 +59,83 @@ class StageLabHookEntry : IXposedHookLoadPackage {
 
     private fun installShellTaskOrganizerHooks(classLoader: ClassLoader) {
         val clsName = "com.android.wm.shell.ShellTaskOrganizer"
-        val organizerClass = try {
-            XposedHelpers.findClass(clsName, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("Class not found: $clsName", t)
-            return
-        }
+        val organizerClass = dev.stagelab.nativehook.compat.OplusCompatAdapter.findClassAny(
+            "ui.class.ShellTaskOrganizer",
+            classLoader,
+            clsName,
+        ) ?: return
 
-        try {
-            val taskAppearedInfoCls = XposedHelpers.findClass("android.window.TaskAppearedInfo", classLoader)
-            XposedHelpers.findAndHookMethod(
-                organizerClass,
-                "onTaskAppeared",
-                taskAppearedInfoCls,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        HookGuard.safeRun("ShellTaskOrganizer.onTaskAppeared") {
-                            StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
-                            val taskInfo = extractTaskInfo(param.args[0]) ?: return@safeRun
-                            val leash = runCatching {
-                                XposedHelpers.callMethod(param.args[0], "getLeash") as? SurfaceControl
-                            }.getOrNull()
-                            if (leash != null) {
-                                StageNativeRuntime.registerTaskLeash(taskInfo.taskId, leash)
-                            }
-                            StageNativeRuntime.onNativeTaskAppeared(taskInfo)
+        val taskAppearedHook = object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                HookGuard.safeRun("ShellTaskOrganizer.onTaskAppeared") {
+                    StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
+                    val firstArg = param.args.getOrNull(0)
+                    val taskInfo = extractTaskInfo(firstArg) ?: return@safeRun
+                    val leash = runCatching {
+                        if (firstArg != null && firstArg !is ActivityManager.RunningTaskInfo) {
+                            XposedHelpers.callMethod(firstArg, "getLeash") as? SurfaceControl
+                        } else {
+                            param.args.getOrNull(1) as? SurfaceControl
                         }
+                    }.getOrNull()
+                    if (leash != null) {
+                        StageNativeRuntime.registerTaskLeash(taskInfo.taskId, leash)
                     }
-                },
-            )
-            HookGuard.info("Hooked $clsName#onTaskAppeared(TaskAppearedInfo)")
-        } catch (t: Throwable) {
-            HookGuard.warn("Failed to hook $clsName#onTaskAppeared(TaskAppearedInfo)", t)
+                    StageNativeRuntime.onNativeTaskAppeared(taskInfo)
+                }
+            }
         }
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(
+            probeKey = "ui.organizer.onTaskAppeared",
+            cls = organizerClass,
+            nameCandidates = listOf("onTaskAppeared"),
+            hook = taskAppearedHook,
+        )
 
-        try {
-            XposedHelpers.findAndHookMethod(
-                organizerClass,
-                "onTaskInfoChanged",
-                ActivityManager.RunningTaskInfo::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        HookGuard.safeRun("ShellTaskOrganizer.onTaskInfoChanged") {
-                            StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
-                            val taskInfo = param.args[0] as? ActivityManager.RunningTaskInfo ?: return@safeRun
-                            StageNativeRuntime.onNativeTaskInfoChanged(taskInfo)
-                        }
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(
+            probeKey = "ui.organizer.onTaskInfoChanged",
+            cls = organizerClass,
+            nameCandidates = listOf("onTaskInfoChanged"),
+            hook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    HookGuard.safeRun("ShellTaskOrganizer.onTaskInfoChanged") {
+                        StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
+                        val taskInfo = param.args.firstOrNull() as? ActivityManager.RunningTaskInfo ?: return@safeRun
+                        StageNativeRuntime.onNativeTaskInfoChanged(taskInfo)
                     }
-                },
-            )
-            HookGuard.info("Hooked $clsName#onTaskInfoChanged(RunningTaskInfo)")
-        } catch (t: Throwable) {
-            HookGuard.warn("Failed to hook $clsName#onTaskInfoChanged", t)
-        }
+                }
+            },
+        )
 
-        try {
-            XposedHelpers.findAndHookMethod(
-                organizerClass,
-                "onTaskVanished",
-                ActivityManager.RunningTaskInfo::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        HookGuard.safeRun("ShellTaskOrganizer.onTaskVanished") {
-                            StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
-                            val taskInfo = param.args[0] as? ActivityManager.RunningTaskInfo ?: return@safeRun
-                            StageNativeRuntime.onNativeTaskVanished(taskInfo)
-                        }
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(
+            probeKey = "ui.organizer.onTaskVanished",
+            cls = organizerClass,
+            nameCandidates = listOf("onTaskVanished"),
+            hook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    HookGuard.safeRun("ShellTaskOrganizer.onTaskVanished") {
+                        StageNativeRuntime.attachOrganizerIfNeeded(param.thisObject)
+                        val taskInfo = param.args.firstOrNull() as? ActivityManager.RunningTaskInfo ?: return@safeRun
+                        StageNativeRuntime.onNativeTaskVanished(taskInfo)
                     }
-                },
-            )
-            HookGuard.info("Hooked $clsName#onTaskVanished(RunningTaskInfo)")
-        } catch (t: Throwable) {
-            HookGuard.warn("Failed to hook $clsName#onTaskVanished", t)
-        }
+                }
+            },
+        )
     }
 
     private fun installFullscreenTaskListenerObserver(classLoader: ClassLoader) {
-        val clsName = "com.android.wm.shell.fullscreen.FullscreenTaskListener"
-        val listenerClass = try {
-            XposedHelpers.findClass(clsName, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("Class not found: $clsName", t)
-            return
-        }
+        val listenerClass = dev.stagelab.nativehook.compat.OplusCompatAdapter.findClassAny(
+            "ui.class.FullscreenTaskListener",
+            classLoader,
+            "com.android.wm.shell.fullscreen.FullscreenTaskListener",
+            "com.android.wm.shell.freeform.FreeformTaskListener",
+        ) ?: return
 
-        try {
-            XposedBridge.hookAllMethods(listenerClass, "onTaskInfoChanged", object : XC_MethodHook() {
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.hookMethodAny(
+            probeKey = "ui.ftl.onTaskInfoChanged",
+            cls = listenerClass,
+            nameCandidates = listOf("onTaskInfoChanged"),
+            hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     HookGuard.safeRun("FullscreenTaskListener.onTaskInfoChanged") {
                         val taskInfo = param.args.firstOrNull() as? ActivityManager.RunningTaskInfo ?: return@safeRun
@@ -154,16 +144,13 @@ class StageLabHookEntry : IXposedHookLoadPackage {
                             HookGuard.info(
                                 "FTL.FLEXIBLE task=${taskInfo.taskId} pkg=${StageNativeRuntime.resolvePkg(taskInfo)} " +
                                     "vis=${StageNativeRuntime.isTaskVisible(taskInfo)} foc=${StageNativeRuntime.isTaskFocused(taskInfo)} " +
-                                    "bounds=${StageNativeRuntime.extractBounds(taskInfo)}"
+                                    "bounds=${StageNativeRuntime.extractBounds(taskInfo)}",
                             )
                         }
                     }
                 }
-            })
-            HookGuard.info("Hooked $clsName#onTaskInfoChanged (Flexible telemetry)")
-        } catch (t: Throwable) {
-            HookGuard.warn("Failed to hook $clsName", t)
-        }
+            },
+        )
     }
 
     private fun extractTaskInfo(arg: Any?): ActivityManager.RunningTaskInfo? {

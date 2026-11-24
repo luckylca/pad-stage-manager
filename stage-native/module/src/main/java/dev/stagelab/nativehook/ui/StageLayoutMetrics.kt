@@ -1,24 +1,53 @@
 package dev.stagelab.nativehook.ui
 
+import android.content.Context
 import android.graphics.Rect
+import android.os.Build
+import android.view.WindowInsets
+import android.view.WindowManager
 import dev.stagelab.nativecore.WindowBounds
+import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Centralized, responsive layout metrics calculator for tablets of all sizes & DPIs
- * (8.8" Pad mini, 11" Pad, 12.1"/13.2" Pad Pro, landscape & portrait).
+ * Centralized, responsive layout metrics calculator for devices of all sizes, DPIs & insets:
+ * - Compact / Foldables (`< 540dp` short edge)
+ * - 8.8" Mini Tablets (`540–699dp`, e.g. OPPO Pad mini)
+ * - 11"–12.1" Standard Tablets (`700–859dp`)
+ * - 13.2"+ Pro Tablets (`860dp+`)
  *
- * Shared by both `system_server` (`SystemServerFlexibleHook`) and `com.android.systemui`
- * (`ColorOsNativeWindowBridge`, `StageMagicTransitionOverlay`, `AppSearchOverlayController`)
- * so every overlay and native window stays proportionally aligned with zero hardcoded screen sizes.
+ * Shared by `system_server` and `com.android.systemui` overlays so native app windows,
+ * left strip cards, Dock, and App Search stay aligned with zero hardcoded device dimensions.
  */
 object StageLayoutMetrics {
+
+    enum class DeviceTier(val label: String) {
+        COMPACT_FOLDABLE("Foldable/Compact"),
+        MINI_TABLET("Mini Tablet"),
+        STANDARD_TABLET("Standard Tablet"),
+        LARGE_TABLET("Large Tablet"),
+    }
+
+    data class DisplaySnapshot(
+        val widthPx: Int,
+        val heightPx: Int,
+        val density: Float,
+        val safeLeftPx: Int = 0,
+        val safeTopPx: Int = 0,
+        val safeRightPx: Int = 0,
+        val safeBottomPx: Int = 0,
+    )
 
     data class Metrics(
         val screenW: Int,
         val screenH: Int,
         val density: Float,
         val isLandscape: Boolean,
+        val deviceTier: DeviceTier,
+        val safeLeftPx: Int,
+        val safeTopPx: Int,
+        val safeRightPx: Int,
+        val extraNavBottomPx: Int,
         val backSafePx: Int,
         val stripCardWidthPx: Int,
         val stripCardHeightPx: Int,
@@ -31,9 +60,61 @@ object StageLayoutMetrics {
         val searchPanelWidthPx: Int,
         val searchScrollHeightPx: Int,
         val searchGridColumns: Int,
+        val maxPinnedDockCount: Int,
     ) {
         val mainStageBounds: WindowBounds
             get() = WindowBounds(mainStageRect.left, mainStageRect.top, mainStageRect.right, mainStageRect.bottom)
+    }
+
+    fun resolveDisplaySnapshot(context: Context): DisplaySnapshot {
+        val dm = context.resources.displayMetrics
+        val density = dm.density.coerceIn(1.0f, 4.5f)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            if (wm != null) {
+                val maxMetrics = runCatching { wm.maximumWindowMetrics }.getOrNull()
+                if (maxMetrics != null) {
+                    val b = maxMetrics.bounds
+                    if (b.width() > 0 && b.height() > 0) {
+                        val insets = runCatching {
+                            maxMetrics.windowInsets.getInsetsIgnoringVisibility(
+                                WindowInsets.Type.statusBars() or
+                                    WindowInsets.Type.navigationBars() or
+                                    WindowInsets.Type.displayCutout(),
+                            )
+                        }.getOrNull()
+                        return DisplaySnapshot(
+                            widthPx = b.width(),
+                            heightPx = b.height(),
+                            density = density,
+                            safeLeftPx = insets?.left ?: 0,
+                            safeTopPx = insets?.top ?: 0,
+                            safeRightPx = insets?.right ?: 0,
+                            safeBottomPx = insets?.bottom ?: 0,
+                        )
+                    }
+                }
+            }
+        }
+        return DisplaySnapshot(
+            widthPx = dm.widthPixels.coerceAtLeast(800),
+            heightPx = dm.heightPixels.coerceAtLeast(600),
+            density = density,
+        )
+    }
+
+    fun fromContext(context: Context, stripVisible: Boolean = true): Metrics {
+        val snap = resolveDisplaySnapshot(context)
+        return compute(
+            screenW = snap.widthPx,
+            screenH = snap.heightPx,
+            density = snap.density,
+            stripVisible = stripVisible,
+            safeLeftPx = snap.safeLeftPx,
+            safeTopPx = snap.safeTopPx,
+            safeRightPx = snap.safeRightPx,
+            safeBottomPx = snap.safeBottomPx,
+        )
     }
 
     fun compute(
@@ -41,51 +122,82 @@ object StageLayoutMetrics {
         screenH: Int,
         density: Float = inferDensity(screenW, screenH),
         stripVisible: Boolean = true,
+        safeLeftPx: Int = 0,
+        safeTopPx: Int = 0,
+        safeRightPx: Int = 0,
+        safeBottomPx: Int = 0,
     ): Metrics {
-        val safeW = screenW.coerceAtLeast(800)
+        val safeW = screenW.coerceAtLeast(720)
         val safeH = screenH.coerceAtLeast(600)
-        val safeDensity = density.coerceIn(1.25f, 4.0f)
+        val safeDensity = density.coerceIn(1.0f, 4.5f)
         val isLandscape = safeW >= safeH
         val shortEdgeDp = min(safeW, safeH) / safeDensity
+        val deviceTier = when {
+            shortEdgeDp < 540f -> DeviceTier.COMPACT_FOLDABLE
+            shortEdgeDp < 700f -> DeviceTier.MINI_TABLET
+            shortEdgeDp < 860f -> DeviceTier.STANDARD_TABLET
+            else -> DeviceTier.LARGE_TABLET
+        }
 
-        // Left system Back-gesture safe zone (~28dp)
-        val backSafePx = (28f * safeDensity).toInt()
+        // Only expand bottom clearance when a persistent 3-button nav bar (>24dp) is present
+        val extraNavBottomPx = (safeBottomPx - (24f * safeDensity).toInt()).coerceAtLeast(0)
 
-        // Responsive slanted 3D Recent Strip card dimensions
-        val stripCardWidthDp = (shortEdgeDp * 0.228f).coerceIn(124f, 172f)
+        // Left system Back-gesture & cutout safe zone
+        val baseBackSafePx = ((if (deviceTier == DeviceTier.COMPACT_FOLDABLE) 18f else 28f) * safeDensity).toInt()
+        val backSafePx = max(baseBackSafePx, safeLeftPx + (6f * safeDensity).toInt())
+
+        // Responsive slanted 3D Recent Strip card dimensions across foldables / mini / pro tablets
+        val stripRatio = if (deviceTier == DeviceTier.COMPACT_FOLDABLE) 0.19f else 0.228f
+        val minStripDp = if (deviceTier == DeviceTier.COMPACT_FOLDABLE) 88f else 124f
+        val stripCardWidthDp = (shortEdgeDp * stripRatio).coerceIn(minStripDp, 184f)
         val stripCardHeightDp = stripCardWidthDp * 0.72f
         val stripCardWidthPx = (stripCardWidthDp * safeDensity).toInt()
         val stripCardHeightPx = (stripCardHeightDp * safeDensity).toInt()
-        // Account for 28° 3D rotationY horizontal projection (~0.88) + padding
         val stripVisualRightPx = backSafePx + (stripCardWidthPx * 0.90f).toInt()
 
-        // Responsive Dock reserved height + crisp 13dp gap above Dock (tighter, never overlapping)
-        val dockIconDp = (shortEdgeDp * 0.075f).coerceIn(44f, 56f)
+        // Responsive Dock reserved height + crisp gap above Dock + nav bar clearance if any
+        val dockIconDp = (shortEdgeDp * 0.075f).coerceIn(42f, 56f)
         val dockPlusGapDp = dockIconDp + (if (isLandscape) 64f else 56f)
-        val bottomReservedPx = (dockPlusGapDp * safeDensity).toInt()
+        val bottomReservedPx = (dockPlusGapDp * safeDensity).toInt() + extraNavBottomPx
 
-        // Symmetrical left/right margins (~19dp in landscape, ~14dp in portrait)
+        // Symmetrical left/right margins + cutout awareness
         val sideGapPx = ((if (isLandscape) 19f else 14f) * safeDensity).toInt()
-        val topPx = ((if (isLandscape) 31f else 34f) * safeDensity).toInt()
+        val defaultTopPx = ((if (isLandscape) 31f else 34f) * safeDensity).toInt()
+        val topPx = max(defaultTopPx, safeTopPx + (4f * safeDensity).toInt())
 
-        val leftPx = if (stripVisible) stripVisualRightPx + sideGapPx else sideGapPx
-        val rightPx = (safeW - sideGapPx).coerceAtLeast(leftPx + (320f * safeDensity).toInt())
-        val bottomPx = (safeH - bottomReservedPx).coerceAtLeast(topPx + (320f * safeDensity).toInt())
+        val minNonStripLeft = max(sideGapPx, safeLeftPx + (10f * safeDensity).toInt())
+        val leftPx = if (stripVisible) stripVisualRightPx + sideGapPx else minNonStripLeft
+        val rightEdgeMargin = max(sideGapPx, safeRightPx + (10f * safeDensity).toInt())
+        val rightPx = (safeW - rightEdgeMargin).coerceAtLeast(leftPx + (280f * safeDensity).toInt())
+        val bottomPx = (safeH - bottomReservedPx).coerceAtLeast(topPx + (280f * safeDensity).toInt())
 
-        val searchPanelWidthPx = (safeW * (if (isLandscape) 0.56f else 0.86f))
+        val widthPct = when {
+            isLandscape && deviceTier == DeviceTier.LARGE_TABLET -> 0.50f
+            isLandscape -> 0.56f
+            deviceTier == DeviceTier.COMPACT_FOLDABLE -> 0.92f
+            else -> 0.86f
+        }
+        val searchPanelWidthPx = (safeW * widthPct)
             .toInt()
-            .coerceIn((360f * safeDensity).toInt(), (740f * safeDensity).toInt())
+            .coerceIn((320f * safeDensity).toInt(), (780f * safeDensity).toInt())
         val searchScrollHeightPx = if (isLandscape) {
             (safeH - bottomReservedPx - (165f * safeDensity).toInt())
-                .coerceIn((180f * safeDensity).toInt(), (330f * safeDensity).toInt())
+                .coerceIn((180f * safeDensity).toInt(), (350f * safeDensity).toInt())
         } else {
             (safeH * 0.39f).toInt()
-                .coerceIn((260f * safeDensity).toInt(), (450f * safeDensity).toInt())
+                .coerceIn((240f * safeDensity).toInt(), (480f * safeDensity).toInt())
         }
-        val searchGridColumns = if (isLandscape) {
-            (shortEdgeDp / 106f).toInt().coerceIn(5, 8)
-        } else {
-            4
+        val searchGridColumns = when {
+            isLandscape -> (shortEdgeDp / 106f).toInt().coerceIn(5, 8)
+            deviceTier == DeviceTier.COMPACT_FOLDABLE -> 3
+            deviceTier == DeviceTier.STANDARD_TABLET || deviceTier == DeviceTier.LARGE_TABLET -> 5
+            else -> 4
+        }
+        val maxPinnedDockCount = when {
+            !isLandscape && deviceTier == DeviceTier.COMPACT_FOLDABLE -> 5
+            !isLandscape -> 7
+            deviceTier == DeviceTier.LARGE_TABLET -> 12
+            else -> 10
         }
 
         return Metrics(
@@ -93,18 +205,24 @@ object StageLayoutMetrics {
             screenH = safeH,
             density = safeDensity,
             isLandscape = isLandscape,
+            deviceTier = deviceTier,
+            safeLeftPx = safeLeftPx,
+            safeTopPx = safeTopPx,
+            safeRightPx = safeRightPx,
+            extraNavBottomPx = extraNavBottomPx,
             backSafePx = backSafePx,
             stripCardWidthPx = stripCardWidthPx,
             stripCardHeightPx = stripCardHeightPx,
             stripAnchorX = backSafePx + (6f * safeDensity),
             sideGapPx = sideGapPx,
             mainStageRect = Rect(leftPx, topPx, rightPx, bottomPx),
-            multiColGap2Px = (10f * safeDensity).toInt(),
-            multiColGap3Px = (8f * safeDensity).toInt(),
+            multiColGap2Px = ((if (deviceTier == DeviceTier.LARGE_TABLET) 12f else 10f) * safeDensity).toInt(),
+            multiColGap3Px = ((if (deviceTier == DeviceTier.LARGE_TABLET) 10f else 8f) * safeDensity).toInt(),
             cornerRadiusPx = 26f * safeDensity,
             searchPanelWidthPx = searchPanelWidthPx,
             searchScrollHeightPx = searchScrollHeightPx,
             searchGridColumns = searchGridColumns,
+            maxPinnedDockCount = maxPinnedDockCount,
         )
     }
 

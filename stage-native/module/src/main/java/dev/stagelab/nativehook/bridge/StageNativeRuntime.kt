@@ -189,21 +189,36 @@ object StageNativeRuntime {
         }
     }
 
+    private fun resolveDisplaySnap(context: Context? = null): StageLayoutMetrics.DisplaySnapshot? {
+        val ctx = context ?: runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+        return ctx?.let { StageLayoutMetrics.resolveDisplaySnapshot(it) }
+    }
+
     fun isCurrentLandscape(): Boolean {
-        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
-        val sw = dm?.widthPixels ?: 2520
-        val sh = dm?.heightPixels ?: 1680
+        val snap = resolveDisplaySnap()
+        val sw = snap?.widthPx ?: 2520
+        val sh = snap?.heightPx ?: 1680
         return sw >= sh
     }
 
     private fun computeLayoutTargetsForTasks(
         tasks: List<StageTask>,
-        screenW: Int,
-        screenH: Int,
-        density: Float,
+        snap: StageLayoutMetrics.DisplaySnapshot,
         stripVisible: Boolean,
     ): Map<Int, WindowBounds> {
-        val metrics = StageLayoutMetrics.compute(screenW, screenH, density, stripVisible)
+        val screenW = snap.widthPx
+        val screenH = snap.heightPx
+        val density = snap.density
+        val metrics = StageLayoutMetrics.compute(
+            screenW = screenW,
+            screenH = screenH,
+            density = density,
+            stripVisible = stripVisible,
+            safeLeftPx = snap.safeLeftPx,
+            safeTopPx = snap.safeTopPx,
+            safeRightPx = snap.safeRightPx,
+            safeBottomPx = snap.safeBottomPx,
+        )
         val regular = tasks.filterNot { it.isMiniFloating }
         val result = HashMap<Int, WindowBounds>(tasks.size)
 
@@ -232,8 +247,11 @@ object StageNativeRuntime {
             if (!b.isEmpty) {
                 val mw = b.width.coerceIn((180f * density).toInt(), (screenW * 0.65f).toInt())
                 val mh = b.height.coerceIn((180f * density).toInt(), (screenH * 0.65f).toInt())
-                val nl = b.left.coerceIn(0, (screenW - mw).coerceAtLeast(0))
-                val nt = b.top.coerceIn((28f * density).toInt(), (screenH - mh - (96f * density).toInt()).coerceAtLeast(0))
+                val nl = b.left.coerceIn(metrics.safeLeftPx, (screenW - mw - metrics.safeRightPx).coerceAtLeast(0))
+                val nt = b.top.coerceIn(
+                    maxOf((28f * density).toInt(), metrics.safeTopPx),
+                    (screenH - mh - (96f * density).toInt() - metrics.extraNavBottomPx).coerceAtLeast(0),
+                )
                 result[mt.taskId] = WindowBounds(nl, nt, nl + mw, nt + mh)
             }
         }
@@ -247,12 +265,10 @@ object StageNativeRuntime {
         val curLand = isCurrentLandscape()
         val recordedLand = stageOrientedLandscape[stageId]
         if (recordedLand == null || recordedLand == curLand) return emptyMap()
-        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull() ?: return emptyMap()
+        val snap = resolveDisplaySnap() ?: return emptyMap()
         return computeLayoutTargetsForTasks(
             tasks = incomingTasks,
-            screenW = dm.widthPixels,
-            screenH = dm.heightPixels,
-            density = dm.density,
+            snap = snap,
             stripVisible = !recentController.isHiddenByUserSetting,
         )
     }
@@ -270,17 +286,15 @@ object StageNativeRuntime {
     ) {
         val session = registry.snapshot()
         val active = session.activeStage ?: return
-        val dm = context.resources.displayMetrics
-        val curLand = dm.widthPixels >= dm.heightPixels
+        val snap = StageLayoutMetrics.resolveDisplaySnapshot(context)
+        val curLand = snap.widthPx >= snap.heightPx
         stageOrientedLandscape[active.stageId] = curLand
 
         val visibleTasks = active.tasks.filterNot { isTaskTuckedFloatHandle(it.taskId) }
         if (visibleTasks.isEmpty()) return
         val targets = computeLayoutTargetsForTasks(
             tasks = visibleTasks,
-            screenW = dm.widthPixels,
-            screenH = dm.heightPixels,
-            density = dm.density,
+            snap = snap,
             stripVisible = !recentController.isHiddenByUserSetting,
         )
         val liveMap = if (onlyFixUnconverged) {
@@ -317,15 +331,15 @@ object StageNativeRuntime {
         }
         if (!onlyFixUnconverged || adjusted > 0) {
             HookGuard.info(
-                "ROTATION.RELAYOUT($passName) stage=${active.stageId} size=${dm.widthPixels}x${dm.heightPixels} " +
+                "ROTATION.RELAYOUT($passName) stage=${active.stageId} size=${snap.widthPx}x${snap.heightPx} " +
                     "land=$curLand adjusted=$adjusted tasks=${visibleTasks.map { it.taskId }}",
             )
         }
     }
 
     private fun handleDisplayGeometryChanged(context: Context) {
-        val dm = context.resources.displayMetrics
-        val key = "${dm.widthPixels}x${dm.heightPixels}"
+        val snap = StageLayoutMetrics.resolveDisplaySnapshot(context)
+        val key = "${snap.widthPx}x${snap.heightPx}"
         val sizeChanged = key != lastKnownDisplayKey
         lastKnownDisplayKey = key
 
@@ -414,12 +428,21 @@ object StageNativeRuntime {
             dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT,
             organizer.javaClass.simpleName,
         )
-        val fwmOk = runCatching { Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager") }.isSuccess
+        val fwmOk = dev.stagelab.nativehook.compat.OplusCompatAdapter.hasColorOsFlexibleWindow()
         dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
             "ui.flexibleWindowManager",
             if (fwmOk) dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT
             else dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.MISSING,
             if (fwmOk) "FlexibleWindowManager" else "unavailable",
+        )
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
+            "ui.windowMode",
+            if (fwmOk) dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT
+            else dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.FALLBACK,
+            if (fwmOk) "ColorOS Flexible (100)" else "AOSP Freeform (5)",
+        )
+        dev.stagelab.nativehook.compat.OplusCompatAdapter.persistProbesToFile(
+            dev.stagelab.nativehook.compat.OplusCompatAdapter.UI_DIAG_PATH,
         )
     }
 
@@ -434,8 +457,8 @@ object StageNativeRuntime {
                         override fun onDisplayRemoved(displayId: Int) = Unit
                         override fun onDisplayChanged(displayId: Int) {
                             if (displayId != Display.DEFAULT_DISPLAY || isDeviceLocked) return
-                            val m = ctx.resources.displayMetrics
-                            val key = "${m.widthPixels}x${m.heightPixels}"
+                            val snap = StageLayoutMetrics.resolveDisplaySnapshot(ctx)
+                            val key = "${snap.widthPx}x${snap.heightPx}"
                             if (key != lastKnownDisplayKey) {
                                 HookGuard.info("LIFECYCLE DisplayListener size changed $lastKnownDisplayKey -> $key")
                                 handleDisplayGeometryChanged(ctx)
@@ -729,7 +752,7 @@ object StageNativeRuntime {
 
         // In desktop-replacement mode (stageManagerEnabled == true), Launcher is our blurred Stage canvas
         // and Home/Recents gestures are locked natively — do not auto-retreat active Stage on Launcher focus.
-        if (pkg == "com.android.launcher") {
+        if (isLauncherPkg(pkg)) {
             if (!stageManagerEnabled && isTaskFocused(taskInfo) && isTaskVisible(taskInfo)) {
                 handleHomeGestureRetreat()
             }
@@ -743,8 +766,9 @@ object StageNativeRuntime {
             tuckedFloatHandleTaskIds.add(taskInfo.taskId)
         } else if (stageTask.isVisible && isTaskFocused(taskInfo)) {
             val raw = extractBounds(taskInfo)
-            val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
-            val sw = dm?.widthPixels ?: 2520
+            val snap = resolveDisplaySnap()
+            val sw = snap?.widthPx ?: 2520
+            val sh = snap?.heightPx ?: 1680
             val offEdge = !raw.isEmpty && ((raw.left >= (sw * 0.72f).toInt() && raw.right > sw + 80) ||
                 (raw.right <= (sw * 0.28f).toInt() && raw.left < -80))
             if (!offEdge) {
@@ -752,8 +776,8 @@ object StageNativeRuntime {
                 val sc = extractFlexibleScale(taskInfo)
                 if (!stageTask.bounds.isEmpty) {
                     val land = isCurrentLandscape()
-                    val fitsViewport = stageTask.bounds.right <= (dm?.widthPixels ?: 2520) + 80 &&
-                        stageTask.bounds.bottom <= (dm?.heightPixels ?: 1680) + 80
+                    val fitsViewport = stageTask.bounds.right <= sw + 80 &&
+                        stageTask.bounds.bottom <= sh + 80
                     if (fitsViewport) {
                         taskGeometryMemory[land to taskInfo.taskId] = SavedGeometry(stageTask.bounds, sc, userCustomized = true)
                     }
@@ -1031,9 +1055,9 @@ object StageNativeRuntime {
     }
 
     private fun isFullScreenBounds(b: WindowBounds): Boolean {
-        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
-        val sw = dm?.widthPixels ?: 2520
-        val sh = dm?.heightPixels ?: 1680
+        val snap = resolveDisplaySnap()
+        val sw = snap?.widthPx ?: 2520
+        val sh = snap?.heightPx ?: 1680
         return b.left == 0 && b.top == 0 && b.right == sw && b.bottom == sh
     }
 
@@ -1143,8 +1167,7 @@ object StageNativeRuntime {
 
     private fun toStageTask(taskInfo: ActivityManager.RunningTaskInfo, pkg: String): StageTask {
         val bounds = extractBounds(taskInfo)
-        val dm = runCatching { AndroidAppHelper.currentApplication()?.resources?.displayMetrics }.getOrNull()
-        val sw = dm?.widthPixels ?: 2520
+        val sw = resolveDisplaySnap()?.widthPx ?: 2520
         // Ignore off-screen parked bounds (e.g. Rect(-2520, 0 - 0, 1680)) so original on-screen bounds are preserved.
         val validBounds = if (bounds.right > 0 && bounds.left < sw - 60 && bounds.width() > 0 && bounds.height() > 0) {
             WindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
@@ -1182,9 +1205,33 @@ object StageNativeRuntime {
             ?: taskInfo.topActivity?.packageName
             ?: ""
         return when (raw) {
-            "com.oplus.wirelesssettings", "com.oplus.settings" -> "com.android.settings"
+            "com.oplus.wirelesssettings",
+            "com.oplus.settings",
+            "com.coloros.settings",
+            -> "com.android.settings"
             else -> raw
         }
+    }
+
+    private fun isLauncherPkg(pkg: String): Boolean =
+        pkg == "com.android.launcher" ||
+            pkg == "com.android.launcher3" ||
+            pkg == "com.oppo.launcher" ||
+            pkg == "com.oneplus.launcher" ||
+            pkg == "com.oplus.launcher"
+
+    fun isManagedUserApp(pkg: String): Boolean {
+        if (pkg.isBlank()) return false
+        return !isLauncherPkg(pkg) &&
+            pkg != "com.android.systemui" &&
+            pkg != "dev.stagelab.nativehook" &&
+            pkg != "com.android.permissioncontroller" &&
+            pkg != "com.google.android.permissioncontroller" &&
+            pkg != "com.android.packageinstaller" &&
+            pkg != "com.oplus.securitypermission" &&
+            pkg != "com.oplus.exsystemservice" &&
+            pkg != "com.coloros.recents" &&
+            pkg != "com.oplus.appdetail"
     }
 
     fun extractBounds(taskInfo: ActivityManager.RunningTaskInfo): Rect {
@@ -1219,14 +1266,4 @@ object StageNativeRuntime {
 
     fun isTaskFocused(taskInfo: ActivityManager.RunningTaskInfo): Boolean =
         runCatching { XposedHelpers.getBooleanField(taskInfo, "isFocused") }.getOrDefault(false)
-
-    fun isManagedUserApp(pkg: String): Boolean {
-        if (pkg.isBlank()) return false
-        return pkg != "com.android.launcher" &&
-            pkg != "com.android.systemui" &&
-            pkg != "dev.stagelab.nativehook" &&
-            pkg != "com.android.permissioncontroller" &&
-            pkg != "com.android.packageinstaller" &&
-            pkg != "com.oplus.appdetail"
-    }
 }

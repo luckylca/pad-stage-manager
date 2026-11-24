@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Safe zone: centered 66x66dp (x: 21..87, y: 21..87), all crisp details kept within 25..83 -->
+
+    <!-- Soft contact shadow behind Left Recent Strip & Main Stage -->
+    <path
+        android:fillColor="#2A120A24"
+        android:pathData="M46,31 L77,31 Q81,31 81,35 L81,64 Q81,68 77,68 L46,68 Q42,68 42,64 L42,35 Q42,31 46,31 Z" />
+    <path
+        android:fillColor="#22120A24"
+        android:pathData="M34,74 L74,74 Q77.5,74 77.5,77.5 Q77.5,81 74,81 L34,81 Q30.5,81 30.5,77.5 Q30.5,74 34,74 Z" />
+
+    <!-- Left 3D slanted Recent Strip: Rear frosted workspace card -->
+    <path
+        android:fillColor="#7AE8DEF8"
+        android:pathData="M26.5,35.5 L35,37.8 Q37,38.3 37,40.4 L37,50.5 Q37,52.5 35,52.9 L26.5,54.6 Q25,54.9 25,53.2 L25,37.2 Q25,35.2 26.5,35.5 Z" />
+
+    <!-- Left 3D slanted Recent Strip: Front lavender workspace card with perspective tilt -->
+    <path
+        android:pathData="M28.5,43.5 L37.8,45.6 Q39.8,46.1 39.8,48.2 L39.8,61.6 Q39.8,63.7 37.8,64.2 L28.5,66.4 Q26.8,66.8 26.8,64.8 L26.8,45.2 Q26.8,43.1 28.5,43.5 Z"
+        android:strokeColor="#B3FFFFFF"
+        android:strokeWidth="0.7">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="40"
+                android:endY="66"
+                android:startX="27"
+                android:startY="43"
+                android:type="linear">
+                <item android:color="#FFF5EEFF" android:offset="0.0" />
+                <item android:color="#FFE0D0FB" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Accent dot on front slanted stage thumbnail -->
+    <path
+        android:fillColor="#7D5260"
+        android:pathData="M33.3,52.8 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0" />
+
+    <!-- Main Active Stage Canvas Container (warm MD3 surface #FFFBFE) -->
+    <path
+        android:pathData="M45,29 L76,29 Q80,29 80,33 L80,62 Q80,66 76,66 L45,66 Q41,66 41,62 L41,33 Q41,29 45,29 Z"
+        android:strokeColor="#CCFFFFFF"
+        android:strokeWidth="0.8">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="80"
+                android:endY="66"
+                android:startX="41"
+                android:startY="29"
+                android:type="linear">
+                <item android:color="#FFFFFBFE" android:offset="0.0" />
+                <item android:color="#FFF3EDF7" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Top Flexible Window drag handle dots inside Main Stage -->
+    <path
+        android:fillColor="#9A8F99"
+        android:pathData="M57.5,33.2 m-1,0 a1,1 0 1,0 2,0 a1,1 0 1,0 -2,0 M60.5,33.2 m-1,0 a1,1 0 1,0 2,0 a1,1 0 1,0 -2,0 M63.5,33.2 m-1,0 a1,1 0 1,0 2,0 a1,1 0 1,0 -2,0" />
+
+    <!-- Multi-window tiled workspace panes inside Main Stage -->
+    <!-- Left primary window tile (MD3 lavender container) -->
+    <path
+        android:fillColor="#E8DEF8"
+        android:pathData="M45.8,37.2 L58.6,37.2 Q60.2,37.2 60.2,38.8 L60.2,60.2 Q60.2,61.8 58.6,61.8 L45.8,61.8 Q44.2,61.8 44.2,60.2 L44.2,38.8 Q44.2,37.2 45.8,37.2 Z" />
+    <!-- Primary accent bar inside left tile -->
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M47.6,41 L56.8,41 Q57.8,41 57.8,42 L57.8,46 Q57.8,47 56.8,47 L47.6,47 Q46.6,47 46.6,46 L46.6,42 Q46.6,41 47.6,41 Z" />
+    <path
+        android:fillColor="#B69DF8"
+        android:pathData="M47.6,50 L56.8,50 Q57.6,50 57.6,50.8 L57.6,52.2 Q57.6,53 56.8,53 L47.6,53 Q46.6,53 46.6,52.2 L46.6,50.8 Q46.6,50 47.6,50 Z" />
+
+    <!-- Right secondary tiled app window + tertiary badge -->
+    <path
+        android:fillColor="#FFE8EDF5"
+        android:pathData="M64.2,37.2 L75.2,37.2 Q76.8,37.2 76.8,38.8 L76.8,60.2 Q76.8,61.8 75.2,61.8 L64.2,61.8 Q62.6,61.8 62.6,60.2 L62.6,38.8 Q62.6,37.2 64.2,37.2 Z" />
+    <!-- Rich mauve-rose active widget card inside right tile -->
+    <path
+        android:fillColor="#7D5260"
+        android:pathData="M65.8,41 L73.6,41 Q74.5,41 74.5,41.9 L74.5,48.5 Q74.5,49.4 73.6,49.4 L65.8,49.4 Q64.9,49.4 64.9,48.5 L64.9,41.9 Q64.9,41 65.8,41 Z" />
+    <path
+        android:fillColor="#D0BCFF"
+        android:pathData="M65.8,52.2 L73.6,52.2 Q74.4,52.2 74.4,53 L74.4,57.4 Q74.4,58.2 73.6,58.2 L65.8,58.2 Q65,58.2 65,57.4 L65,53 Q65,52.2 65.8,52.2 Z" />
+
+    <!-- Bottom floating frosted Glass Pill Dock -->
+    <path
+        android:pathData="M35.5,71.2 L72.5,71.2 Q76.5,71.2 76.5,75.2 Q76.5,79.2 72.5,79.2 L35.5,79.2 Q31.5,79.2 31.5,75.2 Q31.5,71.2 35.5,71.2 Z"
+        android:strokeColor="#D9FFFFFF"
+        android:strokeWidth="0.7">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="76"
+                android:endY="79"
+                android:startX="32"
+                android:startY="71"
+                android:type="linear">
+                <item android:color="#F2FFFBFE" android:offset="0.0" />
+                <item android:color="#EBE8DEF8" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Dock icons (Search pill + 3 colorful Stage app circles/squircles) -->
+    <path
+        android:fillColor="#D0BCFF"
+        android:pathData="M37.5,75.2 m-2.3,0 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M45.8,73.1 L48.4,73.1 Q49.6,73.1 49.6,74.3 L49.6,76.1 Q49.6,77.3 48.4,77.3 L45.8,77.3 Q44.6,77.3 44.6,76.1 L44.6,74.3 Q44.6,73.1 45.8,73.1 Z" />
+    <path
+        android:fillColor="#7D5260"
+        android:pathData="M54.3,73.1 L56.9,73.1 Q58.1,73.1 58.1,74.3 L58.1,76.1 Q58.1,77.3 56.9,77.3 L54.3,77.3 Q53.1,77.3 53.1,76.1 L53.1,74.3 Q53.1,73.1 54.3,73.1 Z" />
+    <path
+        android:fillColor="#4F378B"
+        android:pathData="M62.8,73.1 L65.4,73.1 Q66.6,73.1 66.6,74.3 L66.6,76.1 Q66.6,77.3 65.4,77.3 L62.8,77.3 Q61.6,77.3 61.6,76.1 L61.6,74.3 Q61.6,73.1 62.8,73.1 Z" />
+    <path
+        android:fillColor="#9A82DB"
+        android:pathData="M71.3,75.2 m-1.9,0 a1.9,1.9 0 1,0 3.8,0 a1.9,1.9 0 1,0 -3.8,0" />
+</vector>

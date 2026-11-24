@@ -1,6 +1,7 @@
 package dev.stagelab.nativehook.xposed
 
 import android.app.Activity
+import android.app.WallpaperManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,14 +10,15 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RenderEffect
 import android.graphics.Shader
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import dev.stagelab.nativehook.compat.OplusCompatAdapter
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -41,30 +43,37 @@ object LauncherBackdropHook {
     private var backdropActive = false
 
     fun install(classLoader: ClassLoader) {
-        val cls = try {
-            XposedHelpers.findClass(LAUNCHER_CLASS, classLoader)
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherBackdropHook: class not found: $LAUNCHER_CLASS", t)
-            return
-        }
+        val cls = OplusCompatAdapter.findClassAny(
+            "launcher.class.Launcher",
+            classLoader,
+            LAUNCHER_CLASS,
+            "com.android.launcher3.Launcher",
+            "com.oppo.launcher.Launcher",
+            "com.android.launcher.uioverlays.OverlayLauncher",
+        ) ?: return
 
-        try {
-            val resumeHook = object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    HookGuard.safeRun("LauncherBackdropHook.lifecycle") {
-                        val activity = param.thisObject as? Activity ?: return@safeRun
-                        launcherRef = WeakReference(activity)
-                        registerReceiverIfNeeded(activity.applicationContext)
-                        applyBackdropState(activity, backdropActive)
-                    }
+        val resumeHook = object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                HookGuard.safeRun("LauncherBackdropHook.lifecycle") {
+                    val activity = param.thisObject as? Activity ?: return@safeRun
+                    launcherRef = WeakReference(activity)
+                    registerReceiverIfNeeded(activity.applicationContext)
+                    applyBackdropState(activity, backdropActive)
                 }
             }
-            XposedBridge.hookAllMethods(cls, "onStart", resumeHook)
-            XposedBridge.hookAllMethods(cls, "onResume", resumeHook)
-            HookGuard.info("LauncherBackdropHook: hooked $LAUNCHER_CLASS#onStart & onResume")
-        } catch (t: Throwable) {
-            HookGuard.warn("LauncherBackdropHook: failed to hook lifecycle", t)
         }
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "launcher.backdrop.onStart",
+            cls = cls,
+            nameCandidates = listOf("onStart"),
+            hook = resumeHook,
+        )
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "launcher.backdrop.onResume",
+            cls = cls,
+            nameCandidates = listOf("onResume"),
+            hook = resumeHook,
+        )
     }
 
     private fun registerReceiverIfNeeded(appContext: Context) {
@@ -118,10 +127,16 @@ object LauncherBackdropHook {
             )
         }
 
-        // Refresh ColorOS native blurred wallpaper bitmap
+        // Refresh ColorOS native blurred wallpaper bitmap, or fall back to standard WallpaperManager drawable
         val img = backdrop.getChildAt(0) as? ImageView
-        fetchColorOsBlurWallpaper()?.let { bmp ->
-            img?.setImageBitmap(bmp)
+        val oplusBmp = fetchColorOsBlurWallpaper()
+        if (oplusBmp != null) {
+            img?.setImageBitmap(oplusBmp)
+        } else {
+            val fallbackDrawable = fetchStandardWallpaperDrawable(activity)
+            if (fallbackDrawable != null) {
+                img?.setImageDrawable(fallbackDrawable)
+            }
         }
 
         backdrop.bringToFront()
@@ -170,12 +185,21 @@ object LauncherBackdropHook {
     }
 
     private fun fetchColorOsBlurWallpaper(): Bitmap? {
+        if (!OplusCompatAdapter.hasColorOsFlexibleWindow()) return null
         return runCatching {
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
             XposedHelpers.callMethod(fwm, "getCurrentBlurWallpaper") as? Bitmap
         }.onFailure {
             HookGuard.warn("LauncherBackdropHook: getCurrentBlurWallpaper failed", it)
+        }.getOrNull()
+    }
+
+    @Suppress("MissingPermission")
+    private fun fetchStandardWallpaperDrawable(context: Context): Drawable? {
+        return runCatching {
+            val wm = WallpaperManager.getInstance(context)
+            wm.peekFastDrawable() ?: wm.drawable
         }.getOrNull()
     }
 }

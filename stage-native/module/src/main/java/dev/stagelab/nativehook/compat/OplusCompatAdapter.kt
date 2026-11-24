@@ -41,12 +41,15 @@ object OplusCompatAdapter {
     fun getAllProbes(): Map<String, ProbeRecord> = probes.toMap()
 
     /**
-     * Resolves ColorOS ROM version string across ColorOS 14 / 15 / 16 / 17 (OPPO / OnePlus / realme).
+     * Resolves ColorOS / OxygenOS / realme UI ROM version string across Android 13–17 (OPPO / OnePlus / realme).
      */
     fun getColorOsVersion(): String {
         val keys = listOf(
             "ro.build.version.oplusrom",
             "ro.oplus.version.my_rom",
+            "ro.build.version.opporom",
+            "ro.oxygen.version",
+            "ro.build.version.realmeui",
             "ro.build.display.oplus",
             "ro.rom.version",
         )
@@ -54,7 +57,48 @@ object OplusCompatAdapter {
             val v = getSystemProperty(k)
             if (v.isNotBlank()) return v
         }
-        return "Unknown (Android ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT})"
+        return "AOSP / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+    }
+
+    @Volatile
+    private var flexibleManagerAvailableCache: Boolean? = null
+
+    fun hasColorOsFlexibleWindow(): Boolean {
+        flexibleManagerAvailableCache?.let { return it }
+        val ok = runCatching {
+            Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+        }.isSuccess
+        flexibleManagerAvailableCache = ok
+        return ok
+    }
+
+    fun setObjectFieldAny(target: Any, value: Any?, vararg fieldNames: String): Boolean {
+        for (name in fieldNames) {
+            if (runCatching { XposedHelpers.setObjectField(target, name, value) }.isSuccess) return true
+        }
+        return false
+    }
+
+    fun setFloatFieldAny(target: Any, value: Float, vararg fieldNames: String): Boolean {
+        for (name in fieldNames) {
+            if (runCatching { XposedHelpers.setFloatField(target, name, value) }.isSuccess) return true
+        }
+        return false
+    }
+
+    fun setBooleanFieldAny(target: Any, value: Boolean, vararg fieldNames: String): Boolean {
+        for (name in fieldNames) {
+            if (runCatching { XposedHelpers.setBooleanField(target, name, value) }.isSuccess) return true
+        }
+        return false
+    }
+
+    fun getIntFieldAny(target: Any, defaultVal: Int, vararg fieldNames: String): Int {
+        for (name in fieldNames) {
+            val res = runCatching { XposedHelpers.getIntField(target, name) }.getOrNull()
+            if (res != null) return res
+        }
+        return defaultVal
     }
 
     fun getSystemProperty(key: String): String {

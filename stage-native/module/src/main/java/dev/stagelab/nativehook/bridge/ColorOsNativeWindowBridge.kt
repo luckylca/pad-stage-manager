@@ -15,6 +15,7 @@ import de.robv.android.xposed.XposedHelpers
 import dev.stagelab.nativecore.NativeWindowBridge
 import dev.stagelab.nativecore.StageTask
 import dev.stagelab.nativecore.WindowBounds
+import dev.stagelab.nativehook.compat.OplusCompatAdapter
 import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.ui.strip.StageMagicTransitionOverlay
 import dev.stagelab.nativehook.xposed.HookGuard
@@ -67,14 +68,15 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
         val options = ActivityOptions.makeBasic()
+        val launchMode = resolveLaunchWindowingMode()
         runCatching {
             XposedHelpers.callMethod(
                 options,
                 "setLaunchWindowingMode",
-                StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE,
+                launchMode,
             )
         }.onFailure {
-            HookGuard.warn("setLaunchWindowingMode(100) reflection failed", it)
+            HookGuard.warn("setLaunchWindowingMode($launchMode) reflection failed", it)
         }
 
         // Resolve memorized bounds/scale or official single-window primary stage bounds (full stage minus left strip & Dock).
@@ -338,16 +340,35 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         )
     }
 
+    private fun resolveLaunchWindowingMode(): Int {
+        return if (OplusCompatAdapter.hasColorOsFlexibleWindow()) {
+            OplusCompatAdapter.record(
+                "ui.windowMode",
+                OplusCompatAdapter.Status.HIT,
+                "ColorOS Flexible (100)",
+            )
+            StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE
+        } else {
+            OplusCompatAdapter.record(
+                "ui.windowMode",
+                OplusCompatAdapter.Status.FALLBACK,
+                "AOSP Freeform (5)",
+            )
+            WINDOWING_MODE_FREEFORM
+        }
+    }
+
     /**
      * Compute the official iPadOS-style single-window stage bounds:
-     * occupies the entire main stage excluding the left slanted Recent Strip, top status bar, and bottom Dock.
+     * occupies the entire main stage excluding left Recent Strip, status bar / cutout, and Dock.
      */
     fun computePrimaryStageBounds(stripVisible: Boolean = true): WindowBounds {
-        val dm = appContext()?.resources?.displayMetrics
-        val screenW = dm?.widthPixels ?: 2520
-        val screenH = dm?.heightPixels ?: 1680
-        val density = dm?.density ?: StageLayoutMetrics.inferDensity(screenW, screenH)
-        return StageLayoutMetrics.compute(screenW, screenH, density, stripVisible).mainStageBounds
+        val ctx = appContext()
+        return if (ctx != null) {
+            StageLayoutMetrics.fromContext(ctx, stripVisible).mainStageBounds
+        } else {
+            StageLayoutMetrics.compute(2520, 1680, stripVisible = stripVisible).mainStageBounds
+        }
     }
 
     /**
@@ -355,11 +376,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
      * side-by-side columns in Landscape, stacked full-width rows in Portrait.
      */
     fun computeMultiColumnBounds(count: Int, stripVisible: Boolean = true): List<WindowBounds> {
-        val dm = appContext()?.resources?.displayMetrics
-        val screenW = dm?.widthPixels ?: 2520
-        val screenH = dm?.heightPixels ?: 1680
-        val density = dm?.density ?: StageLayoutMetrics.inferDensity(screenW, screenH)
-        val metrics = StageLayoutMetrics.compute(screenW, screenH, density, stripVisible)
+        val ctx = appContext()
+        val metrics = if (ctx != null) {
+            StageLayoutMetrics.fromContext(ctx, stripVisible)
+        } else {
+            StageLayoutMetrics.compute(2520, 1680, stripVisible = stripVisible)
+        }
         return StageLayoutMetrics.computeTiledBounds(metrics, count)
     }
 
@@ -382,8 +404,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         if (StageNativeRuntime.isTuckedFloatHandleTaskInfo(info)) return true
         val raw = StageNativeRuntime.extractBounds(info)
         if (raw.isEmpty) return false
-        val dm = appContext()?.resources?.displayMetrics
-        val sw = dm?.widthPixels ?: 2520
+        val ctx = appContext()
+        val snap = ctx?.let { StageLayoutMetrics.resolveDisplaySnapshot(it) }
+        val sw = snap?.widthPx ?: 2520
         val tuckedRight = raw.left >= (sw * 0.72f).toInt() && raw.right > sw + 80
         val tuckedLeft = raw.right <= (sw * 0.28f).toInt() && raw.left < -80
         return tuckedRight || tuckedLeft
@@ -402,9 +425,10 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     private fun resolveLiveOrFallbackBounds(organizer: Any, task: StageTask): WindowBounds {
-        val dm = appContext()?.resources?.displayMetrics
-        val sw = dm?.widthPixels ?: 2520
-        val sh = dm?.heightPixels ?: 1680
+        val ctx = appContext()
+        val snap = ctx?.let { StageLayoutMetrics.resolveDisplaySnapshot(it) }
+        val sw = snap?.widthPx ?: 2520
+        val sh = snap?.heightPx ?: 1680
         val live = runCatching {
             val info = XposedHelpers.callMethod(organizer, "getRunningTaskInfo", task.taskId)
                 as? ActivityManager.RunningTaskInfo ?: return@runCatching null
@@ -438,14 +462,14 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
-     * Injects ColorOS 17 Flexible Window launch bounds & scale directly into `ActivityOptions`
-     * via `FlexibleWindowManager.setExtraBundle`, so newly launched & restored windows immediately
-     * open at the exact target size and position without scale/handle desync.
+     * Injects ColorOS 14–17 Flexible Window launch bounds & scale directly into `ActivityOptions`
+     * via `FlexibleWindowManager.setExtraBundle`, cleanly degrading to standard `setLaunchBounds` on non-ColorOS builds.
      */
     private fun applyColorOsLaunchBounds(options: ActivityOptions, bounds: WindowBounds, scale: Float) {
         if (bounds.isEmpty) return
         val rect = Rect(bounds.left, bounds.top, bounds.right, bounds.bottom)
         runCatching { options.setLaunchBounds(rect) }
+        if (!OplusCompatAdapter.hasColorOsFlexibleWindow()) return
         runCatching {
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
@@ -464,25 +488,43 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     /**
-     * Adjust a ColorOS 17 Flexible Window's exact visible bounds & scale using verified native
-     * `FlexibleWindowManager.adjustFlexibleTask(Bundle)` keys.
+     * Adjust a window's visible bounds & scale using ColorOS `FlexibleWindowManager.adjustFlexibleTask`
+     * when available, falling back cleanly to Android `WindowContainerTransaction#setBounds` on
+     * unsupported ColorOS 13/14 or AOSP Freeform tablets.
      */
     fun adjustFlexibleTaskFrame(taskId: Int, targetBounds: WindowBounds, targetScale: Float = 1.0f) {
         if (targetBounds.isEmpty) return
         val rect = Rect(targetBounds.left, targetBounds.top, targetBounds.right, targetBounds.bottom)
-        runCatching {
-            val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
-            val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
-            val bundle = Bundle().apply {
-                putBoolean(SystemServerFlexibleHook.KEY_FORCE_ADJUST, true)
-                putInt(KEY_LAUNCH_FLEXIBLE_TASK_ID, taskId)
-                putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
-                putFloat(KEY_LAUNCH_SCALE, targetScale.coerceIn(0.45f, 1.0f))
+        var adjustedNative = false
+        if (OplusCompatAdapter.hasColorOsFlexibleWindow()) {
+            adjustedNative = runCatching {
+                val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
+                val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
+                val bundle = Bundle().apply {
+                    putBoolean(SystemServerFlexibleHook.KEY_FORCE_ADJUST, true)
+                    putInt(KEY_LAUNCH_FLEXIBLE_TASK_ID, taskId)
+                    putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
+                    putFloat(KEY_LAUNCH_SCALE, targetScale.coerceIn(0.45f, 1.0f))
+                }
+                val result = XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle) as? Boolean ?: false
+                HookGuard.info("BRIDGE.ADJUST_FLEXIBLE task=$taskId rect=$rect scale=$targetScale ok=$result")
+                result
+            }.onFailure {
+                HookGuard.warn("BRIDGE.ADJUST_FLEXIBLE failed for task=$taskId", it)
+            }.getOrDefault(false)
+        }
+        if (!adjustedNative && !OplusCompatAdapter.hasColorOsFlexibleWindow()) {
+            val organizer = shellTaskOrganizer ?: return
+            val token = resolveTaskToken(organizer, taskId) ?: return
+            val wct = newWindowContainerTransaction() ?: return
+            runCatching {
+                XposedHelpers.callMethod(wct, "setWindowingMode", token, WINDOWING_MODE_FREEFORM)
+                XposedHelpers.callMethod(wct, "setBounds", token, rect)
+                applyTransaction(organizer, wct)
+                HookGuard.info("BRIDGE.ADJUST_WCT_FREEFORM task=$taskId rect=$rect")
+            }.onFailure {
+                HookGuard.warn("BRIDGE.ADJUST_WCT_FREEFORM failed for task=$taskId", it)
             }
-            val result = XposedHelpers.callMethod(fwm, "adjustFlexibleTask", bundle) as? Boolean ?: false
-            HookGuard.info("BRIDGE.ADJUST_FLEXIBLE task=$taskId rect=$rect scale=$targetScale ok=$result")
-        }.onFailure {
-            HookGuard.warn("BRIDGE.ADJUST_FLEXIBLE failed for task=$taskId", it)
         }
     }
 
@@ -490,7 +532,6 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         val ctx = appContext() ?: return
         runCatching {
             val intent = Intent(LauncherBackdropHook.ACTION_STAGE_BACKDROP).apply {
-                setPackage("com.android.launcher")
                 putExtra("visible", visible)
             }
             ctx.sendBroadcast(intent)
@@ -500,8 +541,6 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     /**
      * Locks or unlocks system Home & Recents/Overview navigation gestures natively via
      * `IStatusBarService.disable(DISABLE_HOME | DISABLE_RECENT, token, pkg)`.
-     * Because the lock is bound to `navLockToken`, if SystemUI ever restarts, Android
-     * automatically unlinks and restores normal navigation.
      */
     fun setSystemNavigationLocked(locked: Boolean) {
         if (lastNavLocked == locked) return
@@ -513,10 +552,21 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             val service = XposedHelpers.callStaticMethod(stubCls, "asInterface", binder)
                 ?: return@runCatching
             val flags = if (locked) (DISABLE_HOME or DISABLE_RECENT) else 0
-            XposedHelpers.callMethod(service, "disable", flags, navLockToken, "com.android.systemui")
+            val ctxPkg = appContext()?.packageName ?: "com.android.systemui"
+            val lockedViaPrimary = runCatching {
+                XposedHelpers.callMethod(service, "disable", flags, navLockToken, ctxPkg)
+                true
+            }.getOrDefault(false)
+            if (lockedViaPrimary) {
+                OplusCompatAdapter.record("ui.navLock", OplusCompatAdapter.Status.HIT, "IStatusBarService#disable")
+            } else {
+                XposedHelpers.callMethod(service, "disableForUser", flags, navLockToken, ctxPkg, 0)
+                OplusCompatAdapter.record("ui.navLock", OplusCompatAdapter.Status.FALLBACK, "IStatusBarService#disableForUser")
+            }
             lastNavLocked = locked
             HookGuard.info("BRIDGE.NAV_LOCK locked=$locked flags=0x${flags.toString(16)}")
         }.onFailure {
+            OplusCompatAdapter.record("ui.navLock", OplusCompatAdapter.Status.MISSING, it.javaClass.simpleName)
             HookGuard.warn("BRIDGE.NAV_LOCK failed (locked=$locked)", it)
         }
     }
@@ -583,6 +633,17 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }.getOrNull()
 
     private fun parkSingleFlexibleTask(taskId: Int) {
+        val organizer = shellTaskOrganizer
+        if (organizer != null && !OplusCompatAdapter.hasColorOsFlexibleWindow()) {
+            val token = resolveTaskToken(organizer, taskId)
+            val wct = newWindowContainerTransaction()
+            if (token != null && wct != null) {
+                runCatching { XposedHelpers.callMethod(wct, "setHidden", token, true) }
+                XposedHelpers.callMethod(wct, "reorder", token, false)
+                runCatching { applyTransaction(organizer, wct) }
+                return
+            }
+        }
         runCatching {
             val fwmCls = Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager")
             val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
@@ -611,11 +672,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
         val restored = runCatching {
             val options = ActivityOptions.makeBasic()
+            val launchMode = resolveLaunchWindowingMode()
             runCatching {
                 XposedHelpers.callMethod(
                     options,
                     "setLaunchWindowingMode",
-                    StageTask.WINDOWING_MODE_COLOROS_FLEXIBLE,
+                    launchMode,
                 )
             }
             applyColorOsLaunchBounds(options, targetBounds, targetScale)
@@ -659,9 +721,10 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             as? ActivityManager.RunningTaskInfo ?: return false
         val bounds = StageNativeRuntime.extractBounds(info)
         if (bounds.isEmpty) return false
-        val dm = appContext()?.resources?.displayMetrics
-        val sw = dm?.widthPixels ?: 2520
-        val sh = dm?.heightPixels ?: 1680
+        val ctx = appContext()
+        val snap = ctx?.let { StageLayoutMetrics.resolveDisplaySnapshot(it) }
+        val sw = snap?.widthPx ?: 2520
+        val sh = snap?.heightPx ?: 1680
         // Flexible tasks have non-fullscreen window bounds (not 0,0..sw,sh)
         !(bounds.left == 0 && bounds.top == 0 && bounds.right == sw && bounds.bottom == sh)
     }.getOrDefault(false)
@@ -678,6 +741,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
 
     companion object {
         private const val CONCURRENT_HANDOFF_MS = 25L
+        private const val WINDOWING_MODE_FREEFORM = 5
         private const val DISABLE_HOME = 0x00200000
         private const val DISABLE_RECENT = 0x01000000
         private const val KEY_LAUNCH_SCENARIO = "androidx.activity.LaunchScenario"

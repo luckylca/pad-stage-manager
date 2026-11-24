@@ -22,6 +22,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import dev.stagelab.nativecore.StageSession
+import dev.stagelab.nativehook.ui.StageLayoutMetrics
 import dev.stagelab.nativehook.xposed.HookGuard
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -278,6 +279,7 @@ class StageDockOverlayController(
 
         val edgeHandle = createBottomRevealHandle(context)
 
+        val metrics = StageLayoutMetrics.fromContext(context)
         root.addView(
             capsule,
             FrameLayout.LayoutParams(
@@ -285,7 +287,7 @@ class StageDockOverlayController(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
             ).apply {
-                bottomMargin = dp(context, 14)
+                bottomMargin = dp(context, 14) + metrics.extraNavBottomPx
                 leftMargin = dp(context, 16)
                 rightMargin = dp(context, 16)
                 topMargin = dp(context, 20)
@@ -298,7 +300,9 @@ class StageDockOverlayController(
                 dp(context, 240),
                 dp(context, 18),
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-            ),
+            ).apply {
+                bottomMargin = metrics.extraNavBottomPx
+            },
         )
 
         val insertBar = View(context).apply {
@@ -312,7 +316,7 @@ class StageDockOverlayController(
         root.addView(
             insertBar,
             FrameLayout.LayoutParams(dp(context, 4), dp(context, 44), Gravity.BOTTOM or Gravity.START).apply {
-                bottomMargin = dp(context, 29)
+                bottomMargin = dp(context, 29) + metrics.extraNavBottomPx
             },
         )
         insertBarView = insertBar
@@ -361,8 +365,12 @@ class StageDockOverlayController(
         capsule.removeAllViews()
         pinnedSlotViews.clear()
         val allCandidateRecents = recentPackages.filterNot { pinnedPackages.contains(it) }
-        val screenW = context.resources.displayMetrics.widthPixels
-        val maxCapsuleW = (screenW - dp(context, 36)).coerceAtLeast(dp(context, 300))
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val screenW = metrics.screenW
+        val maxCapsuleW = (screenW - dp(context, 36) - metrics.safeLeftPx - metrics.safeRightPx).coerceAtLeast(dp(context, 280))
+        (capsule.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin = dp(context, 14) + metrics.extraNavBottomPx
+        (insertBarView?.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin = dp(context, 29) + metrics.extraNavBottomPx
+        (bottomEdgeHandle?.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin = metrics.extraNavBottomPx
 
         // Adapt icon size, spacing, and visible recent slots cleanly so portrait <-> landscape rotations
         // NEVER overflow screen edges or squish Dock icons together.
@@ -723,7 +731,8 @@ class StageDockOverlayController(
         val dropUnpinSide = sourceIsPinnedDock && isPointInSideUnpinBottomZone(context, rawX, rawY)
         val dropDock = isPointInDockDropZone(context, rawX, rawY)
         val targetStageId = if (!dropDock) findRecentStageAtPoint(rawX, rawY) else null
-        val screenH = context.resources.displayMetrics.heightPixels
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val screenH = metrics.screenH
 
         when {
             dropUnpinTop || dropUnpinSide -> {
@@ -737,7 +746,7 @@ class StageDockOverlayController(
                 HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> recentStage=$targetStageId")
                 onDockAppDroppedOnStage(pkg, targetStageId)
             }
-            rawY < screenH - dp(context, 118) -> {
+            rawY < screenH - dp(context, 118) - metrics.extraNavBottomPx -> {
                 HookGuard.info("STAGE_DOCK free-drop pkg=$pkg -> activeStage")
                 onDockAppDraggedToCenter(pkg)
             }
@@ -765,14 +774,16 @@ class StageDockOverlayController(
     }
 
     private fun isPointInTopUnpinPill(context: Context, rawX: Float, rawY: Float): Boolean {
-        val screenW = context.resources.displayMetrics.widthPixels
-        return rawY <= dp(context, 112) && abs(rawX - screenW * 0.5f) <= dp(context, 160)
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val topZone = maxOf(dp(context, 112), metrics.safeTopPx + dp(context, 84))
+        return rawY <= topZone && abs(rawX - metrics.screenW * 0.5f) <= dp(context, 160)
     }
 
     private fun isPointInSideUnpinBottomZone(context: Context, rawX: Float, rawY: Float): Boolean {
         val capsule = dockCapsule ?: return false
-        val screenH = context.resources.displayMetrics.heightPixels
-        if (rawY < screenH - dp(context, 132)) return false
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val screenH = metrics.screenH
+        if (rawY < screenH - dp(context, 132) - metrics.extraNavBottomPx) return false
         val loc = IntArray(2)
         capsule.getLocationOnScreen(loc)
         val margin = dp(context, 78)
@@ -782,11 +793,12 @@ class StageDockOverlayController(
     private fun isPointInDockDropZone(context: Context, rawX: Float, rawY: Float): Boolean {
         val capsule = dockCapsule ?: return false
         if (capsule.visibility != View.VISIBLE || capsule.width <= 0) return false
-        val screenH = context.resources.displayMetrics.heightPixels
+        val metrics = StageLayoutMetrics.fromContext(context)
+        val screenH = metrics.screenH
         val loc = IntArray(2)
         capsule.getLocationOnScreen(loc)
         val padX = dp(context, 38)
-        val dockTop = (loc[1] - dp(context, 44)).coerceAtMost(screenH - dp(context, 125))
+        val dockTop = (loc[1] - dp(context, 44)).coerceAtMost(screenH - dp(context, 125) - metrics.extraNavBottomPx)
         return rawY >= dockTop && rawX >= loc[0] - padX && rawX <= loc[0] + capsule.width + padX
     }
 
@@ -907,10 +919,8 @@ class StageDockOverlayController(
         }
     }
 
-    private fun maxPinnedCapacity(context: Context): Int {
-        val dm = context.resources.displayMetrics
-        return if (dm.widthPixels >= dm.heightPixels) MAX_PINNED_LANDSCAPE else MAX_PINNED_PORTRAIT
-    }
+    private fun maxPinnedCapacity(context: Context): Int =
+        StageLayoutMetrics.fromContext(context).maxPinnedDockCount
 
     private fun prefsContext(context: Context): Context {
         return if (context.isDeviceProtectedStorage) {
@@ -968,14 +978,25 @@ class StageDockOverlayController(
 
     private fun resolveDefaultPinnedPackages(context: Context): List<String> {
         val pm = context.packageManager
+        // Broad CN + Global candidate list across OPPO ColorOS, OnePlus OxygenOS, realme UI & Google Tablets
         val candidates = listOf(
             "com.heytap.browser",
+            "com.android.chrome",
             "mark.via",
             "com.coloros.note",
+            "com.oneplus.note",
+            "com.oplus.notes",
+            "com.google.android.keep",
             "com.coloros.filemanager",
+            "com.oneplus.filemanager",
+            "com.google.android.apps.nbu.files",
+            "com.google.android.documentsui",
             "tv.danmaku.bili",
             "com.coloros.calendar",
+            "com.google.android.calendar",
             "com.coloros.calculator",
+            "com.oneplus.calculator",
+            "com.google.android.calculator",
             "com.coloros.alarmclock",
             "com.android.settings",
         )
@@ -985,7 +1006,10 @@ class StageDockOverlayController(
     }
 
     private fun normalizePackageName(pkg: String): String = when (pkg) {
-        "com.oplus.wirelesssettings", "com.oplus.settings" -> "com.android.settings"
+        "com.oplus.wirelesssettings",
+        "com.oplus.settings",
+        "com.coloros.settings",
+        -> "com.android.settings"
         else -> pkg
     }
 
@@ -1000,8 +1024,6 @@ class StageDockOverlayController(
         private const val PREFS_NAME = "stagelab_dock_prefs"
         private const val KEY_PINNED_PACKAGES = "pinned_packages_v1"
         private const val MAX_PINNED_ICONS = 6
-        private const val MAX_PINNED_LANDSCAPE = 10
-        private const val MAX_PINNED_PORTRAIT = 7
         private const val MAX_RECENT_ICONS = 3
     }
 }

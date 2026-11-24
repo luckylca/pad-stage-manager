@@ -9,7 +9,7 @@ import android.content.Intent
 import dev.stagelab.nativehook.R
 
 /**
- * Standalone notification posted by `dev.stagelab.nativehook` (separate from SystemUI system notifications).
+ * Standalone notification posted by `io.github.luckylca.stagelab` (separate from SystemUI system notifications).
  * Tapping it cleanly disables Stage Manager, updates SharedPreferences, cancels the notification,
  * and restores the native ColorOS desktop & navigation gestures.
  */
@@ -18,9 +18,9 @@ object StageModeNotificationHelper {
     const val PREFS_NAME = "stagelab_native_prefs"
     const val KEY_ENABLED = "enabled"
 
-    const val ACTION_EXIT_FROM_NOTIFICATION = "dev.stagelab.nativehook.ACTION_EXIT_FROM_NOTIFICATION"
-    const val ACTION_SYNC_STATE = "dev.stagelab.nativehook.ACTION_SYNC_STATE"
-    const val ACTION_UI_STATE_CHANGED = "dev.stagelab.nativehook.ACTION_UI_STATE_CHANGED"
+    const val ACTION_EXIT_FROM_NOTIFICATION = "io.github.luckylca.stagelab.ACTION_EXIT_FROM_NOTIFICATION"
+    const val ACTION_SYNC_STATE = "io.github.luckylca.stagelab.ACTION_SYNC_STATE"
+    const val ACTION_UI_STATE_CHANGED = "io.github.luckylca.stagelab.ACTION_UI_STATE_CHANGED"
 
     private const val CHANNEL_ID = "stagelab_standalone_mode"
     private const val NOTIFICATION_ID = 20260419

@@ -98,10 +98,10 @@ class MainActivity : ComponentActivity() {
                 StageModeNotificationHelper.ACTION_UI_STATE_CHANGED -> {
                     moduleEnabledState.value = intent.getBooleanExtra(StageModeNotificationHelper.KEY_ENABLED, false)
                 }
-                "dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE" -> {
+                "io.github.luckylca.stagelab.ACTION_UI_DIAG_RESPONSE" -> {
                     uiDiagProbesState.value = parseProbeLines(intent.getStringArrayListExtra("probes").orEmpty())
                 }
-                "dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE" -> {
+                "io.github.luckylca.stagelab.ACTION_SYS_DIAG_RESPONSE" -> {
                     sysColorOsVersionState.value = intent.getStringExtra("coloros").orEmpty()
                     sysDiagProbesState.value = parseProbeLines(intent.getStringArrayListExtra("probes").orEmpty())
                 }
@@ -135,13 +135,13 @@ class MainActivity : ComponentActivity() {
             uiStateReceiver,
             IntentFilter().apply {
                 addAction(StageModeNotificationHelper.ACTION_UI_STATE_CHANGED)
-                addAction("dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE")
-                addAction("dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE")
+                addAction("io.github.luckylca.stagelab.ACTION_UI_DIAG_RESPONSE")
+                addAction("io.github.luckylca.stagelab.ACTION_SYS_DIAG_RESPONSE")
             },
             RECEIVER_EXPORTED,
         )
         sendStageCmd("diag")
-        sendBroadcast(Intent("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG"))
+        sendBroadcast(Intent("io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG"))
 
         setContent {
             MaterialTheme(colorScheme = StageLabColorScheme) {
@@ -186,7 +186,7 @@ class MainActivity : ComponentActivity() {
                     onRefreshDiag = {
                         sysDiagSnapshot = loadDiagnosticsReport()
                         sendStageCmd("diag")
-                        sendBroadcast(Intent("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG"))
+                        sendBroadcast(Intent("io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG"))
                         Toast.makeText(this@MainActivity, "已刷新本机 ColorOS 兼容性诊断", Toast.LENGTH_SHORT).show()
                     },
                     onCopyDiag = {
@@ -505,7 +505,7 @@ private fun SettingsScreen(
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "紧急禁用：\nadb shell su -c \"/data/adb/lspd/cli modules disable dev.stagelab.nativehook\"\n\n实时日志：\nadb logcat -s StageLabNativeHook:V",
+                        text = "紧急禁用：\nadb shell su -c \"/data/adb/lspd/cli modules disable io.github.luckylca.stagelab\"\n\n实时日志：\nadb logcat -s StageLabNativeHook:V",
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
                         lineHeight = 20.sp,

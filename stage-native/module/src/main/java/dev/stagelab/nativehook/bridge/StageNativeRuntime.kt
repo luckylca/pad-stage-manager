@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object StageNativeRuntime {
 
-    const val ACTION_STAGE_CMD = "dev.stagelab.nativehook.ACTION_STAGE_CMD"
+    const val ACTION_STAGE_CMD = "io.github.luckylca.stagelab.ACTION_STAGE_CMD"
 
     val registry = StageRegistry()
     val bridge = ColorOsNativeWindowBridge()
@@ -665,8 +665,8 @@ object StageNativeRuntime {
                     )
                     runCatching {
                         ctx.sendBroadcast(
-                            Intent("dev.stagelab.nativehook.ACTION_UI_DIAG_RESPONSE").apply {
-                                setPackage("dev.stagelab.nativehook")
+                            Intent("io.github.luckylca.stagelab.ACTION_UI_DIAG_RESPONSE").apply {
+                                setPackage("io.github.luckylca.stagelab")
                                 putStringArrayListExtra("probes", lines)
                             },
                         )
@@ -989,7 +989,7 @@ object StageNativeRuntime {
     private var lastSyncedAppEnabled: Boolean? = null
 
     /**
-     * Broadcasts authoritative enabled state to `dev.stagelab.nativehook` so the app itself posts/cancels
+     * Broadcasts authoritative enabled state to `io.github.luckylca.stagelab` so the app itself posts/cancels
      * its standalone notification (never mixed into SystemUI notifications) and keeps MainActivity switch in sync.
      */
     private fun syncAppState(context: Context, enabled: Boolean) {
@@ -998,7 +998,7 @@ object StageNativeRuntime {
         runCatching {
             val intent = Intent(StageModeNotificationHelper.ACTION_SYNC_STATE).apply {
                 component = ComponentName(
-                    "dev.stagelab.nativehook",
+                    "io.github.luckylca.stagelab",
                     "dev.stagelab.nativehook.ui.StageModeStateReceiver",
                 )
                 addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
@@ -1224,7 +1224,7 @@ object StageNativeRuntime {
         if (pkg.isBlank()) return false
         return !isLauncherPkg(pkg) &&
             pkg != "com.android.systemui" &&
-            pkg != "dev.stagelab.nativehook" &&
+            pkg != "io.github.luckylca.stagelab" &&
             pkg != "com.android.permissioncontroller" &&
             pkg != "com.google.android.permissioncontroller" &&
             pkg != "com.android.packageinstaller" &&

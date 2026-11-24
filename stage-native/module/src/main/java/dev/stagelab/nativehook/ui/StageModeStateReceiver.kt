@@ -6,7 +6,7 @@ import android.content.Intent
 import dev.stagelab.nativehook.bridge.StageNativeRuntime
 
 /**
- * Single-source-of-truth state receiver inside `dev.stagelab.nativehook`:
+ * Single-source-of-truth state receiver inside `io.github.luckylca.stagelab`:
  * - Handles user tap on the standalone StageLab exit notification (`ACTION_EXIT_FROM_NOTIFICATION`).
  * - Handles state sync broadcasts from `SystemUI` (`ACTION_SYNC_STATE`) so `MainActivity` switch
  *   and standalone notification never drift out of sync.

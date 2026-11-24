@@ -66,7 +66,7 @@ object LauncherDockHook {
                             return
                         }
                         val pkg = resolveItemPackage(tag) ?: return
-                        if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "dev.stagelab.nativehook") {
+                        if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "io.github.luckylca.stagelab") {
                             return
                         }
 
@@ -108,7 +108,7 @@ object LauncherDockHook {
                             ?: return
                         val itemInfo = param.args.firstOrNull { it != null && it !is View } ?: param.args.getOrNull(1) ?: return
                         val pkg = resolveItemPackage(itemInfo) ?: return
-                        if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "dev.stagelab.nativehook") {
+                        if (!StageNativeRuntime.isManagedUserApp(pkg) || pkg == "io.github.luckylca.stagelab") {
                             return
                         }
 

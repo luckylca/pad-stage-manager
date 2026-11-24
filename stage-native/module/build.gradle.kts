@@ -11,11 +11,11 @@ android {
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
-        applicationId = "dev.stagelab.nativehook"
+        applicationId = "io.github.luckylca.stagelab"
         minSdk = 33
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.1.0-native"
+        versionCode = 4
+        versionName = "1.1.1-native"
     }
 
     signingConfigs {

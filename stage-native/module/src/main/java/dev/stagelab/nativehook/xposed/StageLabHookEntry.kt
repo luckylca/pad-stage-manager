@@ -169,7 +169,7 @@ class StageLabHookEntry : IXposedHookLoadPackage {
     }
 
     companion object {
-        private const val SELF_PKG = "dev.stagelab.nativehook"
+        private const val SELF_PKG = "io.github.luckylca.stagelab"
         private const val ANDROID_PKG = "android"
         private const val SYSTEMUI_PKG = "com.android.systemui"
         private const val LAUNCHER_PKG = "com.android.launcher"

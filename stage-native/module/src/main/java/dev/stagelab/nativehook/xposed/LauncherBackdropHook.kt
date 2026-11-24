@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object LauncherBackdropHook {
 
-    const val ACTION_STAGE_BACKDROP = "dev.stagelab.nativehook.ACTION_STAGE_BACKDROP"
+    const val ACTION_STAGE_BACKDROP = "io.github.luckylca.stagelab.ACTION_STAGE_BACKDROP"
     private const val LAUNCHER_CLASS = "com.android.launcher.Launcher"
     private const val BACKDROP_TAG = "StageLabBlurBackdrop"
 

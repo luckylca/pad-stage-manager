@@ -3,7 +3,7 @@
   <h1>StageLab Native（原生台前调度）</h1>
   <p><strong>面向 Android 13–17 平板与折叠屏的原生级 iPad Stage Manager LSPosed 模块</strong></p>
 
-  [![Release](https://img.shields.io/github/v/release/Xposed-Modules-Repo/dev.stagelab.nativehook?label=Release)](https://github.com/Xposed-Modules-Repo/dev.stagelab.nativehook/releases/latest)
+  [![Release](https://img.shields.io/github/v/release/Xposed-Modules-Repo/io.github.luckylca.stagelab?label=Release)](https://github.com/Xposed-Modules-Repo/io.github.luckylca.stagelab/releases/latest)
   [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://github.com/luckylca/pad-stage-manager/blob/main/LICENSE)
   [![Source](https://img.shields.io/badge/Source-pad--stage--manager-black)](https://github.com/luckylca/pad-stage-manager)
   [![LSPosed](https://img.shields.io/badge/Framework-LSPosed-orange)](https://github.com/LSPosed/LSPosed)
@@ -32,7 +32,7 @@ StageLab Native 基于系统原生 `ShellTaskOrganizer`、`WindowContainerTransa
 ## 安装与作用域
 
 1. 下载并安装最新版 APK（`StageLab-Native-<version>.apk`）。
-2. 在 **LSPosed / Vector** 中启用 **StageLab Native (`dev.stagelab.nativehook`)**，确认作用域包含：
+2. 在 **LSPosed / Vector** 中启用 **StageLab Native (`io.github.luckylca.stagelab`)**，确认作用域包含：
    - `system`（系统框架）
    - `com.android.systemui`（系统界面）
    - `com.android.launcher`（系统桌面）

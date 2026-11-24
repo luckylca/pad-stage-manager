@@ -58,9 +58,11 @@ StageLab Native brings a native, 120fps iPadOS-style **Stage Manager** experienc
 
 ## Installation
 
+> Migration from `dev.stagelab.nativehook`: disable the old Xposed module, reboot, uninstall it, then install and enable the new package. Android treats the new ID as a separate app.
+
 1. Download the latest APK from [GitHub Releases](https://github.com/luckylca/pad-stage-manager/releases) (or the LSPosed Module Repository once listed).
 2. Install the APK on your device.
-3. Open **LSPosed / Vector**, enable **StageLab Native (`dev.stagelab.nativehook`)**, and verify the target scope includes:
+3. Open **LSPosed / Vector**, enable **StageLab Native (`io.github.luckylca.stagelab`)**, and verify the target scope includes:
    - `system` (System Framework)
    - `com.android.systemui` (System UI)
    - `com.android.launcher` (System Launcher)
@@ -73,10 +75,10 @@ If anything unexpected occurs on an untested ROM:
 
 ```bash
 # Disable Stage Manager mode cleanly via ADB
-adb shell am broadcast -a dev.stagelab.nativehook.ACTION_STAGE_CMD --es cmd disable_module -p com.android.systemui
+adb shell am broadcast -a io.github.luckylca.stagelab.ACTION_STAGE_CMD --es cmd disable_module -p com.android.systemui
 
 # Or disable the Xposed module completely via Vector/LSPosed CLI and restart SystemUI/Launcher
-adb shell su -c "/data/adb/lspd/cli modules disable dev.stagelab.nativehook"
+adb shell su -c "/data/adb/lspd/cli modules disable io.github.luckylca.stagelab"
 adb shell su -c "pkill -f com.android.systemui; pkill -f com.android.launcher"
 ```
 

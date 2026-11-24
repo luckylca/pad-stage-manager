@@ -52,8 +52,10 @@ StageLab Native 基于系统原生 `ShellTaskOrganizer`、`WindowContainerTransa
 
 ## 安装与使用
 
+> 从旧包名 `dev.stagelab.nativehook` 迁移时，请先禁用旧模块并重启，卸载旧版后再安装、启用新版。新包名不能覆盖安装旧版。
+
 1. 前往 [GitHub Releases](https://github.com/luckylca/pad-stage-manager/releases)（或 LSPosed 模块仓库）下载最新版 APK 并安装。
-2. 打开 **LSPosed / Vector**，勾选启用 **StageLab Native (`dev.stagelab.nativehook`)**，确认作用域已勾选：
+2. 打开 **LSPosed / Vector**，勾选启用 **StageLab Native (`io.github.luckylca.stagelab`)**，确认作用域已勾选：
    - `system`（系统框架）
    - `com.android.systemui`（系统界面）
    - `com.android.launcher`（系统桌面）
@@ -64,10 +66,10 @@ StageLab Native 基于系统原生 `ShellTaskOrganizer`、`WindowContainerTransa
 
 ```bash
 # 仅立即关闭台前调度运行状态并恢复原生桌面
-adb shell am broadcast -a dev.stagelab.nativehook.ACTION_STAGE_CMD --es cmd disable_module -p com.android.systemui
+adb shell am broadcast -a io.github.luckylca.stagelab.ACTION_STAGE_CMD --es cmd disable_module -p com.android.systemui
 
 # 通过 Vector / LSPosed CLI 完全禁用模块并重启 SystemUI 与桌面
-adb shell su -c "/data/adb/lspd/cli modules disable dev.stagelab.nativehook"
+adb shell su -c "/data/adb/lspd/cli modules disable io.github.luckylca.stagelab"
 adb shell su -c "pkill -f com.android.systemui; pkill -f com.android.launcher"
 ```
 

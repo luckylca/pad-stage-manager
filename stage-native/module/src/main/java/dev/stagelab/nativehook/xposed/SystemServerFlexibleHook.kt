@@ -37,10 +37,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 object SystemServerFlexibleHook {
 
     const val KEY_FORCE_ADJUST = "stagelab.force_adjust"
-    const val ACTION_SIDEBAR_MINI_HINT = "dev.stagelab.nativehook.ACTION_SIDEBAR_MINI_HINT"
-    const val ACTION_ACTIVE_STAGE_CHANGED = "dev.stagelab.nativehook.ACTION_ACTIVE_STAGE_CHANGED"
-    const val ACTION_TUCKED_TASKS_SYNC = "dev.stagelab.nativehook.ACTION_TUCKED_TASKS_SYNC"
-    const val ACTION_STAGE_MODE_SYNC = "dev.stagelab.nativehook.ACTION_STAGE_MODE_SYNC"
+    const val ACTION_SIDEBAR_MINI_HINT = "io.github.luckylca.stagelab.ACTION_SIDEBAR_MINI_HINT"
+    const val ACTION_ACTIVE_STAGE_CHANGED = "io.github.luckylca.stagelab.ACTION_ACTIVE_STAGE_CHANGED"
+    const val ACTION_TUCKED_TASKS_SYNC = "io.github.luckylca.stagelab.ACTION_TUCKED_TASKS_SYNC"
+    const val ACTION_STAGE_MODE_SYNC = "io.github.luckylca.stagelab.ACTION_STAGE_MODE_SYNC"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
     private const val MINI_MEMORY_PREFIX = "mini:"
 
@@ -104,7 +104,7 @@ object SystemServerFlexibleHook {
 
     /**
      * Prevents ColorOS `OplusAppStartupManager` from blocking `com.android.systemui`'s
-     * `ACTION_SYNC_STATE` broadcast to `dev.stagelab.nativehook/.ui.StageModeStateReceiver`,
+     * `ACTION_SYNC_STATE` broadcast to `io.github.luckylca.stagelab/dev.stagelab.nativehook.ui.StageModeStateReceiver`,
      * guaranteeing the standalone exit notification ALWAYS appears after boot & unlock!
      */
     private fun hookAllowStageLabBroadcastWakeup(classLoader: ClassLoader) {
@@ -124,7 +124,7 @@ object SystemServerFlexibleHook {
                     if (!HookGuard.isActive()) return
                     val args = param.args ?: return
                     for (arg in args) {
-                        if (arg != null && arg.toString().contains("dev.stagelab.nativehook")) {
+                        if (arg != null && arg.toString().contains("io.github.luckylca.stagelab")) {
                             param.result = false
                             return
                         }
@@ -249,7 +249,7 @@ object SystemServerFlexibleHook {
             val filter = IntentFilter().apply {
                 addAction(ACTION_ACTIVE_STAGE_CHANGED)
                 addAction(ACTION_STAGE_MODE_SYNC)
-                addAction("dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG")
+                addAction("io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG")
             }
             ctx.registerReceiver(
                 object : BroadcastReceiver() {
@@ -269,7 +269,7 @@ object SystemServerFlexibleHook {
                                 val nextStageId = intent.getStringExtra("stageId").orEmpty().ifBlank { "stage-default" }
                                 postOnAndroidUiThread { swapFloatHandlesForStage(nextStageId) }
                             }
-                            "dev.stagelab.nativehook.ACTION_QUERY_SYS_DIAG" -> {
+                            "io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG" -> {
                                 mainHandler.post {
                                     val lines = ArrayList(
                                         OplusCompatAdapter.getAllProbes().values.map {
@@ -278,8 +278,8 @@ object SystemServerFlexibleHook {
                                     )
                                     runCatching {
                                         ctx.sendBroadcast(
-                                            Intent("dev.stagelab.nativehook.ACTION_SYS_DIAG_RESPONSE").apply {
-                                                setPackage("dev.stagelab.nativehook")
+                                            Intent("io.github.luckylca.stagelab.ACTION_SYS_DIAG_RESPONSE").apply {
+                                                setPackage("io.github.luckylca.stagelab")
                                                 putExtra("coloros", OplusCompatAdapter.getColorOsVersion())
                                                 putStringArrayListExtra("probes", lines)
                                             },

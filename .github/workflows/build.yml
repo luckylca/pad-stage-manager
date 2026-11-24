@@ -3,7 +3,7 @@ name: Build & Release StageLab Native
 on:
   push:
     branches: [ main ]
-    tags: [ '[0-9]*-*', 'v*' ]
+    tags: [ '[0-9]*-*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
       publish:
         description: 'Publish GitHub Release after successful build and signature verification'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -42,11 +42,20 @@ jobs:
           STAGELAB_KEYSTORE_PASSWORD: ${{ secrets.STAGELAB_KEYSTORE_PASSWORD }}
           STAGELAB_KEY_ALIAS: ${{ secrets.STAGELAB_KEY_ALIAS }}
           STAGELAB_KEY_PASSWORD: ${{ secrets.STAGELAB_KEY_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
           PUBLISH_INPUT: ${{ inputs.publish == true }}
         run: |
           IS_RELEASE="false"
           if [[ "${GITHUB_REF:-}" == refs/tags/* ]] || [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$PUBLISH_INPUT" == "true" ]]; then
             IS_RELEASE="true"
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            VERSION_CODE="$(grep -m1 -E '^[[:space:]]*versionCode[[:space:]]*=' stage-native/module/build.gradle.kts | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')"
+            VERSION_NAME="$(grep -m1 -E '^[[:space:]]*versionName[[:space:]]*=' stage-native/module/build.gradle.kts | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
+            AUTO_TAG="${VERSION_CODE}-${VERSION_NAME}"
+            if [[ -f "docs/releases/${VERSION_NAME}.md" ]] && ! gh release view "$AUTO_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              IS_RELEASE="true"
+            fi
           fi
           echo "IS_RELEASE=$IS_RELEASE" >> "$GITHUB_ENV"
 
@@ -98,7 +107,7 @@ jobs:
           VERSION_CODE="$(grep -m1 -E '^[[:space:]]*versionCode[[:space:]]*=' stage-native/module/build.gradle.kts | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')"
           VERSION_NAME="$(grep -m1 -E '^[[:space:]]*versionName[[:space:]]*=' stage-native/module/build.gradle.kts | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
           EXPECTED_TAG="${VERSION_CODE}-${VERSION_NAME}"
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == [0-9]*-* && "${GITHUB_REF_NAME}" != "$EXPECTED_TAG" ]]; then
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME}" != "$EXPECTED_TAG" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match Gradle version $EXPECTED_TAG"
             exit 1
           fi
@@ -136,7 +145,7 @@ jobs:
           fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "dist/$RELEASE_ASSET" --clobber
+            echo "Release $RELEASE_TAG already exists; leaving published assets unchanged."
           else
             gh release create "$RELEASE_TAG" \
               "dist/$RELEASE_ASSET" \

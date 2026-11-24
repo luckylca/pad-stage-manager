@@ -4,10 +4,10 @@
 
 ## 1. 源码仓库自动发版（已配置好）
 
-当 `luckylca/pad-stage-manager` 推送匹配 `<versionCode>-<versionName>` 的标签（例如 `1-1.0.0`）时，GitHub Actions 会自动：
+当 `luckylca/pad-stage-manager` 的 main 分支包含尚未发布的版本及对应 `docs/releases/<versionName>.md`，或推送匹配 `<versionCode>-<versionName>` 的标签（例如 `1-1.0.0`）时，GitHub Actions 会自动：
 1. 执行 `:core:test`、`assembleDebug` 与 `assembleRelease`；
 2. 校验 Release APK 证书指纹与 `45a7a172c03d567cd910b304c2c83d43257c5fd988385712ad30589dd5661b70` 一致；
-3. 自动创建或更新 GitHub Release `1-1.0.0`，挂载 `StageLab-Native-1.0.0.apk` 与 `docs/releases/1.0.0.md` 发布说明。
+3. 自动创建 GitHub Release（已有版本不覆盖） `1-1.0.0`，挂载 `StageLab-Native-1.0.0.apk` 与 `docs/releases/1.0.0.md` 发布说明。
 
 ## 2. 提交官方仓库收录申请
 

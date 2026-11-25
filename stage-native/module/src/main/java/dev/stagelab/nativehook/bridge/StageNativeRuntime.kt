@@ -77,27 +77,27 @@ object StageNativeRuntime {
             updateStripUiImmediate(session)
         },
         onDockAppDraggedToCenter = { pkg ->
-            pendingLaunches[pkg] = true to System.currentTimeMillis()
-            val session = dockController.onDockAppDraggedToCenter(pkg)
-            maybeScheduleTwoWindowSideBySide(session)
-            updateStripUiImmediate(session)
+            mergePackageFromDockOrCommand(pkg)
         },
         onDockAppDroppedOnStage = { pkg, targetStageId ->
-            // Switch directly to the target workspace in the left strip first, then wait for
-            // BRIDGE.SWITCH_SHOW (370ms) to finish before launching/merging the dropped app
-            // so the restored single-window bounds never overwrite the new side-by-side tile layout.
+            // Switch to the target workspace first and wait deterministically for BRIDGE.SWITCH_SHOW
+            // to reveal/restore its existing tasks before launching or merging the dropped app.
+            cancelPendingTileLayouts()
             val switched = recentController.onStageThumbnailClicked(targetStageId)
             updateStripUiImmediate(switched)
             pendingLaunches[pkg] = true to System.currentTimeMillis()
-            mainHandler.postDelayed({
-                val session = dockController.onDockAppDraggedToCenter(pkg)
-                maybeScheduleTwoWindowSideBySide(session)
-                updateStripUiImmediate(session)
-            }, 430L)
+            bridge.runAfterSwitchShow {
+                if (stageManagerEnabled && !isDeviceLocked && registry.getActiveStage()?.stageId == targetStageId) {
+                    mergePackageFromDockOrCommand(pkg)
+                } else {
+                    pendingLaunches.remove(pkg)
+                }
+            }
         },
         findRecentStageAtPoint = { rawX, rawY -> stripOverlay.findStageIdAtScreenPoint(rawX, rawY) },
         onHoverRecentStage = { stageId -> stripOverlay.highlightHoverStage(stageId) },
         onRecentStageClickedFromSearch = { stageId ->
+            cancelPendingTileLayouts()
             val session = recentController.onStageThumbnailClicked(stageId)
             updateStripUiImmediate(session)
         },
@@ -106,6 +106,71 @@ object StageNativeRuntime {
             updateStripUi(registry.snapshot())
         },
     )
+
+    private var pendingTileRunnable: Runnable? = null
+    private var pendingTileVerifyRunnable: Runnable? = null
+
+    init {
+        bridge.shouldShowIncomingTask = { taskId ->
+            registry.getActiveStage()?.containsTask(taskId) == true
+        }
+        bridge.incomingLiveTileBoundsProvider = { taskId, initialIncomingRegularIds ->
+            resolveLiveTileOverrideDuringSwitchShow(taskId, initialIncomingRegularIds)
+        }
+        bridge.onSwitchShowCompleted = { initialIncomingRegularIds ->
+            reconcileActiveStageAfterSwitchShow(initialIncomingRegularIds)
+        }
+    }
+
+    private fun mergePackageFromDockOrCommand(pkg: String): StageSession {
+        cancelPendingTileLayouts()
+        val beforeActiveId = registry.getActiveStage()?.stageId
+        val beforeTaskIds = registry.getActiveStage()?.taskIds?.toSet().orEmpty()
+        pendingLaunches[pkg] = true to System.currentTimeMillis()
+        val session = dockController.onDockAppDraggedToCenter(pkg)
+        val afterActive = session.activeStage
+        val mergedSynchronously = afterActive != null && (
+            afterActive.stageId != beforeActiveId ||
+                afterActive.taskIds.any { it !in beforeTaskIds }
+            )
+        if (mergedSynchronously) {
+            // Existing task already present in Active Stage -> no new onTaskAppeared will arrive.
+            pendingLaunches.remove(pkg)
+            maybeScheduleTwoWindowSideBySide(session)
+        } else if (afterActive?.tasks?.any { it.packageName == pkg } == true) {
+            pendingLaunches.remove(pkg)
+        }
+        updateStripUiImmediate(session)
+        return session
+    }
+
+    private fun resolveLiveTileOverrideDuringSwitchShow(
+        taskId: Int,
+        initialIncomingRegularIds: List<Int>,
+    ): WindowBounds? {
+        val active = registry.getActiveStage() ?: return null
+        val regularTasks = active.tasks.filterNot { it.isMiniFloating }
+        if (regularTasks.size !in 2..3) return null
+        val currentRegularIds = regularTasks.map { it.taskId }
+        // Only recompute multi-column bounds during SWITCH_SHOW if active regular membership
+        // changed mid-transition (e.g. concurrent merge), preserving manual user sizes otherwise.
+        if (currentRegularIds == initialIncomingRegularIds) return null
+        val idx = regularTasks.indexOfFirst { it.taskId == taskId }
+        if (idx < 0) return null
+        return bridge.computeMultiColumnBounds(
+            count = regularTasks.size,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        ).getOrNull(idx)
+    }
+
+    private fun reconcileActiveStageAfterSwitchShow(initialIncomingRegularIds: List<Int>) {
+        val session = registry.snapshot()
+        val active = session.activeStage ?: return
+        val regularIds = active.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
+        if (regularIds != initialIncomingRegularIds && regularIds.size >= 2) {
+            maybeScheduleTwoWindowSideBySide(session, initialDelayMs = 60L)
+        }
+    }
 
     private val receiverRegistered = AtomicBoolean(false)
 
@@ -309,16 +374,8 @@ object StageNativeRuntime {
             val targetB = targets[t.taskId] ?: continue
             if (onlyFixUnconverged) {
                 val info = liveMap[t.taskId]
-                if (info != null) {
-                    val liveB = extractBounds(info)
-                    val liveScale = extractFlexibleScale(info)
-                    val boundsOk = kotlin.math.abs(liveB.left - targetB.left) <= 16 &&
-                        kotlin.math.abs(liveB.top - targetB.top) <= 16 &&
-                        kotlin.math.abs(liveB.right - targetB.right) <= 16 &&
-                        kotlin.math.abs(liveB.bottom - targetB.bottom) <= 16
-                    if (boundsOk && (t.isMiniFloating || liveScale >= 0.98f)) {
-                        continue
-                    }
+                if (info != null && isTaskFrameConverged(info, targetB, isMini = t.isMiniFloating)) {
+                    continue
                 }
             }
             if (!t.isMiniFloating) {
@@ -601,10 +658,7 @@ object StageNativeRuntime {
                         maybeScheduleTwoWindowSideBySide(s)
                         s
                     }
-                    pkg.isNotBlank() -> {
-                        pendingLaunches[pkg] = true to System.currentTimeMillis()
-                        dockController.onDockAppDraggedToCenter(pkg)
-                    }
+                    pkg.isNotBlank() -> mergePackageFromDockOrCommand(pkg)
                     else -> registry.snapshot()
                 }
             }
@@ -631,6 +685,7 @@ object StageNativeRuntime {
             }
             "close" -> {
                 if (taskId > 0) {
+                    cancelPendingTileLayouts()
                     forgetClosedTaskMemory(taskId, pkgHint = pkg.takeIf { it.isNotBlank() }, reason = "cmd_close")
                     dockController.onWindowMenuClose(taskId)
                 } else {
@@ -1069,26 +1124,96 @@ object StageNativeRuntime {
         }
     }
 
-    private fun maybeScheduleTwoWindowSideBySide(session: StageSession) {
+    private fun cancelPendingTileLayouts() {
+        pendingTileRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingTileRunnable = null
+        pendingTileVerifyRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingTileVerifyRunnable = null
+    }
+
+    private fun isTaskFrameConverged(
+        info: ActivityManager.RunningTaskInfo,
+        target: WindowBounds,
+        isMini: Boolean = false,
+    ): Boolean {
+        val live = extractBounds(info)
+        val scale = extractFlexibleScale(info)
+        val boundsOk = kotlin.math.abs(live.left - target.left) <= 16 &&
+            kotlin.math.abs(live.top - target.top) <= 16 &&
+            kotlin.math.abs(live.right - target.right) <= 16 &&
+            kotlin.math.abs(live.bottom - target.bottom) <= 16
+        return boundsOk && (isMini || scale >= 0.98f)
+    }
+
+    private fun maybeScheduleTwoWindowSideBySide(
+        session: StageSession,
+        initialDelayMs: Long = 220L,
+    ) {
+        cancelPendingTileLayouts()
         val active = session.activeStage ?: return
         val regularTasks = active.tasks.filterNot { it.isMiniFloating }
         val count = regularTasks.size
-        stageOrientedLandscape[active.stageId] = isCurrentLandscape()
+        val targetStageId = active.stageId
+        stageOrientedLandscape[targetStageId] = isCurrentLandscape()
         if (count < 2) return
+        val expectedTaskIds = regularTasks.map { it.taskId }
+
         if (count in 2..3) {
-            val taskIds = regularTasks.map { it.taskId }
-            val columns = bridge.computeMultiColumnBounds(
-                count = count,
-                stripVisible = !recentController.isHiddenByUserSetting,
-            )
-            mainHandler.postDelayed({
-                taskIds.forEachIndexed { idx, tid ->
-                    columns.getOrNull(idx)?.let { bounds ->
-                        bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)
+            val tileTask = Runnable {
+                pendingTileRunnable = null
+                if (!stageManagerEnabled || isDeviceLocked) return@Runnable
+                val curActive = registry.getActiveStage() ?: return@Runnable
+                val curRegularIds = curActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
+                if (curActive.stageId != targetStageId || curRegularIds != expectedTaskIds) return@Runnable
+
+                val curLand = isCurrentLandscape()
+                stageOrientedLandscape[targetStageId] = curLand
+                val columns = bridge.computeMultiColumnBounds(
+                    count = count,
+                    stripVisible = !recentController.isHiddenByUserSetting,
+                )
+                markProgrammaticTransition(900L)
+                var anyFailed = false
+                expectedTaskIds.forEachIndexed { idx, tid ->
+                    val bounds = columns.getOrNull(idx) ?: return@forEachIndexed
+                    taskGeometryMemory[curLand to tid] = SavedGeometry(bounds, 1.0f, userCustomized = false)
+                    if (!bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)) {
+                        anyFailed = true
                     }
                 }
-                HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$taskIds bounds=$columns")
-            }, 220L)
+                HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$expectedTaskIds bounds=$columns anyFailed=$anyFailed")
+
+                val verifyDelayMs = if (anyFailed || bridge.isSwitchShowPending()) 240L else 300L
+                val verifyTask = Runnable {
+                    pendingTileVerifyRunnable = null
+                    if (!stageManagerEnabled || isDeviceLocked) return@Runnable
+                    val latestActive = registry.getActiveStage() ?: return@Runnable
+                    val latestRegularIds = latestActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
+                    if (latestActive.stageId != targetStageId || latestRegularIds != expectedTaskIds) return@Runnable
+
+                    val liveMap = bridge.queryLiveRunningTasks().associateBy { it.taskId }
+                    val verifyColumns = bridge.computeMultiColumnBounds(
+                        count = count,
+                        stripVisible = !recentController.isHiddenByUserSetting,
+                    )
+                    var repaired = 0
+                    expectedTaskIds.forEachIndexed { idx, tid ->
+                        val targetB = verifyColumns.getOrNull(idx) ?: return@forEachIndexed
+                        val liveInfo = liveMap[tid]
+                        if (liveInfo == null || !isTaskFrameConverged(liveInfo, targetB)) {
+                            bridge.adjustFlexibleTaskFrame(tid, targetB, 1.0f)
+                            repaired++
+                        }
+                    }
+                    if (repaired > 0) {
+                        HookGuard.info("STAGE.TILE_VERIFY_REPAIR count=$count repaired=$repaired tasks=$expectedTaskIds")
+                    }
+                }
+                pendingTileVerifyRunnable = verifyTask
+                mainHandler.postDelayed(verifyTask, verifyDelayMs)
+            }
+            pendingTileRunnable = tileTask
+            mainHandler.postDelayed(tileTask, initialDelayMs)
         } else {
             // 4+ unlimited windows: keep existing windows intact and place the newly merged window
             // neatly cascaded inside Main Stage so users can arrange unlimited windows freely.
@@ -1105,10 +1230,17 @@ object StageNativeRuntime {
                 right = base.right,
                 bottom = base.bottom,
             )
-            mainHandler.postDelayed({
+            val cascadeTask = Runnable {
+                pendingTileRunnable = null
+                if (!stageManagerEnabled || isDeviceLocked) return@Runnable
+                val curActive = registry.getActiveStage() ?: return@Runnable
+                val curRegularIds = curActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
+                if (curActive.stageId != targetStageId || curRegularIds != expectedTaskIds) return@Runnable
                 bridge.adjustFlexibleTaskFrame(newest.taskId, cascaded, 1.0f)
                 HookGuard.info("STAGE.CASCADE_LAYOUT count=$count newest=${newest.taskId} bounds=$cascaded")
-            }, 220L)
+            }
+            pendingTileRunnable = cascadeTask
+            mainHandler.postDelayed(cascadeTask, initialDelayMs)
         }
     }
 

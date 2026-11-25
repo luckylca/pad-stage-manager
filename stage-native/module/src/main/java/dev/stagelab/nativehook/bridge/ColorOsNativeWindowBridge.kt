@@ -104,6 +104,72 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         return null
     }
 
+    @Volatile
+    private var switchShowPending: Boolean = false
+    private var switchShowGeneration: Long = 0L
+    private var switchShowFailsafe: Runnable? = null
+    private val postSwitchShowActions = mutableListOf<() -> Unit>()
+
+    @Volatile
+    var shouldShowIncomingTask: ((taskId: Int) -> Boolean)? = null
+
+    @Volatile
+    var incomingLiveTileBoundsProvider: ((taskId: Int, initialIncomingRegularIds: List<Int>) -> WindowBounds?)? = null
+
+    @Volatile
+    var onSwitchShowCompleted: ((initialIncomingRegularIds: List<Int>) -> Unit)? = null
+
+    fun isSwitchShowPending(): Boolean = switchShowPending
+
+    fun runAfterSwitchShow(action: () -> Unit) {
+        val runOnMain = Runnable {
+            if (switchShowPending) {
+                postSwitchShowActions.add(action)
+            } else {
+                action()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            runOnMain.run()
+        } else {
+            mainHandler.post(runOnMain)
+        }
+    }
+
+    private fun beginSwitchShowCycle(initialIncomingRegularIds: List<Int>): Long {
+        switchShowFailsafe?.let { mainHandler.removeCallbacks(it) }
+        postSwitchShowActions.clear()
+        val gen = ++switchShowGeneration
+        switchShowPending = true
+        val failsafe = Runnable {
+            if (gen == switchShowGeneration && switchShowPending) {
+                HookGuard.warn("BRIDGE.SWITCH_SHOW failsafe timeout fired gen=$gen")
+                finishSwitchShowCycle(gen, initialIncomingRegularIds)
+            }
+        }
+        switchShowFailsafe = failsafe
+        mainHandler.postDelayed(failsafe, 950L)
+        return gen
+    }
+
+    private fun finishSwitchShowCycle(generation: Long, initialIncomingRegularIds: List<Int>) {
+        if (generation != switchShowGeneration) return
+        switchShowPending = false
+        switchShowFailsafe?.let { mainHandler.removeCallbacks(it) }
+        switchShowFailsafe = null
+        val queued = if (postSwitchShowActions.isEmpty()) {
+            emptyList()
+        } else {
+            ArrayList(postSwitchShowActions).also { postSwitchShowActions.clear() }
+        }
+        for (action in queued) {
+            HookGuard.safeRun("Bridge.postSwitchShowAction") { action() }
+        }
+        onSwitchShowCompleted?.let { cb ->
+            HookGuard.safeRun("Bridge.onSwitchShowCompleted") { cb(initialIncomingRegularIds) }
+        }
+    }
+
     override fun switchNativeStage(
         tasksToShow: List<StageTask>,
         tasksToPark: List<StageTask>,
@@ -113,9 +179,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             return
         }
         StageNativeRuntime.markProgrammaticTransition(1_200L)
+        var activeSwitchGen = switchShowGeneration
         runCatching {
             val orderedShow = tasksToShow.sortedWith(compareBy<StageTask> { it.zOrder }.thenBy { it.joinedAtMs })
             val visibleIncoming = orderedShow.filterNot { isTaskTuckedAsFloatHandle(organizer, it.taskId) }
+            val initialIncomingRegularIds = visibleIncoming.filterNot { it.isMiniFloating }.map { it.taskId }
+            activeSwitchGen = beginSwitchShowCycle(initialIncomingRegularIds)
             // NEVER skip parking a task that is actually visible on screen (even if it recently exited
             // FloatHandle mini-window mode), so NO window can ever bleed across two workspaces!
             val visibleOutgoing = tasksToPark.filter { task ->
@@ -150,11 +219,17 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             val orientationOverrides = StageNativeRuntime.computeIncomingStageOrientationOverrides(visibleIncoming)
 
             val executeShowIncoming = {
+                val showNow = visibleIncoming.filter { shouldShowIncomingTask?.invoke(it.taskId) != false }
+                val liveOverrides = showNow.mapNotNull { t ->
+                    incomingLiveTileBoundsProvider?.invoke(t.taskId, initialIncomingRegularIds)?.let { b -> t.taskId to b }
+                }.toMap()
+                val effectiveOverrides = orientationOverrides + liveOverrides
+
                 val wctShow = newWindowContainerTransaction()
                 var wctOps = 0
                 val fallbackShow = mutableListOf<StageTask>()
 
-                for (task in visibleIncoming) {
+                for (task in showNow) {
                     val token = resolveTaskToken(organizer, task.taskId)
                     if (token != null && wctShow != null && isTaskCurrentlyFlexibleBounds(organizer, task.taskId)) {
                         runCatching { XposedHelpers.callMethod(wctShow, "setHidden", token, false) }
@@ -168,19 +243,22 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                     runCatching { applyTransaction(organizer, wctShow) }
                 }
                 for (t in fallbackShow) {
-                    restoreSingleFlexibleTask(organizer, t, boundsOverride = orientationOverrides[t.taskId])
+                    restoreSingleFlexibleTask(organizer, t, boundsOverride = effectiveOverrides[t.taskId])
                 }
-                if (orientationOverrides.isNotEmpty()) {
-                    for ((tid, targetB) in orientationOverrides) {
+                if (effectiveOverrides.isNotEmpty()) {
+                    for ((tid, targetB) in effectiveOverrides) {
                         adjustFlexibleTaskFrame(tid, targetB, 1.0f)
                     }
-                    StageNativeRuntime.markIncomingStageOriented(visibleIncoming)
+                    if (orientationOverrides.isNotEmpty()) {
+                        StageNativeRuntime.markIncomingStageOriented(showNow)
+                    }
                 }
                 HookGuard.info(
-                    "BRIDGE.SWITCH_SHOW show=${visibleIncoming.map { it.taskId }} " +
-                        "skippedTucked=${orderedShow.map { it.taskId } - visibleIncoming.map { it.taskId }.toSet()}" +
-                        if (orientationOverrides.isNotEmpty()) " reoriented=${orientationOverrides.keys}" else "",
+                    "BRIDGE.SWITCH_SHOW show=${showNow.map { it.taskId }} " +
+                        "skippedTucked=${orderedShow.map { it.taskId } - showNow.map { it.taskId }.toSet()}" +
+                        if (effectiveOverrides.isNotEmpty()) " resized=${effectiveOverrides.keys}" else "",
                 )
+                finishSwitchShowCycle(activeSwitchGen, initialIncomingRegularIds)
             }
 
             // Two-phase Magic Move: Phase 1 parks outgoing right after frame 0;
@@ -207,6 +285,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             }
         }.onFailure {
             HookGuard.warn("BRIDGE.SWITCH failed", it)
+            if (activeSwitchGen == switchShowGeneration) {
+                finishSwitchShowCycle(activeSwitchGen, emptyList())
+            }
         }
     }
 
@@ -500,8 +581,8 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
         targetBounds: WindowBounds,
         targetScale: Float = 1.0f,
         persistMemory: Boolean = false,
-    ) {
-        if (targetBounds.isEmpty) return
+    ): Boolean {
+        if (targetBounds.isEmpty) return false
         val rect = Rect(targetBounds.left, targetBounds.top, targetBounds.right, targetBounds.bottom)
         var adjustedNative = false
         if (OplusCompatAdapter.hasColorOsFlexibleWindow()) {
@@ -523,18 +604,20 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
             }.getOrDefault(false)
         }
         if (!adjustedNative && !OplusCompatAdapter.hasColorOsFlexibleWindow()) {
-            val organizer = shellTaskOrganizer ?: return
-            val token = resolveTaskToken(organizer, taskId) ?: return
-            val wct = newWindowContainerTransaction() ?: return
-            runCatching {
+            val organizer = shellTaskOrganizer ?: return false
+            val token = resolveTaskToken(organizer, taskId) ?: return false
+            val wct = newWindowContainerTransaction() ?: return false
+            return runCatching {
                 XposedHelpers.callMethod(wct, "setWindowingMode", token, WINDOWING_MODE_FREEFORM)
                 XposedHelpers.callMethod(wct, "setBounds", token, rect)
                 applyTransaction(organizer, wct)
                 HookGuard.info("BRIDGE.ADJUST_WCT_FREEFORM task=$taskId rect=$rect")
+                true
             }.onFailure {
                 HookGuard.warn("BRIDGE.ADJUST_WCT_FREEFORM failed for task=$taskId", it)
-            }
+            }.getOrDefault(false)
         }
+        return adjustedNative
     }
 
     fun notifyLauncherBackdrop(visible: Boolean) {

@@ -98,37 +98,40 @@ class StageDockOverlayController(
         hidden: Boolean,
         tempRevealed: Boolean,
     ) {
-        appContextRef = context.applicationContext
-        lastSession = session
-        hiddenBySetting = hidden
-        temporarilyRevealed = tempRevealed
-
-        ensurePinnedLoaded(context)
-
-        // Collect recent app packages from active & recent stages (excluding pinned apps to prevent duplicates)
-        val latestPkgs = buildList {
-            session.activeStage?.tasks?.forEach { add(normalizePackageName(it.packageName)) }
-            session.allRecentStages.forEach { st -> st.tasks.forEach { add(normalizePackageName(it.packageName)) } }
-        }.distinct()
-        for (pkg in latestPkgs) {
-            if (!pinnedPackages.contains(pkg)) {
-                recentPackages.remove(pkg)
-                recentPackages.add(0, pkg)
-            }
-        }
-        recentPackages.removeAll { pinnedPackages.contains(it) }
-        while (recentPackages.size > MAX_RECENT_ICONS) {
-            recentPackages.removeAt(recentPackages.lastIndex)
-        }
-
+        val appCtx = context.applicationContext
         mainHandler.post {
+            appContextRef = appCtx
+            lastSession = session
+            hiddenBySetting = hidden
+            temporarilyRevealed = tempRevealed
+
             if (!enabled || !HookGuard.isActive()) {
                 detach()
                 return@post
             }
-            ensureAttached(context)
-            appSearchOverlay.prewarm(context)
-            render(context, session)
+
+            ensurePinnedLoaded(appCtx)
+
+            // Collect and prune recentPackages strictly on mainHandler to prevent concurrent ArrayList
+            // corruption against render()/pin/unpin on UI thread (which crashed SystemUI on drag).
+            val latestPkgs = buildList {
+                session.activeStage?.tasks?.forEach { add(normalizePackageName(it.packageName)) }
+                session.allRecentStages.forEach { st -> st.tasks.forEach { add(normalizePackageName(it.packageName)) } }
+            }.distinct()
+            for (pkg in latestPkgs) {
+                if (!pinnedPackages.contains(pkg)) {
+                    recentPackages.remove(pkg)
+                    recentPackages.add(0, pkg)
+                }
+            }
+            recentPackages.removeAll { pinnedPackages.contains(it) }
+            while (recentPackages.size > MAX_RECENT_ICONS) {
+                recentPackages.removeAt(recentPackages.lastIndex)
+            }
+
+            ensureAttached(appCtx)
+            appSearchOverlay.prewarm(appCtx)
+            render(appCtx, session)
         }
     }
 

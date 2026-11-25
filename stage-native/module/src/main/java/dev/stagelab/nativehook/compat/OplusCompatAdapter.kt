@@ -101,6 +101,13 @@ object OplusCompatAdapter {
         return defaultVal
     }
 
+    fun setIntFieldAny(target: Any, value: Int, vararg fieldNames: String): Boolean {
+        for (name in fieldNames) {
+            if (runCatching { XposedHelpers.setIntField(target, name, value) }.isSuccess) return true
+        }
+        return false
+    }
+
     fun getSystemProperty(key: String): String {
         return runCatching {
             val sp = Class.forName("android.os.SystemProperties")
@@ -217,8 +224,10 @@ object OplusCompatAdapter {
             val file = File(filePath)
             file.outputStream().use { props.store(it, "StageLab Native Compat Diagnostics") }
             file.setReadable(true, false)
-        }.onFailure {
-            HookGuard.warn("OplusCompatAdapter: failed to persist diagnostics to $filePath", it)
+        }.onFailure { t ->
+            if (!t.message.orEmpty().contains("EACCES")) {
+                HookGuard.warn("OplusCompatAdapter: failed to persist diagnostics to $filePath", t)
+            }
         }
     }
 

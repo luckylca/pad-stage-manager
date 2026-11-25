@@ -480,6 +480,9 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 putParcelable(KEY_FLEXIBLE_LAUNCH_FILLIN_BOUNDS, rect)
                 putParcelable(KEY_EXTRA_FLEXIBLE_WINDOW_RECT, rect)
                 putFloat(KEY_LAUNCH_SCALE, scale.coerceIn(0.45f, 1.0f))
+                if (scale >= 0.99f) {
+                    putBoolean("is_mini_state", false)
+                }
             }
             XposedHelpers.callMethod(fwm, "setExtraBundle", options, extra)
         }.onFailure {
@@ -492,7 +495,12 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
      * when available, falling back cleanly to Android `WindowContainerTransaction#setBounds` on
      * unsupported ColorOS 13/14 or AOSP Freeform tablets.
      */
-    fun adjustFlexibleTaskFrame(taskId: Int, targetBounds: WindowBounds, targetScale: Float = 1.0f) {
+    fun adjustFlexibleTaskFrame(
+        taskId: Int,
+        targetBounds: WindowBounds,
+        targetScale: Float = 1.0f,
+        persistMemory: Boolean = false,
+    ) {
         if (targetBounds.isEmpty) return
         val rect = Rect(targetBounds.left, targetBounds.top, targetBounds.right, targetBounds.bottom)
         var adjustedNative = false
@@ -502,6 +510,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
                 val fwm = XposedHelpers.callStaticMethod(fwmCls, "getInstance")
                 val bundle = Bundle().apply {
                     putBoolean(SystemServerFlexibleHook.KEY_FORCE_ADJUST, true)
+                    putBoolean(SystemServerFlexibleHook.KEY_SKIP_PERSIST, !persistMemory)
                     putInt(KEY_LAUNCH_FLEXIBLE_TASK_ID, taskId)
                     putParcelable(KEY_FLEXIBLE_LAUNCH_BOUNDS, rect)
                     putFloat(KEY_LAUNCH_SCALE, targetScale.coerceIn(0.45f, 1.0f))
@@ -603,6 +612,7 @@ class ColorOsNativeWindowBridge : NativeWindowBridge {
     }
 
     override fun closeNativeTask(taskId: Int) {
+        StageNativeRuntime.forgetClosedTaskMemory(taskId, reason = "bridge_close")
         runCatching {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             val service = XposedHelpers.callStaticMethod(atmClass, "getService")

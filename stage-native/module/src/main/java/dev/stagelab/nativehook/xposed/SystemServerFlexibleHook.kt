@@ -37,10 +37,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 object SystemServerFlexibleHook {
 
     const val KEY_FORCE_ADJUST = "stagelab.force_adjust"
+    const val KEY_SKIP_PERSIST = "stagelab.skip_persist"
     const val ACTION_SIDEBAR_MINI_HINT = "io.github.luckylca.stagelab.ACTION_SIDEBAR_MINI_HINT"
     const val ACTION_ACTIVE_STAGE_CHANGED = "io.github.luckylca.stagelab.ACTION_ACTIVE_STAGE_CHANGED"
     const val ACTION_TUCKED_TASKS_SYNC = "io.github.luckylca.stagelab.ACTION_TUCKED_TASKS_SYNC"
     const val ACTION_STAGE_MODE_SYNC = "io.github.luckylca.stagelab.ACTION_STAGE_MODE_SYNC"
+    const val ACTION_FORGET_APP_MEMORY = "io.github.luckylca.stagelab.ACTION_FORGET_APP_MEMORY"
+    const val ACTION_PRUNE_APP_MEMORY = "io.github.luckylca.stagelab.ACTION_PRUNE_APP_MEMORY"
     private const val MEMORY_FILE_PATH = "/data/system/stagelab_window_memory.properties"
     private const val MINI_MEMORY_PREFIX = "mini:"
 
@@ -49,10 +52,14 @@ object SystemServerFlexibleHook {
     private const val FLEXIBLE_WINDOW_UTILS = "com.android.server.wm.FlexibleWindowUtils"
     private const val FLOAT_HANDLE_CONTROLLER = "com.android.server.wm.FloatHandleController"
     private const val CONNECTED_DISPLAY_MANAGER = "com.android.server.wm.OplusConnectedDisplayManager"
+    private const val ACTIVITY_TASK_MANAGER_SERVICE = "com.android.server.wm.ActivityTaskManagerService"
     private const val UNLIMITED_WINDOW_CAP = 99
 
     private val allowWideStageRect = ThreadLocal<Boolean>()
+    private val skipPersistOnAdjust = ThreadLocal<Boolean>()
     private val memoryMap = ConcurrentHashMap<String, MemorizedFrame>()
+    private val recentlyClosedPkgUntilMs = ConcurrentHashMap<String, Long>()
+    private val skipPersistUntilMs = ConcurrentHashMap<Int, Long>()
     private val lastAutoSnapMs = ConcurrentHashMap<Int, Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stageReceiverRegistered = AtomicBoolean(false)
@@ -97,6 +104,7 @@ object SystemServerFlexibleHook {
         hookPanoramaBypass(classLoader)
         hookUnlimitedWindowLimits(classLoader)
         hookFlexibleTaskController(classLoader)
+        hookTaskRemovalCleanup(classLoader)
         hookAllowStageLabBroadcastWakeup(classLoader)
         OplusCompatAdapter.persistProbesToFile(OplusCompatAdapter.SYS_DIAG_PATH)
         mainHandler.postDelayed({ ensureStageReceiverRegistered(null) }, 4_000L)
@@ -234,6 +242,106 @@ object SystemServerFlexibleHook {
         }
     }
 
+    private fun hookTaskRemovalCleanup(classLoader: ClassLoader) {
+        val atmsCls = OplusCompatAdapter.findClassAny(
+            "sys.class.ActivityTaskManagerService",
+            classLoader,
+            ACTIVITY_TASK_MANAGER_SERVICE,
+        ) ?: return
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.atm.removeTask",
+            cls = atmsCls,
+            nameCandidates = listOf("removeTask"),
+            hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!isEnabled()) return
+                    HookGuard.safeRun("ATMS.removeTask.forgetMemory") {
+                        val taskId = param.args.firstOrNull() as? Int ?: return@safeRun
+                        if (taskId <= 0) return@safeRun
+                        val taskObj = resolveTaskById(param.thisObject, taskId)
+                        val pkg = taskObj?.let {
+                            runCatching { XposedHelpers.callMethod(it, "getBasePackageName") as? String }.getOrNull()
+                        }.orEmpty()
+                        if (pkg.isNotBlank() && !isIgnoredSystemPkg(pkg)) {
+                            forgetPackageMemory(pkg, taskId = taskId, reason = "atm_removeTask")
+                        } else {
+                            purgeTaskIdFromFloatHandles(taskId)
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    private fun resolveTaskById(atmsObj: Any, taskId: Int): Any? = runCatching {
+        val root = XposedHelpers.getObjectField(atmsObj, "mRootWindowContainer") ?: return@runCatching null
+        XposedHelpers.callMethod(root, "anyTaskForId", taskId)
+    }.getOrNull()
+
+    /**
+     * Removes every saved geometry / mini-window configuration entry associated with [pkg]
+     * so reopening the app after closing a window always falls back to default Stage behavior.
+     */
+    private fun forgetPackageMemory(pkg: String, taskId: Int = -1, reason: String) {
+        if (pkg.isBlank() || isIgnoredSystemPkg(pkg)) return
+        recentlyClosedPkgUntilMs[pkg] = System.currentTimeMillis() + 2_500L
+        var removedCount = 0
+        val keys = memoryMap.keys.toList()
+        for (key in keys) {
+            if (doesMemoryKeyBelongToPkg(key, pkg)) {
+                if (memoryMap.remove(key) != null) {
+                    removedCount++
+                }
+            }
+        }
+        if (removedCount > 0) {
+            saveMemoryToDisk()
+        }
+        if (taskId > 0) {
+            purgeTaskIdFromFloatHandles(taskId)
+        }
+        HookGuard.info("SYS.MEMORY_FORGOTTEN pkg=$pkg task=$taskId removed=$removedCount reason=$reason")
+    }
+
+    private fun pruneMemoryToActivePackages(activePkgs: Set<String>) {
+        val knownPkgs = HashSet<String>()
+        for (k in memoryMap.keys) {
+            extractPkgFromMemoryKey(k)?.let { knownPkgs.add(it) }
+        }
+        var removedCount = 0
+        for (pkg in knownPkgs) {
+            if (!activePkgs.contains(pkg)) {
+                val keys = memoryMap.keys.toList()
+                for (k in keys) {
+                    if (doesMemoryKeyBelongToPkg(k, pkg) && memoryMap.remove(k) != null) {
+                        removedCount++
+                    }
+                }
+            }
+        }
+        if (removedCount > 0) {
+            saveMemoryToDisk()
+            HookGuard.info("SYS.MEMORY_PRUNED staleEntries=$removedCount activePkgs=${activePkgs.size}")
+        }
+    }
+
+    private fun doesMemoryKeyBelongToPkg(key: String, pkg: String): Boolean {
+        if (key == pkg || key == "land:$pkg" || key == "port:$pkg") return true
+        if (key == "$MINI_MEMORY_PREFIX$pkg" ||
+            key == "${MINI_MEMORY_PREFIX}land:$pkg" ||
+            key == "${MINI_MEMORY_PREFIX}port:$pkg"
+        ) {
+            return true
+        }
+        return key.startsWith(MINI_MEMORY_PREFIX) && key.endsWith(":$pkg")
+    }
+
+    private fun extractPkgFromMemoryKey(key: String): String? {
+        if (key.isBlank()) return null
+        val idx = key.lastIndexOf(':')
+        return if (idx >= 0 && idx + 1 < key.length) key.substring(idx + 1) else key
+    }
+
     private fun ensureStageReceiverRegistered(controllerObj: Any?) {
         if (stageReceiverRegistered.get()) return
         val ctx = runCatching {
@@ -249,6 +357,8 @@ object SystemServerFlexibleHook {
             val filter = IntentFilter().apply {
                 addAction(ACTION_ACTIVE_STAGE_CHANGED)
                 addAction(ACTION_STAGE_MODE_SYNC)
+                addAction(ACTION_FORGET_APP_MEMORY)
+                addAction(ACTION_PRUNE_APP_MEMORY)
                 addAction("io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG")
             }
             ctx.registerReceiver(
@@ -260,6 +370,7 @@ object SystemServerFlexibleHook {
                                 stageManagerEnabled = enabled
                                 if (!enabled) {
                                     allowWideStageRect.remove()
+                                    skipPersistOnAdjust.remove()
                                     stageFloatHandles.clear()
                                 }
                                 HookGuard.info("SYS.STAGE_MODE_SYNC enabled=$enabled")
@@ -268,6 +379,20 @@ object SystemServerFlexibleHook {
                                 if (!stageManagerEnabled) return
                                 val nextStageId = intent.getStringExtra("stageId").orEmpty().ifBlank { "stage-default" }
                                 postOnAndroidUiThread { swapFloatHandlesForStage(nextStageId) }
+                            }
+                            ACTION_FORGET_APP_MEMORY -> {
+                                val pkg = intent.getStringExtra("pkg").orEmpty()
+                                val taskId = intent.getIntExtra("taskId", -1)
+                                val reason = intent.getStringExtra("reason").orEmpty().ifBlank { "broadcast" }
+                                if (pkg.isNotBlank()) {
+                                    forgetPackageMemory(pkg, taskId = taskId, reason = reason)
+                                } else if (taskId > 0) {
+                                    purgeTaskIdFromFloatHandles(taskId)
+                                }
+                            }
+                            ACTION_PRUNE_APP_MEMORY -> {
+                                val activePkgs = intent.getStringArrayListExtra("activePkgs").orEmpty().toSet()
+                                pruneMemoryToActivePackages(activePkgs)
                             }
                             "io.github.luckylca.stagelab.ACTION_QUERY_SYS_DIAG" -> {
                                 mainHandler.post {
@@ -373,14 +498,41 @@ object SystemServerFlexibleHook {
             val liveList = controllerObj?.let {
                 XposedHelpers.getObjectField(it, "mFloatHandleInfoList") as? List<Any>
             }.orEmpty()
-            val liveIds = HashSet<Int>()
-            for (info in liveList) {
-                val tid = runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1)
-                if (tid > 0) liveIds.add(tid)
-            }
-            // Update current stage's saved list to match liveList immediately, and remove any
-            // exited task that is no longer in liveList from currentActiveStageId!
             stageFloatHandles[currentActiveStageId] = ArrayList(liveList)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun purgeTaskIdFromFloatHandles(taskId: Int) {
+        if (taskId <= 0) return
+        postOnAndroidUiThread {
+            val cl = cachedClassLoader ?: return@postOnAndroidUiThread
+            runCatching {
+                for ((_, list) in stageFloatHandles) {
+                    list.removeAll { info ->
+                        runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1) == taskId
+                    }
+                }
+                val floatCls = XposedHelpers.findClass(FLOAT_HANDLE_CONTROLLER, cl)
+                val controller = XposedHelpers.callStaticMethod(floatCls, "getInstance") ?: return@runCatching
+                val liveList = XposedHelpers.getObjectField(controller, "mFloatHandleInfoList") as? MutableList<Any>
+                val removedLive = liveList?.removeAll { info ->
+                    runCatching { XposedHelpers.getIntField(info, "taskId") }.getOrDefault(-1) == taskId
+                } == true
+                if (removedLive) {
+                    val manager = runCatching { XposedHelpers.callMethod(controller, "getFloatManager") }.getOrNull()
+                        ?: runCatching { XposedHelpers.getObjectField(controller, "mFloatManager") }.getOrNull()
+                    if (manager != null) {
+                        if (liveList.isNullOrEmpty()) {
+                            runCatching { XposedHelpers.callMethod(manager, "hideFloatHandleView") }
+                            runCatching { XposedHelpers.callMethod(manager, "setViewVisible", View.GONE) }
+                        } else {
+                            runCatching { XposedHelpers.callMethod(manager, "refreshFloatHandleView") }
+                        }
+                    }
+                }
+                broadcastTuckedTaskIds(controller)
+            }
         }
     }
 
@@ -442,10 +594,19 @@ object SystemServerFlexibleHook {
                         val bundle = param.args.firstOrNull() as? Bundle ?: return
                         if (bundle.getBoolean(KEY_FORCE_ADJUST, false)) {
                             allowWideStageRect.set(true)
+                            val skipPersist = bundle.getBoolean(KEY_SKIP_PERSIST, false)
+                            skipPersistOnAdjust.set(skipPersist)
+                            if (skipPersist) {
+                                val taskId = bundle.getInt("androidx.activity.LaunchFlexibleTaskId", -1)
+                                if (taskId > 0) {
+                                    skipPersistUntilMs[taskId] = System.currentTimeMillis() + 800L
+                                }
+                            }
                             param.result = false
                         }
                     } catch (t: Throwable) {
                         allowWideStageRect.remove()
+                        skipPersistOnAdjust.remove()
                         HookGuard.warn("SystemServerFlexibleHook.adjustFlexibleTask isolated error", t)
                     }
                 }
@@ -489,6 +650,7 @@ object SystemServerFlexibleHook {
                         val info = param.result ?: return@safeRun
                         val pkg = extractPackageFromArgs(param.args) ?: return@safeRun
                         if (isIgnoredSystemPkg(pkg)) return@safeRun
+                        recentlyClosedPkgUntilMs.remove(pkg)
 
                         val (screenW, screenH) = extractDisplaySizeFromArgs(param.args)
                         val orientPrefix = orientKeyPrefix(screenW, screenH)
@@ -545,12 +707,16 @@ object SystemServerFlexibleHook {
                         }
                         OplusCompatAdapter.setBooleanFieldAny(info, true, "mSkipPosInMemoryAdjust")
                         OplusCompatAdapter.setBooleanFieldAny(info, true, "mSkipMemoryRectToDefault")
+                        if (memorized == null) {
+                            OplusCompatAdapter.setBooleanFieldAny(info, false, "mIsMiniState")
+                            OplusCompatAdapter.setIntFieldAny(info, 1, "mFlexibleState")
+                        }
                     }
                 }
             },
         )
 
-        // 2. Allow wide stage bounds during stagelab.force_adjust and persist the adjusted bounds
+        // 2. Allow wide stage bounds during stagelab.force_adjust and persist unless KEY_SKIP_PERSIST is set
         OplusCompatAdapter.hookMethodAny(
             probeKey = "sys.flexible.adjustTask",
             cls = cls,
@@ -558,8 +724,10 @@ object SystemServerFlexibleHook {
             hook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val wasForced = allowWideStageRect.get() == true
+                    val skipPersist = skipPersistOnAdjust.get() == true
                     allowWideStageRect.remove()
-                    if (wasForced) {
+                    skipPersistOnAdjust.remove()
+                    if (wasForced && !skipPersist) {
                         HookGuard.safeRun("FlexibleTaskController.adjustFlexibleTask.persist") {
                             val taskObj = param.args.firstOrNull { it != null && it.javaClass.name.endsWith(".Task") }
                             if (taskObj != null) {
@@ -650,6 +818,22 @@ object SystemServerFlexibleHook {
                                 snapTaskObjToSplitLeft(taskObj)
                             }
                             return@safeRun
+                        }
+
+                        // 3. Explicit close / dismiss strategy -> forget saved window config for this app
+                        if (strategyName.contains("Close", ignoreCase = true) ||
+                            strategyName.contains("Dismiss", ignoreCase = true) ||
+                            strategyName.contains("Remove", ignoreCase = true)
+                        ) {
+                            val taskId = taskObj?.let {
+                                runCatching { XposedHelpers.getIntField(it, "mTaskId") }.getOrDefault(-1)
+                            } ?: -1
+                            val pkg = taskObj?.let {
+                                runCatching { XposedHelpers.callMethod(it, "getBasePackageName") as? String }.getOrNull()
+                            }.orEmpty()
+                            if (pkg.isNotBlank()) {
+                                forgetPackageMemory(pkg, taskId = taskId, reason = "exitStrategy:$strategyName")
+                            }
                         }
                     }
                 }
@@ -853,6 +1037,20 @@ object SystemServerFlexibleHook {
             XposedHelpers.callMethod(taskObj, "getBasePackageName") as? String
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: return
         if (isIgnoredSystemPkg(pkg)) return
+        val closedUntil = recentlyClosedPkgUntilMs[pkg] ?: 0L
+        if (System.currentTimeMillis() < closedUntil) {
+            HookGuard.info("SYS.MEMORY_SKIP_RECENT_CLOSE pkg=$pkg")
+            return
+        }
+        val taskId = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+        if (taskId > 0 && System.currentTimeMillis() < (skipPersistUntilMs[taskId] ?: 0L)) {
+            return
+        }
+        val visible = runCatching {
+            XposedHelpers.callMethod(taskObj, "isVisibleRequested") as? Boolean
+                ?: (XposedHelpers.callMethod(taskObj, "isVisible") as? Boolean)
+        }.getOrNull()
+        if (visible == false) return
 
         val bounds = runCatching {
             XposedHelpers.callMethod(taskObj, "getBounds") as? Rect

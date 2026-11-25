@@ -160,6 +160,7 @@ object StageNativeRuntime {
     private val stageOrientedLandscape = ConcurrentHashMap<String, Boolean>()
     private val taskAppearedAtMs = ConcurrentHashMap<Int, Long>()
     private val lastPromotedAtMs = ConcurrentHashMap<Int, Long>()
+    private val recentlyClosedTaskUntilMs = ConcurrentHashMap<Int, Long>()
     @Volatile
     private var lastHomeGestureAtMs: Long = 0L
     @Volatile
@@ -421,8 +422,10 @@ object StageNativeRuntime {
     }
 
     fun attachOrganizerIfNeeded(organizer: Any) {
+        val alreadySame = bridge.getShellTaskOrganizer() === organizer
         bridge.attachShellTaskOrganizer(organizer)
         ensureCommandReceiverRegistered()
+        if (alreadySame) return
         dev.stagelab.nativehook.compat.OplusCompatAdapter.record(
             "ui.shellTaskOrganizer",
             dev.stagelab.nativehook.compat.OplusCompatAdapter.Status.HIT,
@@ -627,7 +630,12 @@ object StageNativeRuntime {
                 if (taskId > 0) dockController.onWindowMenuMinimize(taskId) else registry.snapshot()
             }
             "close" -> {
-                if (taskId > 0) dockController.onWindowMenuClose(taskId) else registry.snapshot()
+                if (taskId > 0) {
+                    forgetClosedTaskMemory(taskId, pkgHint = pkg.takeIf { it.isNotBlank() }, reason = "cmd_close")
+                    dockController.onWindowMenuClose(taskId)
+                } else {
+                    registry.snapshot()
+                }
             }
             "enable_module" -> {
                 stageManagerEnabled = true
@@ -712,6 +720,7 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         taskAppearedAtMs[taskInfo.taskId] = System.currentTimeMillis()
+        recentlyClosedTaskUntilMs.remove(taskInfo.taskId)
         val hasExplicitPending = pendingLaunches.containsKey(pkg)
         val mergeFlag = consumePendingMergeFlag(pkg)
         val isMiniLaunch = consumePendingMiniFlag(pkg) ||
@@ -762,9 +771,15 @@ object StageNativeRuntime {
         if (!isManagedUserApp(pkg)) return
 
         val stageTask = toStageTask(taskInfo, pkg)
+        val hasExplicitPending = pendingLaunches.containsKey(pkg)
+        if (hasExplicitPending) {
+            recentlyClosedTaskUntilMs.remove(taskInfo.taskId)
+        }
+        val isClosingTeardown = !hasExplicitPending &&
+            System.currentTimeMillis() < (recentlyClosedTaskUntilMs[taskInfo.taskId] ?: 0L)
         if (isTuckedFloatHandleTaskInfo(taskInfo)) {
             tuckedFloatHandleTaskIds.add(taskInfo.taskId)
-        } else if (stageTask.isVisible && isTaskFocused(taskInfo)) {
+        } else if (stageTask.isVisible && isTaskFocused(taskInfo) && !isClosingTeardown) {
             val raw = extractBounds(taskInfo)
             val snap = resolveDisplaySnap()
             val sw = snap?.widthPx ?: 2520
@@ -787,14 +802,14 @@ object StageNativeRuntime {
 
         // Safety net: if a task parked off-screen for live preview regains focus natively,
         // immediately restore its SurfaceControl leash to its real on-screen origin!
-        if (stageTask.isVisible && isTaskFocused(taskInfo)) {
+        if (stageTask.isVisible && isTaskFocused(taskInfo) && !isClosingTeardown) {
             bridge.restoreOffscreenLeashIfParked(taskInfo.taskId)
         }
 
         // External notification fullscreen launch: park previous active Stage and promote to Stage Manager.
         // (Active Stage drag-to-fullscreen is already intercepted cleanly inside system_server via
         //  canFullscreenTask/stopScaleAndToFullScreen so it never collides with a running transition.)
-        if (stageManagerEnabled && stageTask.isVisible && isTaskFocused(taskInfo) && isFullScreenBounds(stageTask.bounds)) {
+        if (stageManagerEnabled && stageTask.isVisible && isTaskFocused(taskInfo) && !isClosingTeardown && isFullScreenBounds(stageTask.bounds)) {
             val currentActive = registry.getActiveStage()
             val isAlreadyInActiveStage = currentActive != null && currentActive.containsTask(taskInfo.taskId)
             if (!isAlreadyInActiveStage) {
@@ -808,18 +823,24 @@ object StageNativeRuntime {
         }
 
         // Safety net: if a visible focused Flexible Task is not owned by ANY Stage (e.g. a tucked
-        // FloatHandle mini-window popped back open without onTaskAppeared), re-adopt it immediately
-        // into the current Active Stage so it NEVER becomes a global orphan floating across all workspaces!
-        if (stageTask.isVisible && isTaskFocused(taskInfo) &&
+        // FloatHandle mini-window popped back open without onTaskAppeared, OR a closed Recents task reopened),
+        // re-adopt it cleanly while respecting explicit pending launch/merge intent and close cooldown!
+        if (stageTask.isVisible && isTaskFocused(taskInfo) && !isClosingTeardown &&
             registry.findStageIdForTask(taskInfo.taskId) == null &&
             !isTaskTuckedFloatHandle(taskInfo.taskId)
         ) {
             val hasActive = registry.getActiveStage() != null
+            val explicitMerge = if (hasExplicitPending) consumePendingMergeFlag(pkg) else hasActive
             val adopted = transitionController.onNativeTaskAppeared(
-                stageTask.copy(isMiniFloating = hasActive),
-                mergeIntoActive = hasActive,
+                stageTask.copy(isMiniFloating = !hasExplicitPending && hasActive),
+                mergeIntoActive = explicitMerge,
             )
-            logSession("ON_CHANGED_READOPT(t=${taskInfo.taskId},pkg=$pkg)", adopted)
+            if (explicitMerge && !hasExplicitPending) {
+                // Keep tucked un-docking untouched
+            } else if (explicitMerge) {
+                maybeScheduleTwoWindowSideBySide(adopted)
+            }
+            logSession("ON_CHANGED_READOPT(t=${taskInfo.taskId},pkg=$pkg,merge=$explicitMerge)", adopted)
             updateStripUi(adopted)
             return
         }
@@ -861,19 +882,58 @@ object StageNativeRuntime {
         bridge.promoteFullscreenTaskToStage(taskId, pkg, maximizeToPrimaryStage = maximizeToPrimaryStage)
     }
 
+    fun forgetClosedTaskMemory(
+        taskId: Int,
+        pkgHint: String? = null,
+        reason: String,
+    ) {
+        val pkg = pkgHint?.takeIf { it.isNotBlank() }
+            ?: registry.findStageForTask(taskId)?.findTask(taskId)?.packageName
+            ?: bridge.queryLiveRunningTasks().firstOrNull { it.taskId == taskId }?.let { resolvePkg(it) }
+            ?: ""
+        if (taskId > 0) {
+            taskGeometryMemory.remove(true to taskId)
+            taskGeometryMemory.remove(false to taskId)
+            taskAppearedAtMs.remove(taskId)
+            lastPromotedAtMs.remove(taskId)
+            tuckedFloatHandleTaskIds.remove(taskId)
+            recentlyClosedTaskUntilMs[taskId] = System.currentTimeMillis() + 2_500L
+        }
+        if (pkg.isNotBlank()) {
+            pkgGeometryMemory.remove(true to pkg)
+            pkgGeometryMemory.remove(false to pkg)
+            pendingLaunches.remove(pkg)
+            pendingMiniLaunches.remove(pkg)
+            val ctx = runCatching { AndroidAppHelper.currentApplication()?.applicationContext }.getOrNull()
+            if (ctx != null) {
+                runCatching {
+                    ctx.sendBroadcast(
+                        Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_FORGET_APP_MEMORY).apply {
+                            putExtra("pkg", pkg)
+                            putExtra("taskId", taskId)
+                            putExtra("reason", reason)
+                        },
+                    )
+                }
+            }
+        }
+        HookGuard.info("FORGET_CLOSED_MEMORY task=$taskId pkg=$pkg reason=$reason")
+    }
+
     fun onNativeTaskVanished(taskInfo: ActivityManager.RunningTaskInfo) {
         val pkg = resolvePkg(taskInfo)
         taskLeashes.remove(taskInfo.taskId)
         if (!stageManagerEnabled) return
         if (!isManagedUserApp(pkg)) return
         // Tucked edge FloatHandle tasks remain alive inside their owning Stage; never orphan them on vanish!
-        if (isTaskTuckedFloatHandle(taskInfo.taskId) || isTuckedFloatHandleTaskInfo(taskInfo)) {
+        val stillAliveTucked = (isTaskTuckedFloatHandle(taskInfo.taskId) || isTuckedFloatHandleTaskInfo(taskInfo)) &&
+            isTaskRunning(taskInfo) &&
+            bridge.queryLiveRunningTasks().any { it.taskId == taskInfo.taskId }
+        if (stillAliveTucked) {
             HookGuard.info("ON_VANISHED ignored for tucked FloatHandle task=${taskInfo.taskId} pkg=$pkg")
             return
         }
-        taskGeometryMemory.remove(true to taskInfo.taskId)
-        taskGeometryMemory.remove(false to taskInfo.taskId)
-        taskAppearedAtMs.remove(taskInfo.taskId)
+        forgetClosedTaskMemory(taskInfo.taskId, pkgHint = pkg, reason = "task_vanished")
         val session = transitionController.onNativeTaskVanished(taskInfo.taskId)
         logSession("ON_VANISHED(t=${taskInfo.taskId})", session)
         updateStripUi(session)
@@ -886,9 +946,7 @@ object StageNativeRuntime {
     }
 
     fun onNativeMenuClose(taskId: Int) {
-        taskGeometryMemory.remove(true to taskId)
-        taskGeometryMemory.remove(false to taskId)
-        taskAppearedAtMs.remove(taskId)
+        forgetClosedTaskMemory(taskId, reason = "menu_close")
         val session = transitionController.onNativeTaskVanished(taskId)
         logSession("ON_NATIVE_MENU_CLOSE(t=$taskId)", session)
         updateStripUi(session)
@@ -1156,6 +1214,15 @@ object StageNativeRuntime {
                 val pkg = resolvePkg(info)
                 if (!isManagedUserApp(pkg)) null else toStageTask(info, pkg)
             }
+        val activePkgs = ArrayList(live.map { it.packageName }.distinct())
+        runCatching {
+            val ctx = AndroidAppHelper.currentApplication()?.applicationContext
+            ctx?.sendBroadcast(
+                Intent(dev.stagelab.nativehook.xposed.SystemServerFlexibleHook.ACTION_PRUNE_APP_MEMORY).apply {
+                    putStringArrayListExtra("activePkgs", activePkgs)
+                },
+            )
+        }
         return transitionController.restoreFromSystemTasks(live)
     }
 

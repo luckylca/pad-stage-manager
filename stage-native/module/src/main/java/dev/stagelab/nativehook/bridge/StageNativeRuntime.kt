@@ -109,6 +109,7 @@ object StageNativeRuntime {
 
     private var pendingTileRunnable: Runnable? = null
     private var pendingTileVerifyRunnable: Runnable? = null
+    private val stagesNeedingTileConverge = ConcurrentHashMap.newKeySet<String>()
 
     init {
         bridge.shouldShowIncomingTask = { taskId ->
@@ -152,9 +153,11 @@ object StageNativeRuntime {
         val regularTasks = active.tasks.filterNot { it.isMiniFloating }
         if (regularTasks.size !in 2..3) return null
         val currentRegularIds = regularTasks.map { it.taskId }
-        // Only recompute multi-column bounds during SWITCH_SHOW if active regular membership
-        // changed mid-transition (e.g. concurrent merge), preserving manual user sizes otherwise.
-        if (currentRegularIds == initialIncomingRegularIds) return null
+        // Recompute multi-column bounds during SWITCH_SHOW if active regular membership changed
+        // mid-transition OR if an earlier auto-tile was parked before converging, preserving manual sizes otherwise.
+        if (currentRegularIds == initialIncomingRegularIds && !stagesNeedingTileConverge.contains(active.stageId)) {
+            return null
+        }
         val idx = regularTasks.indexOfFirst { it.taskId == taskId }
         if (idx < 0) return null
         return bridge.computeMultiColumnBounds(
@@ -167,7 +170,9 @@ object StageNativeRuntime {
         val session = registry.snapshot()
         val active = session.activeStage ?: return
         val regularIds = active.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
-        if (regularIds != initialIncomingRegularIds && regularIds.size >= 2) {
+        val needsTile = regularIds.size >= 2 &&
+            (regularIds != initialIncomingRegularIds || stagesNeedingTileConverge.contains(active.stageId))
+        if (needsTile) {
             maybeScheduleTwoWindowSideBySide(session, initialDelayMs = 60L)
         }
     }
@@ -1145,6 +1150,87 @@ object StageNativeRuntime {
         return boundsOk && (isMini || scale >= 0.98f)
     }
 
+    private fun scheduleTileVerifyPass(
+        targetStageId: String,
+        expectedTaskIds: List<Int>,
+        targetsProvider: () -> Map<Int, WindowBounds>,
+        markConvergedWhenDone: Boolean,
+        delayMs: Long,
+        attempt: Int,
+    ) {
+        val verifyTask = Runnable {
+            pendingTileVerifyRunnable = null
+            if (!stageManagerEnabled || isDeviceLocked) return@Runnable
+            val latestActive = registry.getActiveStage() ?: return@Runnable
+            val latestRegularIds = latestActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
+            if (latestActive.stageId != targetStageId || latestRegularIds != expectedTaskIds) return@Runnable
+
+            val liveMap = bridge.queryLiveRunningTasks().associateBy { it.taskId }
+            val targets = targetsProvider()
+            var unconverged = 0
+            var anyFailed = false
+            markProgrammaticTransition(700L)
+            for ((tid, targetB) in targets) {
+                val liveInfo = liveMap[tid]
+                if (liveInfo == null || !isTaskFrameConverged(liveInfo, targetB)) {
+                    unconverged++
+                    if (!bridge.adjustFlexibleTaskFrame(tid, targetB, 1.0f)) {
+                        anyFailed = true
+                    }
+                }
+            }
+            if (unconverged > 0) {
+                HookGuard.info(
+                    "STAGE.TILE_VERIFY_REPAIR attempt=$attempt count=${expectedTaskIds.size} " +
+                        "unconverged=$unconverged anyFailed=$anyFailed tasks=$expectedTaskIds",
+                )
+            }
+            if (unconverged == 0 && !anyFailed) {
+                if (markConvergedWhenDone) {
+                    stagesNeedingTileConverge.remove(targetStageId)
+                }
+            } else if (attempt < MAX_TILE_VERIFY_ATTEMPTS) {
+                scheduleTileVerifyPass(
+                    targetStageId = targetStageId,
+                    expectedTaskIds = expectedTaskIds,
+                    targetsProvider = targetsProvider,
+                    markConvergedWhenDone = markConvergedWhenDone,
+                    delayMs = TILE_VERIFY_RETRY_MS,
+                    attempt = attempt + 1,
+                )
+            }
+        }
+        pendingTileVerifyRunnable = verifyTask
+        mainHandler.postDelayed(verifyTask, delayMs)
+    }
+
+    private fun computeMultiColumnTargetMap(expectedTaskIds: List<Int>): Map<Int, WindowBounds> {
+        val columns = bridge.computeMultiColumnBounds(
+            count = expectedTaskIds.size,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+        return buildMap {
+            expectedTaskIds.forEachIndexed { idx, tid ->
+                columns.getOrNull(idx)?.let { put(tid, it) }
+            }
+        }
+    }
+
+    private fun computeCascadeBounds(count: Int): WindowBounds? {
+        val cols = bridge.computeMultiColumnBounds(
+            count = 2,
+            stripVisible = !recentController.isHiddenByUserSetting,
+        )
+        val base = cols.getOrNull((count - 1) % cols.size) ?: return null
+        val cascadeStep = ((count - 3) % 5) * 44
+        return WindowBounds(
+            left = (base.left + cascadeStep).coerceAtMost(base.right - 420),
+            top = (base.top + cascadeStep).coerceAtMost(base.bottom - 420),
+            right = base.right,
+            bottom = base.bottom,
+        )
+    }
+
     private fun maybeScheduleTwoWindowSideBySide(
         session: StageSession,
         initialDelayMs: Long = 220L,
@@ -1155,10 +1241,14 @@ object StageNativeRuntime {
         val count = regularTasks.size
         val targetStageId = active.stageId
         stageOrientedLandscape[targetStageId] = isCurrentLandscape()
-        if (count < 2) return
+        if (count < 2) {
+            stagesNeedingTileConverge.remove(targetStageId)
+            return
+        }
         val expectedTaskIds = regularTasks.map { it.taskId }
 
         if (count in 2..3) {
+            stagesNeedingTileConverge.add(targetStageId)
             val tileTask = Runnable {
                 pendingTileRunnable = null
                 if (!stageManagerEnabled || isDeviceLocked) return@Runnable
@@ -1168,76 +1258,59 @@ object StageNativeRuntime {
 
                 val curLand = isCurrentLandscape()
                 stageOrientedLandscape[targetStageId] = curLand
-                val columns = bridge.computeMultiColumnBounds(
-                    count = count,
-                    stripVisible = !recentController.isHiddenByUserSetting,
-                )
+                val targetMap = computeMultiColumnTargetMap(expectedTaskIds)
                 markProgrammaticTransition(900L)
                 var anyFailed = false
-                expectedTaskIds.forEachIndexed { idx, tid ->
-                    val bounds = columns.getOrNull(idx) ?: return@forEachIndexed
+                for ((tid, bounds) in targetMap) {
                     taskGeometryMemory[curLand to tid] = SavedGeometry(bounds, 1.0f, userCustomized = false)
                     if (!bridge.adjustFlexibleTaskFrame(tid, bounds, 1.0f)) {
                         anyFailed = true
                     }
                 }
-                HookGuard.info("STAGE.TILE_LAYOUT count=$count tasks=$expectedTaskIds bounds=$columns anyFailed=$anyFailed")
+                HookGuard.info(
+                    "STAGE.TILE_LAYOUT count=$count tasks=$expectedTaskIds bounds=${targetMap.values} anyFailed=$anyFailed",
+                )
 
-                val verifyDelayMs = if (anyFailed || bridge.isSwitchShowPending()) 240L else 300L
-                val verifyTask = Runnable {
-                    pendingTileVerifyRunnable = null
-                    if (!stageManagerEnabled || isDeviceLocked) return@Runnable
-                    val latestActive = registry.getActiveStage() ?: return@Runnable
-                    val latestRegularIds = latestActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
-                    if (latestActive.stageId != targetStageId || latestRegularIds != expectedTaskIds) return@Runnable
-
-                    val liveMap = bridge.queryLiveRunningTasks().associateBy { it.taskId }
-                    val verifyColumns = bridge.computeMultiColumnBounds(
-                        count = count,
-                        stripVisible = !recentController.isHiddenByUserSetting,
-                    )
-                    var repaired = 0
-                    expectedTaskIds.forEachIndexed { idx, tid ->
-                        val targetB = verifyColumns.getOrNull(idx) ?: return@forEachIndexed
-                        val liveInfo = liveMap[tid]
-                        if (liveInfo == null || !isTaskFrameConverged(liveInfo, targetB)) {
-                            bridge.adjustFlexibleTaskFrame(tid, targetB, 1.0f)
-                            repaired++
-                        }
-                    }
-                    if (repaired > 0) {
-                        HookGuard.info("STAGE.TILE_VERIFY_REPAIR count=$count repaired=$repaired tasks=$expectedTaskIds")
-                    }
+                val firstVerifyDelayMs = if (anyFailed || bridge.isSwitchShowPending()) {
+                    TILE_VERIFY_RETRY_MS
+                } else {
+                    TILE_VERIFY_SETTLED_MS
                 }
-                pendingTileVerifyRunnable = verifyTask
-                mainHandler.postDelayed(verifyTask, verifyDelayMs)
+                scheduleTileVerifyPass(
+                    targetStageId = targetStageId,
+                    expectedTaskIds = expectedTaskIds,
+                    targetsProvider = { computeMultiColumnTargetMap(expectedTaskIds) },
+                    markConvergedWhenDone = true,
+                    delayMs = firstVerifyDelayMs,
+                    attempt = 1,
+                )
             }
             pendingTileRunnable = tileTask
             mainHandler.postDelayed(tileTask, initialDelayMs)
         } else {
             // 4+ unlimited windows: keep existing windows intact and place the newly merged window
             // neatly cascaded inside Main Stage so users can arrange unlimited windows freely.
+            stagesNeedingTileConverge.remove(targetStageId)
             val newest = regularTasks.lastOrNull() ?: return
-            val cols = bridge.computeMultiColumnBounds(
-                count = 2,
-                stripVisible = !recentController.isHiddenByUserSetting,
-            )
-            val base = cols.getOrNull((count - 1) % cols.size) ?: return
-            val cascadeStep = ((count - 3) % 5) * 44
-            val cascaded = WindowBounds(
-                left = (base.left + cascadeStep).coerceAtMost(base.right - 420),
-                top = (base.top + cascadeStep).coerceAtMost(base.bottom - 420),
-                right = base.right,
-                bottom = base.bottom,
-            )
             val cascadeTask = Runnable {
                 pendingTileRunnable = null
                 if (!stageManagerEnabled || isDeviceLocked) return@Runnable
                 val curActive = registry.getActiveStage() ?: return@Runnable
                 val curRegularIds = curActive.tasks.filterNot { it.isMiniFloating }.map { it.taskId }
                 if (curActive.stageId != targetStageId || curRegularIds != expectedTaskIds) return@Runnable
-                bridge.adjustFlexibleTaskFrame(newest.taskId, cascaded, 1.0f)
-                HookGuard.info("STAGE.CASCADE_LAYOUT count=$count newest=${newest.taskId} bounds=$cascaded")
+                val cascaded = computeCascadeBounds(count) ?: return@Runnable
+                val ok = bridge.adjustFlexibleTaskFrame(newest.taskId, cascaded, 1.0f)
+                HookGuard.info("STAGE.CASCADE_LAYOUT count=$count newest=${newest.taskId} bounds=$cascaded ok=$ok")
+                scheduleTileVerifyPass(
+                    targetStageId = targetStageId,
+                    expectedTaskIds = expectedTaskIds,
+                    targetsProvider = {
+                        computeCascadeBounds(count)?.let { mapOf(newest.taskId to it) } ?: emptyMap()
+                    },
+                    markConvergedWhenDone = false,
+                    delayMs = if (ok) TILE_VERIFY_SETTLED_MS else TILE_VERIFY_RETRY_MS,
+                    attempt = 1,
+                )
             }
             pendingTileRunnable = cascadeTask
             mainHandler.postDelayed(cascadeTask, initialDelayMs)
@@ -1465,4 +1538,8 @@ object StageNativeRuntime {
 
     fun isTaskFocused(taskInfo: ActivityManager.RunningTaskInfo): Boolean =
         runCatching { XposedHelpers.getBooleanField(taskInfo, "isFocused") }.getOrDefault(false)
+
+    private const val TILE_VERIFY_SETTLED_MS = 300L
+    private const val TILE_VERIFY_RETRY_MS = 200L
+    private const val MAX_TILE_VERIFY_ATTEMPTS = 6
 }

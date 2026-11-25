@@ -716,12 +716,26 @@ object SystemServerFlexibleHook {
             },
         )
 
-        // 2. Allow wide stage bounds during stagelab.force_adjust and persist unless KEY_SKIP_PERSIST is set
+        // 2. Allow wide stage bounds during stagelab.force_adjust, recover leaked changing flags once transitions settle,
+        //    and persist manual geometry unless KEY_SKIP_PERSIST is set
         OplusCompatAdapter.hookMethodAny(
             probeKey = "sys.flexible.adjustTask",
             cls = cls,
             nameCandidates = listOf("adjustFlexibleTask"),
             hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!isEnabled() || allowWideStageRect.get() != true) return
+                    val bundle = param.args.firstOrNull() as? Bundle ?: return
+                    if (!bundle.getBoolean(KEY_FORCE_ADJUST, false)) return
+                    val taskId = bundle.getInt("androidx.activity.LaunchFlexibleTaskId", -1)
+                    if (taskId > 0) {
+                        val taskObj = findTaskById(param.thisObject, taskId)
+                        if (taskObj != null) {
+                            clearStaleFlexibleTaskChangingIfIdle(param.thisObject, taskObj, "force_adjust")
+                        }
+                    }
+                }
+
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val wasForced = allowWideStageRect.get() == true
                     val skipPersist = skipPersistOnAdjust.get() == true
@@ -735,6 +749,19 @@ object SystemServerFlexibleHook {
                             }
                         }
                     }
+                }
+            },
+        )
+        OplusCompatAdapter.hookMethodAny(
+            probeKey = "sys.flexible.startChangeAnim",
+            cls = cls,
+            nameCandidates = listOf("startChangeAnim"),
+            hook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!isEnabled()) return
+                    val taskObj = param.args.firstOrNull() ?: return
+                    if (!taskObj.javaClass.name.endsWith(".Task")) return
+                    scheduleStaleChangingCleanup(param.thisObject, taskObj, attempt = 1)
                 }
             },
         )
@@ -1236,6 +1263,91 @@ object SystemServerFlexibleHook {
             return dm.widthPixels to dm.heightPixels
         }
         return 2520 to 1680
+    }
+
+    private fun findTaskById(controller: Any, taskId: Int): Any? {
+        return runCatching {
+            val atms = XposedHelpers.getObjectField(controller, "mAtms") ?: return null
+            val rwc = XposedHelpers.getObjectField(atms, "mRootWindowContainer") ?: return null
+            val globalLock = XposedHelpers.getObjectField(atms, "mGlobalLock")
+            if (globalLock != null) {
+                synchronized(globalLock) {
+                    XposedHelpers.callMethod(rwc, "anyTaskForId", taskId, 0)
+                }
+            } else {
+                XposedHelpers.callMethod(rwc, "anyTaskForId", taskId, 0)
+            }
+        }.getOrNull()
+    }
+
+    private fun scheduleStaleChangingCleanup(controller: Any, taskObj: Any, attempt: Int) {
+        mainHandler.postDelayed({
+            if (!isEnabled()) return@postDelayed
+            val stillBusy = clearStaleFlexibleTaskChangingIfIdle(
+                controller = controller,
+                taskObj = taskObj,
+                reason = "startChangeAnim_$attempt",
+            )
+            if (stillBusy && attempt < 3) {
+                scheduleStaleChangingCleanup(controller, taskObj, attempt + 1)
+            }
+        }, 650L)
+    }
+
+    /**
+     * ColorOS `FlexibleTaskController.startChangeAnim` sets `mIsFlexibleTaskChanging=true` (often with
+     * `customTransitionType=256`) before checking if a transition change actually collects the task.
+     * For portrait/trampoline apps like Reddit, bounds don't change so no transition ever clears that flag,
+     * leaving the task permanently locked against `adjustFlexibleTask` and finger drags.
+     *
+     * @return `true` if a real transition/animation/drag is still active on [taskObj] (caller may retry).
+     */
+    private fun clearStaleFlexibleTaskChangingIfIdle(
+        controller: Any,
+        taskObj: Any,
+        reason: String,
+    ): Boolean {
+        return runCatching {
+            val atms = XposedHelpers.getObjectField(controller, "mAtms") ?: return false
+            val globalLock = XposedHelpers.getObjectField(atms, "mGlobalLock") ?: return false
+            synchronized(globalLock) {
+                val attached = runCatching {
+                    XposedHelpers.callMethod(taskObj, "isAttached") as? Boolean
+                }.getOrNull() ?: true
+                if (!attached) return false
+                val wrapper = runCatching { XposedHelpers.callMethod(taskObj, "getWrapper") }.getOrNull() ?: return false
+                val extImpl = runCatching { XposedHelpers.callMethod(wrapper, "getExtImpl") }.getOrNull() ?: return false
+                if (!callBool(extImpl, "isFlexibleTaskChanging")) return false
+
+                val tc = runCatching { XposedHelpers.getObjectField(taskObj, "mTransitionController") }.getOrNull()
+                val animator = runCatching { XposedHelpers.getObjectField(controller, "mAnimator") }.getOrNull()
+                if (
+                    callBool(tc, "inTransition", taskObj) ||
+                    callBool(animator, "isAnimRunning") ||
+                    callBool(extImpl, "isFlexibleTaskIsScaleHanding") ||
+                    callBool(extImpl, "isReboundsAnimaing") ||
+                    callBool(controller, "isFlexibleAndStartDraging", taskObj)
+                ) {
+                    return true
+                }
+
+                XposedHelpers.callMethod(extImpl, "setFlexibleTaskChanging", false)
+                val customType = runCatching {
+                    XposedHelpers.callMethod(extImpl, "getFlexibleCustomTransitionType") as? Int
+                }.getOrNull() ?: 0
+                if (customType != 0) {
+                    runCatching { XposedHelpers.callMethod(extImpl, "removeFlexibleCustomTransitionType", customType) }
+                }
+                val tid = runCatching { XposedHelpers.getIntField(taskObj, "mTaskId") }.getOrDefault(-1)
+                HookGuard.info("SYS.CLEAR_STALE_CHANGING task=$tid customType=$customType reason=$reason")
+                false
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun callBool(target: Any?, method: String, vararg args: Any?): Boolean {
+        if (target == null) return false
+        return runCatching { XposedHelpers.callMethod(target, method, *args) as? Boolean }.getOrNull() == true
     }
 
     private fun isIgnoredSystemPkg(pkg: String): Boolean {
